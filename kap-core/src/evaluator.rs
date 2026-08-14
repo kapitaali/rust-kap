@@ -136,6 +136,9 @@ impl Engine {
                 left,
                 right,
             } => self.eval_apply(fn_expr, left, right, env),
+            Instr::Derived { .. } => Err(AplError::runtime(
+                "derived function used without an argument".into(),
+            )),
         }
     }
 
@@ -168,6 +171,22 @@ impl Engine {
         };
         if let Some((params, body)) = lambda {
             return self.apply_user_fn(&params, &body, left, right, env);
+        }
+        // --- Derived functions from adverbs (e.g. `+/`, `×¨`) ---
+        // `fn_expr` is an `Instr::Derived { func, op }`; `op` is the adverb name (`/`,
+        // `\`, `¨`) and `func` is the function operand. `left`/`right` are the data
+        // arguments (dyadic each has both; reduce/scan/each usually just `right`).
+        if let Instr::Derived { func, op } = fn_expr {
+            let adv_name = match op.as_ref() {
+                Instr::Symbol { name, .. } => name.clone(),
+                _ => return Err(AplError::runtime("adverb must be a symbol".into())),
+            };
+            return match adv_name.as_str() {
+                "/" | "reduce" => self.adverb_reduce(func, left, right, env),
+                "\\" | "scan" => self.adverb_scan(func, left, right, env),
+                "¨" | "each" => self.adverb_each(func, left, right, env),
+                other => Err(AplError::runtime(format!("unknown adverb: {}", other))),
+            };
         }
         let name = match fn_name {
             Some(n) => n,
@@ -214,8 +233,27 @@ impl Engine {
             "↓" => self.drop(left_val, right_val),
             "⊂" => self.enclose(right_val),
             // --- more builtins (Phase 6) ---
-            "⌈" | "ceil" => self.scalar1(right_val, |x| x.ceil(), "⌈"),
-            "⌊" | "floor" => self.scalar1(right_val, |x| x.floor(), "⌊"),
+            "⌈" | "ceil" => match left_val {
+                None => self.scalar1(right_val, |x| x.ceil(), "⌈"),
+                Some(_) => self.num2(left_val, right_val, |a, b| {
+                    match a.numeric_cmp(&b) {
+                        Ok(Ordering::Greater) => a.clone(),
+                        Ok(_) => b.clone(),
+                        // Mismatched numeric kinds: fall back to the right operand.
+                        Err(_) => b.clone(),
+                    }
+                }, "⌈"),
+            },
+            "⌊" | "floor" => match left_val {
+                None => self.scalar1(right_val, |x| x.floor(), "⌊"),
+                Some(_) => self.num2(left_val, right_val, |a, b| {
+                    match a.numeric_cmp(&b) {
+                        Ok(Ordering::Less) => a.clone(),
+                        Ok(_) => b.clone(),
+                        Err(_) => b.clone(),
+                    }
+                }, "⌊"),
+            },
             "|" | "mod" => self.num2(left_val, right_val, |a, b| a.modulo(b), "|"),
             "*" | "×" => match left_val {
                 None => self.scalar1(right_val, |x| x.exp(), "*"),
@@ -533,6 +571,150 @@ impl Engine {
             vec![1],
             ArrayData::Nested(vec![right_val]),
         )))))
+    }
+
+    /// Convert an evaluated `APLValue` back into an `Instr` so we can re-dispatch a
+    /// function application via `eval_apply` (used by adverbs). Handles scalars and
+    /// nested arrays; user functions are not inlineable (error if hit).
+    fn apl_to_instr(&self, v: &APLValue) -> Result<Instr, AplError> {
+        match v {
+            APLValue::Number(n) => Ok(Instr::Literal(LiteralValue::Number(n.clone()))),
+            APLValue::Char(c) => Ok(Instr::Literal(LiteralValue::Char(*c))),
+            APLValue::Str(s) => Ok(Instr::Literal(LiteralValue::Str(s.clone()))),
+            APLValue::Array(a) => {
+                let mut elems = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    elems.push(self.apl_to_instr(e.as_ref())?);
+                }
+                Ok(Instr::Array { elements: elems })
+            }
+            APLValue::UserFn { .. } => {
+                Err(AplError::runtime("cannot use a function as an array element".into()))
+            }
+            APLValue::Null => Ok(Instr::Literal(LiteralValue::Str(String::new()))),
+            APLValue::Deferred { .. } => {
+                Err(AplError::runtime("cannot use a deferred value as an array element".into()))
+            }
+        }
+    }
+
+    /// Apply the function described by `fn_instr` to `left`/`right` values, by building
+    /// an `Instr::Apply` and recursing into `eval_apply`. `left` is optional (monadic).
+    fn apply_fn_instr(
+        &self,
+        fn_instr: &Instr,
+        left: Option<&AplRef<APLValue>>,
+        right: &AplRef<APLValue>,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let left_instr = match left {
+            Some(v) => Some(Box::new(self.apl_to_instr(v)?)),
+            None => None,
+        };
+        let right_instr = Box::new(self.apl_to_instr(right)?);
+        self.eval_apply(fn_instr, &left_instr, &right_instr, env)
+    }
+
+    /// Reduce `f/array`: fold left over the elements (`((a f b) f c) ...`).
+    fn adverb_reduce(
+        &self,
+        fn_instr: &Instr,
+        left: &Option<Box<Instr>>,
+        right: &Box<Instr>,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        if left.is_some() {
+            return Err(AplError::runtime("reduce / is monadic (use f/array)".into()));
+        }
+        let data = self.eval_instr(right, env)?.force(self)?;
+        let elems = self.flat_elements(&data);
+        match elems.split_first() {
+            Some((first, rest)) => {
+                let mut acc = first.clone();
+                for e in rest {
+                    acc = self.apply_fn_instr(fn_instr, Some(&acc), e, env)?;
+                }
+                Ok(acc)
+            }
+            None => Err(AplError::runtime("reduce /: empty array".into())),
+        }
+    }
+
+    /// Scan `f\array`: like reduce but keep every intermediate accumulator
+    /// (`[a, a f b, (a f b) f c, ...]`).
+    fn adverb_scan(
+        &self,
+        fn_instr: &Instr,
+        left: &Option<Box<Instr>>,
+        right: &Box<Instr>,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        if left.is_some() {
+            return Err(AplError::runtime("scan \\ is monadic (use f\\array)".into()));
+        }
+        let data = self.eval_instr(right, env)?.force(self)?;
+        let elems = self.flat_elements(&data);
+        match elems.split_first() {
+            Some((first, rest)) => {
+                let mut acc = first.clone();
+                let mut out = vec![acc.clone()];
+                for e in rest {
+                    acc = self.apply_fn_instr(fn_instr, Some(&acc), e, env)?;
+                    out.push(acc.clone());
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![out.len()],
+                    ArrayData::Nested(out),
+                )))))
+            }
+            None => Err(AplError::runtime("scan \\: empty array".into())),
+        }
+    }
+
+    /// Each `f¨array` (monadic) or `a f¨ b` (dyadic, element-wise with scalar extension).
+    fn adverb_each(
+        &self,
+        fn_instr: &Instr,
+        left: &Option<Box<Instr>>,
+        right: &Box<Instr>,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let right_val = self.eval_instr(right, env)?.force(self)?;
+        let left_val = match left {
+            Some(l) => Some(self.eval_instr(l, env)?.force(self)?),
+            None => None,
+        };
+        let right_elems = self.flat_elements(&right_val);
+        let mut out = Vec::with_capacity(right_elems.len());
+        match left_val {
+            // Dyadic each: apply f to (left_element, right_element) for each right element.
+            Some(lv) => {
+                let left_elems = self.flat_elements(&lv);
+                for (i, re) in right_elems.iter().enumerate() {
+                    let le = left_elems.get(i).cloned().unwrap_or_else(|| lv.clone());
+                    out.push(self.apply_fn_instr(fn_instr, Some(&le), re, env)?);
+                }
+            }
+            // Monadic each: apply f to each right element.
+            None => {
+                for e in &right_elems {
+                    out.push(self.apply_fn_instr(fn_instr, None, e, env)?);
+                }
+            }
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![out.len()],
+            ArrayData::Nested(out),
+        )))))
+    }
+
+    /// Flatten a value into a list of element refs. Scalars become a 1-element list;
+    /// arrays become their elements (one level).
+    fn flat_elements(&self, v: &AplRef<APLValue>) -> Vec<AplRef<APLValue>> {
+        match v.as_ref() {
+            APLValue::Array(a) => a.elements(),
+            other => vec![Rc::new(other.clone())],
+        }
     }
 
     /// Apply a unary numeric function to a scalar, or element-wise to an array.
@@ -951,5 +1133,37 @@ mod tests {
         assert_eq!(eval("2 2 2 ⊥ 1 0 1"), "5");
         // 24 60 ⊤ 90 -> 1 hour 30 min
         assert_eq!(eval("24 60 ⊤ 90"), "[1 30]");
+    }
+
+    // --- Phase 7: adverbs (/ reduce, \ scan, ¨ each) ---
+
+    #[test]
+    fn eval_reduce() {
+        assert_eq!(eval("+/ 1 2 3 4"), "10");
+        assert_eq!(eval("×/ 1 2 3 4"), "24");
+        assert_eq!(eval("⌈/ 3 9 2 7"), "9");
+        assert_eq!(eval("⌊/ 3 9 2 7"), "2");
+    }
+
+    #[test]
+    fn eval_scan() {
+        assert_eq!(eval("+\\ 1 2 3 4"), "[1 3 6 10]");
+        assert_eq!(eval("×\\ 1 2 3 4"), "[1 2 6 24]");
+    }
+
+    #[test]
+    fn eval_each_monadic() {
+        assert_eq!(eval("⌈¨ 1.2 2.8 3.5"), "[2.0 3.0 4.0]");
+        assert_eq!(eval("~¨ 1 0 3"), "[0 1 0]");
+    }
+
+    #[test]
+    fn eval_each_dyadic() {
+        // element-wise: 2 ×¨ 3 4 5  -> [6 8 10]
+        assert_eq!(eval("2 ×¨ 3 4 5"), "[6 8 10]");
+        // scalar-extended left, vector right
+        assert_eq!(eval("1 2 3 +¨ 4 5 6"), "[5 7 9]");
+        // vector × vector each
+        assert_eq!(eval("1 2 3 ×¨ 4 5 6"), "[4 10 18]");
     }
 }

@@ -167,8 +167,17 @@ impl<'a> Parser<'a> {
                 Some(Token::Literal(LiteralValue::Symbol { name: nn, .. })) => Self::is_primitive_op(nn),
                 _ => false,
             };
+            let next_is_adverb = match &next {
+                Some(Token::Literal(LiteralValue::Symbol { name: nn, .. })) => {
+                    Self::is_adverb(nn)
+                }
+                _ => false,
+            };
             let do_monadic = if is_prim {
-                next_is_operand_not_fn || next_is_primitive
+                // A leading primitive followed by an adverb (`+/`, `×¨`, `⍟\`) is the
+                // *function-then-operator* form, NOT monadic application: it is a derived
+                // function `func op` applied to the following data.
+                (next_is_operand_not_fn || next_is_primitive) && !next_is_adverb
             } else {
                 next_is_operand_not_fn
             };
@@ -178,6 +187,20 @@ impl<'a> Parser<'a> {
                     fn_expr: Box::new(first),
                     left: None,
                     right: Box::new(operand),
+                });
+            }
+            // Function-then-adverb: `f/` `f¨` etc. Build a derived function `func op`
+            // and apply it to the following data operand.
+            if is_prim && next_is_adverb {
+                let op = self.parse_primary()?; // consume the adverb symbol
+                let data = self.parse_apply()?;
+                return Ok(Instr::Apply {
+                    fn_expr: Box::new(Instr::Derived {
+                        func: Box::new(first),
+                        op: Box::new(op),
+                    }),
+                    left: None,
+                    right: Box::new(data),
                 });
             }
             // Fall through: treat `first` as the LEFT operand of a following dyadic op.
@@ -243,6 +266,37 @@ impl<'a> Parser<'a> {
             }
             let fn_expr = self.parse_primary()?; // the operator (symbol or parenthesised)
             self.skip_newlines();
+            // Detect `func adverb` immediately after the operator (e.g. `×¨` in
+            // `2 ×¨ 3 4 5`): the operator is a function-primitive and the very next
+            // token is an adverb. Bind them into a derived function and apply the
+            // accumulated `left` data plus the following data to it (dyadic each).
+            let op_is_func = match &fn_expr {
+                Instr::Symbol { name, .. } => Self::is_primitive_op(name),
+                _ => false,
+            };
+            if op_is_func {
+                let next_is_adv = match self.peek() {
+                    Some(t) => match &t.token {
+                        Token::Literal(LiteralValue::Symbol { name: nn, .. }) => Self::is_adverb(nn),
+                        _ => false,
+                    },
+                    None => false,
+                };
+                if next_is_adv {
+                    let adv = self.parse_primary()?; // consume the adverb
+                    self.skip_newlines();
+                    let right = self.parse_apply()?;
+                    left = Instr::Apply {
+                        fn_expr: Box::new(Instr::Derived {
+                            func: Box::new(fn_expr),
+                            op: Box::new(adv),
+                        }),
+                        left: Some(Box::new(left)),
+                        right: Box::new(right),
+                    };
+                    continue;
+                }
+            }
             let right = self.parse_apply()?;
             left = Instr::Apply {
                 fn_expr: Box::new(fn_expr),
@@ -320,6 +374,12 @@ impl<'a> Parser<'a> {
                 | "↑" | "↓" | "⊂" | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥"
         )
+    }
+
+    /// Higher-order operators (adverbs) that take a *function* as one operand:
+    /// `/` reduce, `\` scan, `¨` each.
+    fn is_adverb(name: &str) -> bool {
+        matches!(name, "/" | "reduce" | "\\" | "scan" | "¨" | "each")
     }
 
     /// term := primary  (stranding handled inside parse_primary's caller via runs)

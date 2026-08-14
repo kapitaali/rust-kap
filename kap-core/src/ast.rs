@@ -33,6 +33,10 @@ pub enum Instr {
     /// A lambda / anonymous function: `λ(params) body`. `params` are argument names;
     /// `body` is the unevaluated expression. Evaluated (Phase 4) into an `APLValue::UserFn`.
     Lambda { params: Vec<String>, body: Box<Instr> },
+    /// A *derived function* from an adverb: `func op` (e.g. `+/`, `×¨`). `func` is the
+    /// function operand, `op` is the adverb (`/`, `\`, `¨`). The evaluator resolves `op`
+    /// to reduce/scan/each and applies `func` to the data arguments.
+    Derived { func: Box<Instr>, op: Box<Instr> },
     /// An empty array / nil.
     Empty,
 }

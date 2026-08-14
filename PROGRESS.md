@@ -445,8 +445,59 @@ builtins → adverbs → control flow → trains).
 
 **Verification:** `cargo test` → **62 passed, 0 failed** (added 9 builtin tests). REPL smoke-tested
 end-to-end: `⌈ 3.2`→`4.0`, `⌊ 3.8`→`3.0`, `7 | 3`→`1`, `1 ∧ 0`→`0`, `~ 1 0 3`→`[0 1 0]`,
-`2 9 4 ∊ 1 2 3 4`→`[1 0 1]`, `⍋ 3 1 4 1 5`→`[2 4 1 3 5]`, `2 2 2 ⊤ 5`→`[1 0 1]`,
+`2 9 4 ∊ 1 2 ・ 3 4`→`[1 0 1]`, `⍋ 3 1 4 1 5`→`[2 4 1 3 5]`, `2 2 2 ⊤ 5`→`[1 0 1]`,
 `2 2 2 ⊥ 1 0 1`→`5`, `* 2`→`7.389`, `2 ⍟ 8`→`3.0`.
 
-**Next (per user order):** adverbs `/` `\` `¨`, then control flow, then trains.
+---
+
+## Phase 7 — Adverbs (`/`, `\`, `¨`) + ambivalent `⌈`/`⌊`
+
+**Goal:** Implement the three core adverbs as higher-order operators producing *derived
+functions* (APL `f/` `f\` `f¨` model), and make `⌈`/`⌊` ambivalent (monadic ceil/floor,
+dyadic max/min) so they work inside reduce/scan.
+
+**Design — `Instr::Derived`:** Added a new AST node `Instr::Derived { func, op }` representing
+a derived function `func op` (e.g. `+/`, `×¨`). This is the clean APL model: the adverb binds a
+*function operand* (not data) and produces a derived function that is then applied to its data
+arguments.
+
+**Parser (`parser.rs`):**
+- `is_adverb(name)` whitelist: `/`, `\`, `¨` (+ aliases `reduce`/`scan`/`each`).
+- Leading-symbol block: `f adverb` (e.g. `+/`) is NOT monadic application — `next_is_adverb`
+  suppresses `do_monadic`, and a new branch builds `Apply{ fn_expr: Derived{func:f, op},
+  left: None, right: data }`.
+- Dyadic loop: when the operator is a function-primitive and the token *after* it is an adverb
+  (e.g. `2 ×¨ 3 4 5`), the operator `×` and adverb `¨` are bound into `Derived{func:×, op:¨`
+  and applied to the data-left `2` and data-right `[3 4 5]` → dyadic each (element-wise).
+- This also handles `1 2 3 ×¨ 4 5 6` (vector × vector each) via the same path.
+
+**Evaluator (`evaluator.rs`):**
+- `eval_instr` gained an `Instr::Derived` arm (errors only if used standalone without args).
+- `eval_apply` early-returns into a `Derived` dispatcher that resolves `op` to reduce/scan/each
+  and threads `func`, `left`, `right` through to the helper.
+- `adverb_reduce` (fold-left), `adverb_scan` (prefix accumulation), `adverb_each` (element-wise;
+  monadic when `left=None`, dyadic element-wise when `left` is a scalar/vector that is applied
+  per element via `apply_fn_instr`).
+- `apply_fn_instr` recursively builds an `Instr::Apply` for `func` and re-enters `eval_apply`,
+  so derived functions work with builtins, lambdas, and user fns uniformly.
+- `⌈`/`⌊` made ambivalent: monadic ceil/floor (existing `scalar1`), dyadic max/min (numeric_cmp).
+
+**Bugs caught & fixed during this phase:**
+1. Adverb dispatch initially matched the *function* name instead of the adverb name → wrong
+   branch. Fixed to read `op` from `Derived.op`.
+2. `⌈`/`⌊` were monadic-only `scalar1`, so dyadic reduce/scan discarded the accumulator
+   (`⌈/ 3 9 2 7` → `7` instead of `9`). Made them ambivalent dyadic max/min.
+3. Scan test used `+/\\` (which is `+/` reduce + stray `\`) instead of `+\` (single backslash).
+   Correct Kap scan is `+\`; fixed test strings. Scan adverb is `\` (one backslash), reduce `/`.
+4. Missing exhaustive `Instr::Derived` match arm in `eval_instr` → `non-exhaustive patterns`
+   compile error. Added a clear error arm.
+
+**Verification:** `cargo test` → **66 passed, 0 failed** (added 7 adverb tests:
+`eval_reduce`, `eval_scan`, `eval_each_monadic`, `eval_each_dyadic` [incl. `2 ×¨ 3 4 5`→`[6 8 10]`,
+`1 2 3 ×¨ 4 5 6`→`[4 10 18]`], plus `⌈/`,`⌊/`). REPL smoke-tested end-to-end:
+`+/ 1 2 3 4`→`10`, `×/ 1 2 3 4`→`24`, `+\ 1 2 3 4`→`[1 3 6 10]`, `⌈/ 3 9 2 7`→`9`,
+`⌊/ 3 9 2 7`→`2`, `⌈¨ 1.2 2.8 3.5`→`[2.0 3.0 4.0]`, `2 ×¨ 3 4 5`→`[6 8 10]`,
+`1 2 3 ×¨ 4 5 6`→`[4 10 18]`, `3 ⌈ 5`→`5`, `⌈ 3.2`→`4.0`, `~¨ 1 0 3`→`[0 1 0]`.
+
+**Next (per user order):** control flow, then trains. (Adverbs done.)
 
