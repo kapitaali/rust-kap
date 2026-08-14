@@ -499,5 +499,32 @@ arguments.
 `⌊/ 3 9 2 7`→`2`, `⌈¨ 1.2 2.8 3.5`→`[2.0 3.0 4.0]`, `2 ×¨ 3 4 5`→`[6 8 10]`,
 `1 2 3 ×¨ 4 5 6`→`[4 10 18]`, `3 ⌈ 5`→`5`, `⌈ 3.2`→`4.0`, `~¨ 1 0 3`→`[0 1 0]`.
 
-**Next (per user order):** control flow, then trains. (Adverbs done.)
+**Note on the earlier "18 failed tests + evaluator thread panics" report:** could NOT be
+reproduced — `cargo test` (serial and parallel) returns **66 passed, 0 failed** and the
+evaluator has no threading (only test-only `panic!` asserts in helpers). It was a stale-build /
+transient artifact, already resolved by the clean rebuild + commit `aff606b`. No code was changed
+on the strength of that report.
+
+---
+
+## Control-flow design rule (Phase 8, decided before implementation)
+
+**NO APL colon-prefix reserved words.** Use Kap-faithful plain keywords. Confirmed against the
+**local** authoritative reference `~/Apps/array/docs/reference.asciidoc` (Flow control section,
+~lines 2423–2517). The reference has **no** `:If`/`:Else`/`:EndIf`/`:While`/`:For`. The only
+colon-prefixed things in Kap are *exception type symbols* (e.g. `:foo throw "test"`), a different
+mechanism.
+
+Kap's actual control-flow syntax (to implement):
+- `if (expr) { thenBlock }`
+- `if (expr) { thenBlock } else { elseBlock }`
+- `when { (cond){ body } … (1){ default } }`  (multi-clause if)
+- `while (expr) { body }`
+- `→ value` monadic return; `cond → value` dyadic conditional return (already a builtin symbol)
+
+Blocks `{ }` are already lexed/parsed (lambda / `∇` bodies). The real structural work is treating
+`if`/`while`/`when` as *syntactic keywords* (not symbols) and evaluating their bodies as statement
+sequences in a block context — not inside the pure expression grammar.
+
+**Next (per user order):** control flow (Phase 8), then trains.
 
