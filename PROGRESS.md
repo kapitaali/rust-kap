@@ -348,4 +348,42 @@ clean "expected ')'" error.
 **Verification:** `cargo test` (whole workspace) → **47 passed, 0 failed** (number 10 / array
 3 / lexer 10 / parser 6 / evaluator 18). No OOM / no SIGKILL.
 
+---
+
+## 2026-08-14 — Phase 5: includeable crate (two modes) + REPL
+
+User wanted `kap-core` usable as an **embeddable crate** in addition to the REPL, with two
+programmatic modes:
+
+**Mode 1 — stateless eval of a Kap expression string.** `Engine::eval_string(src)` returns
+`Result<Rc<APLValue>, AplError>`; a fresh `Environment` is created per call, so assignments
+inside `src` don't leak. Added `Engine::eval_to_string` convenience.
+
+**Mode 2 — persistent session.** `kap_core::Session` (new `session.rs`, re-exported at the
+crate root) holds one `Engine` + shared `Rc<Environment>`. `Session::eval(src)` runs in that
+env, so variables / user lambdas persist across calls like the REPL. `Session::new()`,
+`eval`, `eval_to_string`, `len`, `is_empty`.
+
+Both leverage the *already-existing* `Rc<RefCell<HashMap>>` `Environment` — the only prior
+gap was that `eval_string` built a throwaway env per call. `Session` just keeps one alive.
+~50 lines of new logic, no engine changes needed for persistence.
+
+**`kap-cli` becomes a real client** (was a stub): `kap` → REPL backed by `Session` (with
+multi-line continuation on trailing backtick `` ` `` or unbalanced `()[]{}`); `kap file.kap`
+→ batch-eval, print the last statement's value, exit non-zero on parse error.
+
+**Bug fixed (regression from the "accept any Symbol as dyadic operator" change in Phase 4):**
+whole-string multi-statement parse (`parse()`) wrongly treated the leading symbol of a
+*next* statement as the dyadic operator of the previous one (`a ← 3 \n b ← 4` parsed as
+`(a ← 3) b` → "unexpected token in primary"). Added `Parser::at_statement_boundary` and
+check it **before** skipping newlines in the monadic, strand, and dyadic loops, so a top-level
+newline/⋄ separates statements. `a + b * 2` on its own line is not the left operand of the
+next line's operator. (Inside parens/brackets newlines are still consumed by `parse_primary`.)
+
+**Verification:** `cargo test` → **51 passed, 0 failed** (added 4 Session tests: persistent
+vars, lambda sees globals, stateless non-persistence, mode-1 format). REPL + file mode
+verified end-to-end with state persistence. No OOM.
+
+**Requirement noted (still open):** the crate must stay embeddable (the two modes above) in
+addition to the REPL — confirmed satisfied; keep both paths working in later phases.
 
