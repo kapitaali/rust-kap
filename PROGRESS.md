@@ -552,3 +552,28 @@ plumbing; lambdas/`∇` don't yet support early return. Trains (roadmap item 4) 
 **Next (per user order):** trains (the last roadmap item). After that: implement `→` return,
 `for`/`repeat`, and richer error handling (`throw`/`catch`) if desired.
 
+---
+
+## Reference: Kotlin Kap Unit Test Sources (`~/Apps/array/`)
+
+For reference during implementation and test parity validation, the reference Kotlin implementation unit tests are located in:
+
+### Core Engine Tests (`array/src/commonTest/kotlin/com/dhsdevelopments/kap/`)
+- **Control flow & Syntax**: `FlowControlTest.kt`, `SyntaxTest.kt`, `ScopeTest.kt`, `ReturnTest.kt`, `EvaluationOrderTest.kt`, `ComplexExpressionsTest.kt`, `CaseTest.kt`, `ThrowNativeTest.kt`, `ExceptionsTest.kt`
+- **Operators, Functions & Trains**: `OperatorsTest.kt`, `ComposeTest.kt`, `EvalLambdaFuncTest.kt`, `CustomFunctionTest.kt`, `MultiArgumentAPLFunctionTest.kt`, `FunctionCallParenTest.kt`, `ForEachTest.kt`, `OverAPLTest.kt`, `ObverseTest.kt`, `InverseFnTest.kt`
+- **Adverbs & Reductions**: `ReduceTest.kt`, `ScanTest.kt`, `OuterJoinTest.kt`
+- **Array Operations**: `ReshapeTest.kt`, `TransposeTest.kt`, `ConcatenateTest.kt`, `TakeTest.kt`, `DiscloseTest.kt`, `EncloseTest.kt`, `EnlistTest.kt`, `PickTest.kt`, `RangeTest.kt`, `IotaTest.kt`, `WhereTest.kt`, `SelectElementsTest.kt`, `PartitionedEncloseTest.kt`, `RankTest.kt`, `RankAdjustTest.kt`, `DimensionTest.kt`, `SpecialisedArrayTest.kt`, `BitArraysTest.kt`
+- **Math, Numbers & Arithmetic**: `NumbersTest.kt`, `NumberTypesTest.kt`, `ScalarTest.kt`, `PrimeTest.kt`, `PowerTest.kt`, `GcdAndLcmTest.kt`, `GammaTest.kt`, `TrigFunctionsTest.kt`, `KapBigintTest.kt`, `FactorTest.kt`, `FormatNumbersTest.kt`, `FmtRationalTest.kt`, `RationalRenderTest.kt`, `StandardLibMathTest.kt`
+- **Logic & Comparisons**: `LogicTest.kt`, `BooleanTest.kt`, `CompareTest.kt`, `SpecialisedComparisonTest.kt`, `BitwiseTest.kt`
+- **Strings, Chars & Regex**: `StringsTest.kt`, `CharTypesTest.kt`, `UnicodeTest.kt`, `TrimTest.kt`, `RegexpTest.kt`, `ReformatLinesTest.kt`
+- **Symbols, Variables & Assignment**: `AssignmentTest.kt`, `ModifiedAssignmentTest.kt`, `IndexedAssigmentTest.kt`, `DynAssignTest.kt`, `SymbolTest.kt`, `VariableStorageTest.kt`, `NamespaceTest.kt`
+- **Searching, Sorting & Grouping**: `SortTest.kt`, `FindTest.kt`, `FindIndexTest.kt`, `MemberTest.kt`, `UniqueTest.kt`, `UniqueMaskTest.kt`, `GroupTest.kt`, `ClassifyTest.kt`, `IntersectionTest.kt`
+- **Objects, Maps & Types**: `ObjectsTest.kt`, `MapTest.kt`, `KotlinMapTest.kt`, `TypesTest.kt`, `TypeBuilderTest.kt`, `MemberDereferenceTest.kt`, `MethodCallTest.kt`
+- **Parsing & Tokenizing**: `TokenGeneratorTest.kt`, `ParserCallbackTest.kt`, `ParseOnlyEngineTest.kt`, `EvalInstrTest.kt`
+
+### Submodule Tests
+- **Multi-precision Math & Bignum**: `mpbignum/src/commonTest/kotlin/com/dhsdevelopments/mpbignum/` (`AddTest.kt`, `MulTest.kt`, `DivTest.kt`, `RationalTest.kt`, `IsqrtTest.kt`, `PowerTest.kt`, `GcdTest.kt`, etc.), `mpmaths/src/commonTest/kotlin/` (`FactoriseTest.kt`, `KotlinComplexTest.kt`)
+- **Test Harness Base**: `test-tools/src/commonMain/kotlin/com/dhsdevelopments/kap/APLTest.kt`
+- **Platform-specific**: `array/src/jvmTest/` (JVM interop/IO/XML), `array/src/linuxTest/` (Linux native), `array/src/jsTest/` (JS engine/regex)
+
+
