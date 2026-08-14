@@ -1,0 +1,12 @@
+[package]
+name = "kap-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kap"
+path = "src/main.rs"
+
+[dependencies]
+kap-core = { path = "../kap-core" }

@@ -1,0 +1,29 @@
+⍝ NumbersTest.kap — port of array/.../commonTest/.../NumbersTest.kt
+⍝ Re-expresses the Kotlin @Test cases as Kap test(...) blocks. Strategy §9b D5 / §10.
+⍝ Each case asserts OBSERVABLE behaviour (value equality via ≡), not internal storage.
+⍝ (The Kotlin assert1DArray/InnerBigIntOrLong helpers are Kotlin and cannot run here.)
+
+⍝ monadicAdd: +1 2 ¯6 2J7 2J¯7  ==  1 2 ¯6 2J7 2J¯7
+test "monadicAdd" {
+  assertEqual (+1 2 ¯6 2J7 2J¯7) (1 2 ¯6 2J7 2J¯7)
+}
+
+⍝ monadicAddWithBigint: big integer literals remain big integers
+test "monadicAddWithBigint" {
+  assertEqual (+¯10000000000000000000000000000000 10000000000000000000000000000000)
+              (¯10000000000000000000000000000000 10000000000000000000000000000000)
+}
+
+⍝ addMixedTypes: Long + Double -> Double
+test "addMixedTypes0" {
+  assertEqual (1 1 + 1.2 3.4) (2.2 4.4)
+}
+test "addMixedTypes1" {
+  assertEqual (2.1 4.1 + 10 20) (12.1 24.1)
+}
+test "addMixedTypes2" {
+  assertEqual (2.1 + 10 20) (12.1 22.1)
+}
+test "addMixedTypes3" {
+  assertEqual (10 + 2.1 4.1) (12.1 14.1)
+}

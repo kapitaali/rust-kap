@@ -1,0 +1,64 @@
+namespace("graph")
+
+span ⇐ {
+	graph ← ⍺
+	recurse ⇐ {
+		⍵≡⍬ and →⍺
+		next ← graph[⍵] ∩¨ ⊂⍸⍺=¯2
+		back ← ⍵+0×next
+		tree ← {∊back}⍢((∊next)⊇) ⍺
+		tree recurse ∪∊next
+	}
+	(¯2+(⍳≢⍺)∊⍵) recurse ⍵
+}
+
+declare(:export span)
+
+stpath ⇐ {
+	tree ← ⍺
+	recurse ⇐ {
+		⍵<0 and →(⍵=¯2)↓⍺
+		(⍵,⍺) recurse ⍵⊃tree
+	}
+	⍬ recurse ⍵
+}
+
+declare(:export stpath)
+
+search ⇐ {
+	graph ← ⍺
+	pos ← ⍵
+	recurse ⇐ {
+		⍵≡⍬ and →⍺
+		adjv ← ⍵ ⊃¨ ⊂graph
+		next ← ∪(⊃,/adjv)~⍺
+		(⍺,next) recurse next
+	}
+	pos recurse pos
+}
+
+declare(:export search)
+
+listToMatrix ⇐ (⍉(⍳≢)⍛(∊⌻))
+matrixToList ⇐ (⍸¨ ⊂[1])
+linksToMatrix ⇐ {(⍳2⍴1+⌈/∊⍵) ∊ ⍵}
+matrixToLinks ⇐ ⍸
+linksToList ⇐ {(1+⌈/∊⍵)↑(↑¨⍵)⫇(↑↓)¨⍵}
+listToLinks ⇐ {,/ (⍳≢⍵) ,¨¨ ⍵}
+declare(:export (listToMatrix matrixToList linksToMatrix matrixToLinks linksToList listToLinks))
+
+jsonGraphToMatrix ⇐ {
+	edges ← ⊃ {⍵["source" "target"]}¨ ⍵.edges
+	linksToMatrix ⊂[1] =⍢, edges
+}
+
+declare(:export jsonGraphToMatrix)
+
+
+jsonGraphToRenderLinks ⇐ {
+	edges ← {⍵["source" "target" "relation"]}¨ ⍵.edges
+	names ← ({⊂(⊃⍵[0]) ⍵[1].label}⍤1) map:entries ⍵.nodes
+	names edges
+}
+
+declare(:export jsonGraphToRenderLinks)

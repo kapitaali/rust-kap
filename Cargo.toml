@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "kap-core",
+    "kap-stdlib",
+    "kap-cli",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+
+# Memory-capped dev profile. Full debug=2 debuginfo + parallel codegen was
+# OOM-killing the linker past 16 GB. Line-tables-only debug + serial codegen
+# keeps link memory small; tests still report pass/fail with line numbers.
+[profile.dev]
+codegen-units = 1
+incremental = false
+debug = 1
+split-debuginfo = "unpacked"
+
+[profile.test]
+inherits = "dev"

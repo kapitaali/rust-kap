@@ -1,0 +1,50 @@
+⍝ test.kap — Kap-native test framework for the Rust port.
+⍝ Loaded first by the kap-test runner (use "test/test.kap").
+⍝ Mirrors the assertion vocabulary of the Kotlin *Test.kt harness
+⍝ (assert1DArray / InnerBigIntOrLong / NearDouble / NearComplex), expressed in Kap
+⍝ so it runs against the real engine under test. Strategy §9b D5 / §10.
+⍝ Tests assert OBSERVABLE behaviour only.
+⍝
+⍝ Correct Kap semantics (docs/reference.asciidoc):
+⍝   - `throw` monadic -> exception type :error
+⍝   - `catch` is `F catch ((tag, fn), ...)`; handler gets (data, tag)
+⍝   - `if (c) {t} else {e}`
+
+⍝ ---- counters (read by the host from the TESTS summary line) ----
+testTotal ← 0
+testPass  ← 0
+testFail  ← 0
+
+⍝ fail if a and b are not tolerantly equal.
+∇ assertEqual(a;b) {
+  (~a≡b) : throw "assertEqual failed"
+}
+
+⍝ float/complex tolerance: |a-b| ≤ 10^-p
+∇ assertNear(a;b;p) {
+  |a-b > 10*-p : throw "assertNear failed"
+}
+
+⍝ expect the thunk to raise. If no error, throw (so the surrounding test fails).
+∇ assertThrows(label;thunk) {
+  r ← ⍞thunk catch ((:error, { data tag → "<<CAUGHT>>" }))
+  (r ≡ "<<CAUGHT>>") {} { throw "assertThrows failed: no error (" , label , ")" }
+}
+
+⍝ run one named case. Records pass/fail and prints a line.
+∇ test(name;thunk) {
+  testTotal ← testTotal + 1
+  r ← ⍞thunk catch ((:error, { data tag → "<<ERR>>" , data }))
+  (r[0] ≡ "<<ERR>>") {
+    testFail ← testFail + 1
+    ⎕ ← (name , ": FAIL: " , (⍕r[1]))
+  } else {
+    testPass ← testPass + 1
+    ⎕ ← (name , ": OK")
+  }
+}
+
+⍝ print the machine-readable summary line the host parses for the CI exit code.
+∇ testSummary() {
+  ⎕ ← ("TESTS total=" , (⍕testTotal) , " pass=" , (⍕testPass) , " fail=" , (⍕testFail))
+}

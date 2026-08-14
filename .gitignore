@@ -1,0 +1,6 @@
+# Rust build artifacts (large, regenerated on every build)
+/target
+
+# OS / editor cruft
+.DS_Store
+*.swp
