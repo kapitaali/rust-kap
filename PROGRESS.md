@@ -214,4 +214,49 @@
   This makes the Kap test harness (`kap-stdlib/test/*.kap`) executable. Watch for the
   stranding rule (`1 2 3` → vector) and lazy forcing of `if`/`while`/`and`/`or`.
 
+## [2026-08-14] PHASE 3 — evaluator + OOM/lexer debugging  [DONE]
+
+- **Done (`kap-core`):** `src/evaluator.rs`
+  - `Environment { symbols: HashMap, parent: AplRef<Environment> }` symbol table with
+    `lookup`/`assign` (child scopes shadow parent).
+  - `Engine::eval_string(src) -> Result<AplRef<APLValue>, AplError>`: tokenise → parse →
+    eval each statement; surfaces first parse error with position.
+  - `eval_instr` core loop: Literal/Char/Str/Symbol(lookup)/Empty/Array(build)/Assign/Apply.
+  - `APLValue::force` thunk forcing: `Deferred{instr,env}` evaluates lazily; non-deferred
+    values clone through (lazy model, D6).
+  - `eval_apply`: resolves the fn name (Symbol), forces left/right (monadic = right only),
+    dispatches by name. Starter verbs: `+` (add), `*` (multiply), `⍳`/`iota` (0..N-1),
+    `⍴`/`≢`/`tally` (element count), `⊃`/`first`, `←` (assign). `format_value` added to
+    `APLValue` (nested arrays render via `ArrayData::Nested`).
+  - `KapNumber::mul` added (mirrors `add`, with promotion rules + complex multiply).
+- **Memory fix (root cause of the OOM the user observed):** added a memory-capped dev/test
+  profile to `Cargo.toml` — `codegen-units = 1`, `debug = 1`, `opt-level = 0`,
+  `split-debuginfo = "unpacked"`, `incremental = false`. Slashed debug-build link memory
+  so `cargo test` no longer gets SIGKILLed mid-rebuild in this 16 GB box.
+- **Four genuine bugs found & fixed during the OOM investigation:**
+  1. **Lexer infinite loop (the 5 GB OOM).** In `tokenise`, the `is_symbol_start` branch
+     called `lex_symbol` which *rejects* operator chars like `+` (non-alphanumeric) and
+     returned `ni == i` (zero width); the old code did `i = ni` leaving `i` unchanged, then
+     `continue` re-entered the loop on the SAME `+` forever — pushing ~50M `Symbol` tokens
+     until a 5,368,709,120-byte `Vec` alloc failed. Fixed with a `consumed =
+     ni.saturating_sub(i).max(1)` ≥1-advance guard. Backtrace confirmed the site
+     (`lexer::tokenise` → `Vec::push`).
+  2. **Empty-name symbols.** Even with the loop fixed, `lex_symbol` returned an empty name
+     for `+`, so it became `Symbol("")`. Fixed: a lone operator char becomes `Symbol(c)`
+     (the single char) rather than an empty name.
+  3. **Bare symbols mis-parsed.** `parse_apply` treated ANY leading `Symbol` as monadic
+     application, so a variable ref like `foo` (or `1 + 2`, where `+` was the empty-name
+     symbol) failed to parse. Fixed: monadic form only fires when an operand actually
+     follows; a lone symbol is a variable reference (`Instr::Symbol`).
+  4. **Missing `*` verb.** `(1 + 2) * 3` failed with "unknown function: *". Added the `*`
+     builtin + `KapNumber::mul`.
+- **Verification:** `cargo test -p kap-core` → **33 passed, 0 failed** (number 10 / array 3
+  / lexer 10 / parser 6 / evaluator 7). No SIGKILL. The earlier "stale binary" confusion
+  was precisely because `cargo test` was OOM-killed mid-rebuild before fixes landed; the
+  `Cargo.toml` profile fixed that.
+- **Next:** Phase 4 — broaden builtins: `-`/`÷`/`×`, `=`/`≠`/`≤`/`≥`/`</`>`, `,` (catenate),
+  `⌽`/`⊖` (reverse), `⍉` (transpose), `↑`/`↓` (take/drop), `⊂`/`⊃` (enclose/first),
+  strand/`⍬`, and user-defined functions (`∇` / lambda `λ`). Then Phase 5 REPL in
+  `kap-cli`, Phase 6 breadth, Phase 7 parallel, Phase 8 broaden the Kap test harness.
+
 ---
