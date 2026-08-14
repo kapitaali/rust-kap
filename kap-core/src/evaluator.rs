@@ -56,8 +56,27 @@ impl APLValue {
 }
 
 impl Engine {
-    /// Evaluate a full Kap source string. Returns the value of the last statement.
+    /// Stateless "single expression" mode (Mode 1): evaluate `src` in a *fresh*
+    /// environment. Any variables assigned inside `src` do not persist.
+    /// For persistent state across evaluations, use [`crate::Session`] instead.
     pub fn eval_string(&self, src: &str) -> Result<AplRef<APLValue>, AplError> {
+        let env = Rc::new(Environment::default());
+        self.eval_string_in_env(src, &env)
+    }
+
+    /// Convenience (Mode 1): stateless eval returning the formatted REPL-style string.
+    pub fn eval_to_string(&self, src: &str) -> Result<String, AplError> {
+        Ok(self.eval_string(src)?.format_value())
+    }
+
+    /// Shared evaluation core. Runs `src` in the given `env`. Variables assigned
+    /// here persist in `env` — this is what [`crate::Session`] relies on to keep
+    /// state across calls.
+    pub fn eval_string_in_env(
+        &self,
+        src: &str,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
         let toks = tokenise(src);
         let (stmts, errs) = parser::parse(&toks);
         if !errs.is_empty() {
@@ -67,10 +86,9 @@ impl Engine {
                 msg: errs.join("; "),
             });
         }
-        let env = Rc::new(Environment::default());
         let mut last: AplRef<APLValue> = Rc::new(APLValue::Null);
         for stmt in &stmts {
-            last = self.eval_instr(stmt, &env)?;
+            last = self.eval_instr(stmt, env)?;
         }
         Ok(last)
     }

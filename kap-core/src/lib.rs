@@ -20,6 +20,11 @@ pub mod lex_helpers;
 pub mod ast;
 pub mod parser;
 pub mod evaluator;
+pub mod session;
+
+/// A persistent, REPL-like Kap evaluation context. State (variables, user
+/// functions) survives across `eval` calls. See [`session::Session`].
+pub use session::Session;
 
 pub use number::KapNumber;
 pub use array::{ArrayData, KapArray};

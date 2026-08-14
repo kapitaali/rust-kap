@@ -130,7 +130,16 @@ impl<'a> Parser<'a> {
         // Valence is ultimately resolved at runtime; this is a syntactic heuristic.
         if let Instr::Symbol { name, .. } = &first {
             let is_prim = Self::is_primitive_op(name);
+            // A top-level newline/separator ends the statement: `a ← 3` followed by a
+            // newline is NOT a monadic apply of whatever comes next. Check BEFORE
+            // skipping newlines so we see the boundary, not the next statement's token.
+            if self.at_statement_boundary() {
+                return Ok(first);
+            }
             self.skip_newlines();
+            if self.at_statement_boundary() {
+                return Ok(first);
+            }
             let next = self.peek().map(|t| t.token.clone());
             let next_is_operand_not_fn = match &next {
                 Some(t) => {
@@ -169,7 +178,16 @@ impl<'a> Parser<'a> {
         // operator is NOT an operand here (it is a derived function, e.g. `(+)`).
         let mut left = first;
         loop {
+            // Stop at a statement boundary: newlines separate statements at the top
+            // level, so `1 2 3` does not strand across into the next line's tokens.
+            // Check BEFORE skipping newlines so we see the boundary.
+            if self.at_statement_boundary() {
+                break;
+            }
             self.skip_newlines();
+            if self.at_statement_boundary() {
+                break;
+            }
             let paren_op = self.next_is_paren_operator();
             match self.peek() {
                 Some(t) if Self::is_strand_operand(&t.token) && !paren_op => {
@@ -188,7 +206,16 @@ impl<'a> Parser<'a> {
         // Dyadic form: a f b (f c ...). `left` may be a value or a strand. The operator may
         // be a symbol, a parenthesised operator `(+)`, an open-bracket, a lambda, or comma.
         loop {
+            // Stop at a statement boundary: `a + b` on its own line is not the left
+            // operand of a dyadic operator starting the next statement. Check BEFORE
+            // skipping newlines so we see the boundary.
+            if self.at_statement_boundary() {
+                break;
+            }
             self.skip_newlines();
+            if self.at_statement_boundary() {
+                break;
+            }
             let paren_op = self.next_is_paren_operator();
             let is_operator = match self.peek() {
                 Some(t) => match &t.token {
@@ -260,6 +287,22 @@ impl<'a> Parser<'a> {
     /// dyadic parse for a leading symbol. A non-primitive (user) symbol is parsed as a
     /// variable/function reference instead. This is a heuristic — Kap resolves valence
     /// at runtime; the set is the primitives wired up in the evaluator.)
+    /// True when the next token ends the current statement at the top level:
+    /// a newline, a `⋄` separator, or end of input. Newlines inside parentheses/brackets
+    /// are NOT seen here — they are consumed by `parse_primary` internally. Breaking the
+    /// apply loops on a top-level newline keeps distinct statements separate (so a file's
+    /// `a ← 3 \n b ← 4` is two assignments, not `(a ← 3) b`).
+    fn at_statement_boundary(&self) -> bool {
+        match self.peek() {
+            Some(t) => {
+                matches!(t.token, Token::Newline)
+                    || matches!(t.token, Token::StatementSeparator)
+                    || matches!(t.token, Token::EndOfFile)
+            }
+            None => true,
+        }
+    }
+
     fn is_primitive_op(name: &str) -> bool {
         matches!(
             name,
