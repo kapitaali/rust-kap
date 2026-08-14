@@ -9,7 +9,8 @@
 
 use std::io::{self, BufRead, Write};
 
-use kap_core::Session;
+use kap_core::session::Session;
+use kap_core::AplError;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -91,7 +92,12 @@ fn run(session: &Session, src: &str) {
                 println!("{}", out);
             }
         }
-        Err(e) => eprintln!("error: {}", e),
+        Err(e) => match &e {
+            AplError::Parse { line, col, msg } => {
+                eprintln!("parse error at {}:{}: {}", line, col, msg)
+            }
+            AplError::Runtime(msg) => eprintln!("error: {}", msg),
+        },
     }
 }
 

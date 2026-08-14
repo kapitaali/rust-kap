@@ -80,11 +80,8 @@ impl Engine {
         let toks = tokenise(src);
         let (stmts, errs) = parser::parse(&toks);
         if !errs.is_empty() {
-            return Err(AplError::Parse {
-                line: 0,
-                col: 0,
-                msg: errs.join("; "),
-            });
+            // Surface the first error with its real source position.
+            return Err(errs.into_iter().next().unwrap());
         }
         let mut last: AplRef<APLValue> = Rc::new(APLValue::Null);
         for stmt in &stmts {
@@ -103,18 +100,10 @@ impl Engine {
             Instr::Literal(LiteralValue::Number(n)) => Ok(Rc::new(APLValue::Number(n.clone()))),
             Instr::Literal(LiteralValue::Char(c)) => Ok(Rc::new(APLValue::Char(*c))),
             Instr::Literal(LiteralValue::Str(s)) => Ok(Rc::new(APLValue::Str(s.clone()))),
-            Instr::Literal(LiteralValue::Symbol { .. }) => Err(AplError::Parse {
-                line: 0,
-                col: 0,
-                msg: "lone symbol literal".into(),
-            }),
+            Instr::Literal(LiteralValue::Symbol { .. }) => Err(AplError::runtime("lone symbol literal".into())),
             Instr::Empty => Ok(Rc::new(APLValue::Null)),
             Instr::Symbol { name, namespace } => {
-                let found = env.lookup(name, namespace).ok_or_else(|| AplError::Parse {
-                    line: 0,
-                    col: 0,
-                    msg: format!("undefined symbol: {}", name),
-                })?;
+                let found = env.lookup(name, namespace).ok_or_else(|| AplError::runtime(format!("undefined symbol: {}", name)))?;
                 // clone the inner value out of the shared ref
                 Ok(Rc::new(found.as_ref().clone()))
             }
@@ -139,11 +128,7 @@ impl Engine {
                     env.define(name, namespace, v.clone());
                     Ok(v)
                 } else {
-                    Err(AplError::Parse {
-                        line: 0,
-                        col: 0,
-                        msg: "assignment target must be a symbol".into(),
-                    })
+                    Err(AplError::runtime("assignment target must be a symbol".into()))
                 }
             }
             Instr::Apply {
@@ -187,11 +172,7 @@ impl Engine {
         let name = match fn_name {
             Some(n) => n,
             None => {
-                return Err(AplError::Parse {
-                    line: 0,
-                    col: 0,
-                    msg: "only symbol/lambda functions supported yet".into(),
-                })
+                return Err(AplError::runtime("only symbol/lambda functions supported yet".into()))
             }
         };
         // For dyadic, force left then right; for monadic, only right.
@@ -233,11 +214,7 @@ impl Engine {
             "↑" => self.take(left_val, right_val),
             "↓" => self.drop(left_val, right_val),
             "⊂" => self.enclose(right_val),
-            _ => Err(AplError::Parse {
-                line: 0,
-                col: 0,
-                msg: format!("unknown function: {}", name),
-            }),
+            _ => Err(AplError::runtime(format!("unknown function: {}", name))),
         }
     }
 
@@ -280,11 +257,7 @@ impl Engine {
         f: impl Fn(&KapNumber, &KapNumber) -> KapNumber,
         sym: &str,
     ) -> Result<AplRef<APLValue>, AplError> {
-        let a = left_val.ok_or_else(|| AplError::Parse {
-            line: 0,
-            col: 0,
-            msg: format!("{} needs two args", sym),
-        })?;
+        let a = left_val.ok_or_else(|| AplError::runtime(format!("{} needs two args", sym)))?;
         match (a.as_ref(), right_val.as_ref()) {
             (APLValue::Number(x), APLValue::Number(y)) => {
                 Ok(Rc::new(APLValue::Number(f(x, y))))
@@ -315,11 +288,7 @@ impl Engine {
                     ArrayData::Nested(out),
                 )))))
             }
-            _ => Err(AplError::Parse {
-                line: 0,
-                col: 0,
-                msg: format!("{} requires numbers", sym),
-            }),
+            _ => Err(AplError::runtime(format!("{} requires numbers", sym))),
         }
     }
 
@@ -339,11 +308,7 @@ impl Engine {
                     ArrayData::Nested(out),
                 )))))
             }
-            _ => Err(AplError::Parse {
-                line: 0,
-                col: 0,
-                msg: "- requires a number".into(),
-            }),
+            _ => Err(AplError::runtime("- requires a number".into())),
         }
     }
 
@@ -354,25 +319,13 @@ impl Engine {
         pred: impl Fn(Ordering) -> bool,
         sym: &str,
     ) -> Result<AplRef<APLValue>, AplError> {
-        let a = left_val.ok_or_else(|| AplError::Parse {
-            line: 0,
-            col: 0,
-            msg: format!("{} needs two args", sym),
-        })?;
+        let a = left_val.ok_or_else(|| AplError::runtime(format!("{} needs two args", sym)))?;
         let ord = match (a.as_ref(), right_val.as_ref()) {
             (APLValue::Number(x), APLValue::Number(y)) => x.numeric_cmp(y).map_err(|e| {
-                AplError::Parse {
-                    line: 0,
-                    col: 0,
-                    msg: e,
-                }
+                AplError::runtime(e)
             })?,
             _ => {
-                return Err(AplError::Parse {
-                    line: 0,
-                    col: 0,
-                    msg: format!("{} requires numbers", sym),
-                })
+                return Err(AplError::runtime(format!("{} requires numbers", sym)))
             }
         };
         // Kap booleans are 1 (true) / 0 (false).
@@ -383,19 +336,11 @@ impl Engine {
         let n = match right_val.as_ref() {
             APLValue::Number(KapNumber::Long(v)) => *v,
             _ => {
-                return Err(AplError::Parse {
-                    line: 0,
-                    col: 0,
-                    msg: "⍳ needs an integer count".into(),
-                })
+                return Err(AplError::runtime("⍳ needs an integer count".into()))
             }
         };
         if n < 0 {
-            return Err(AplError::Parse {
-                line: 0,
-                col: 0,
-                msg: "⍳ count must be non-negative".into(),
-            });
+            return Err(AplError::runtime("⍳ count must be non-negative".into()));
         }
         let nums: Vec<KapNumber> = (0..n).map(KapNumber::Long).collect();
         let arr = KapArray::from_numbers(nums);
@@ -437,11 +382,7 @@ impl Engine {
                 .elements()
                 .into_iter()
                 .next()
-                .ok_or_else(|| AplError::Parse {
-                    line: 0,
-                    col: 0,
-                    msg: "⊃ of empty array".into(),
-                }),
+                .ok_or_else(|| AplError::runtime("⊃ of empty array".into())),
             other => Ok(Rc::new(other.clone())),
         }
     }
@@ -452,11 +393,7 @@ impl Engine {
         right_val: AplRef<APLValue>,
     ) -> Result<AplRef<APLValue>, AplError> {
         let a = left_val.ok_or_else(|| {
-            AplError::Parse {
-                line: 0,
-                col: 0,
-                msg: ", needs two args".into(),
-            }
+            AplError::runtime(", needs two args".into())
         })?;
         let mut elems = Vec::new();
         self.collect_elements(&a, &mut elems);
@@ -516,19 +453,11 @@ impl Engine {
         left_val: Option<AplRef<APLValue>>,
         right_val: AplRef<APLValue>,
     ) -> Result<AplRef<APLValue>, AplError> {
-        let left_val = left_val.ok_or_else(|| AplError::Parse {
-            line: 0,
-            col: 0,
-            msg: "↑ needs two args".into(),
-        })?;
+        let left_val = left_val.ok_or_else(|| AplError::runtime("↑ needs two args".into()))?;
         let n = match left_val.as_ref() {
             APLValue::Number(KapNumber::Long(v)) => *v,
             _ => {
-                return Err(AplError::Parse {
-                    line: 0,
-                    col: 0,
-                    msg: "↑ count must be an integer".into(),
-                })
+                return Err(AplError::runtime("↑ count must be an integer".into()))
             }
         };
         match right_val.as_ref() {
@@ -554,19 +483,11 @@ impl Engine {
         left_val: Option<AplRef<APLValue>>,
         right_val: AplRef<APLValue>,
     ) -> Result<AplRef<APLValue>, AplError> {
-        let left_val = left_val.ok_or_else(|| AplError::Parse {
-            line: 0,
-            col: 0,
-            msg: "↓ needs two args".into(),
-        })?;
+        let left_val = left_val.ok_or_else(|| AplError::runtime("↓ needs two args".into()))?;
         let n = match left_val.as_ref() {
             APLValue::Number(KapNumber::Long(v)) => *v,
             _ => {
-                return Err(AplError::Parse {
-                    line: 0,
-                    col: 0,
-                    msg: "↓ count must be an integer".into(),
-                })
+                return Err(AplError::runtime("↓ count must be an integer".into()))
             }
         };
         match right_val.as_ref() {

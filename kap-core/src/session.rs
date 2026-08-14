@@ -104,4 +104,25 @@ mod tests {
         let _ = e.eval_string("a ← 7").unwrap();
         assert!(e.eval_to_string("a + 1").is_err());
     }
+
+    #[test]
+    fn parse_errors_carry_real_position() {
+        // A parse error must report the real line/col, not 0:0.
+        let e = Engine::new();
+        match e.eval_string("a ← 3\nb ← 4\nc +") {
+            Err(AplError::Parse { line, col, .. }) => assert_eq!((line, col), (3, 4)),
+            other => panic!("expected Parse error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn runtime_errors_separate_from_parse() {
+        // Runtime errors (e.g. unknown function) are their own variant and carry
+        // a clean message; they must not be reported as parse errors.
+        let s = Session::new();
+        match s.eval("foo 1 2") {
+            Err(AplError::Runtime(msg)) => assert!(msg.contains("foo")),
+            other => panic!("expected Runtime error, got {:?}", other),
+        }
+    }
 }

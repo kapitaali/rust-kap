@@ -387,3 +387,22 @@ verified end-to-end with state persistence. No OOM.
 **Requirement noted (still open):** the crate must stay embeddable (the two modes above) in
 addition to the REPL — confirmed satisfied; keep both paths working in later phases.
 
+---
+
+## 2026-08-14 — Error-position polish (Phase 5.5)
+
+User asked to polish the earlier caveat: parse errors reported `0:0` with the real position
+buried in the message text. Now:
+
+* `AplError` gained a `Runtime(msg)` variant (separate from `Parse{line,col,msg}`).
+* `Parser::err()` now returns `AplError::Parse{line,col,msg}` using the token's real
+  `line`/`col` from the lexer span (no more `0:0`).
+* `parse()` returns `(Vec<Instr>, Vec<AplError>)` (was `Vec<String>`); `Engine` surfaces
+  the **first** error with its real position instead of `0:0`.
+* All ~20 runtime-error sites in `evaluator.rs` converted from `AplError::Parse{0,0,..}`
+  to `AplError::runtime(..)`.
+* REPL `run()` prints `parse error at L:C: msg` (parse) vs `error: msg` (runtime).
+
+**Verification:** `cargo test` → **53 passed, 0 failed** (added `parse_errors_carry_real_position`
++ `runtime_errors_separate_from_parse`). Manual REPL check: `2 (` → `parse error at 2:1`,
+`foo 3` → `error: unknown function: foo`.

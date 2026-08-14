@@ -106,12 +106,24 @@ impl Engine {
     }
 }
 
-/// Kap evaluation errors. Phase 0: minimal. Grows in Phase 3 with position
-/// information and `formattedError` (strategy §4.7).
-#[derive(Debug, thiserror::Error)]
+/// Kap evaluation errors. Parse errors carry the source position where the
+/// problem was detected (1-based line/column, matching the lexer's spans).
+/// Runtime errors (undefined symbol, type mismatch, etc.) have no single
+/// source position, so they use [`AplError::Runtime`] with just a message.
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum AplError {
-    #[error("not implemented: {0}")]
-    NotImplemented(&'static str),
+    /// A problem detected during lexing/parsing at a known source position.
     #[error("parse error at {line}:{col}: {msg}")]
     Parse { line: usize, col: usize, msg: String },
+    /// A runtime error (name resolution, type/valence, division, …) raised while
+    /// evaluating a well-formed expression. Position is not tracked for these.
+    #[error("error: {0}")]
+    Runtime(String),
+}
+
+impl AplError {
+    /// Build a runtime error from a message.
+    pub fn runtime(msg: String) -> Self {
+        AplError::Runtime(msg)
+    }
 }

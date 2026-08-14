@@ -19,11 +19,13 @@
 //!                 an `Array` (APL stranding) — e.g. `1 2 3` -> Array[1,2,3].
 
 use crate::ast::Instr;
+use crate::lexer::tokenise;
 use crate::token::{LiteralValue, SpannedToken, Token};
+use crate::AplError;
 
 /// Parse a full source string's token stream into a list of statement `Instr`s.
 /// Returns `(statements, errors)`. `errors` is non-empty on parse failure.
-pub fn parse(tokens: &[SpannedToken]) -> (Vec<Instr>, Vec<String>) {
+pub fn parse(tokens: &[SpannedToken]) -> (Vec<Instr>, Vec<AplError>) {
     let mut p = Parser { toks: tokens, pos: 0 };
     let mut stmts = Vec::new();
     let mut errors = Vec::new();
@@ -79,20 +81,28 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn err(&self, msg: &str) -> String {
+    fn err(&self, msg: &str) -> AplError {
         match self.peek() {
-            Some(t) => format!("parse error at {}:{}: {}", t.line, t.col, msg),
-            None => format!("parse error (end of input): {}", msg),
+            Some(t) => AplError::Parse {
+                line: t.line,
+                col: t.col,
+                msg: msg.to_string(),
+            },
+            None => AplError::Parse {
+                line: 0,
+                col: 0,
+                msg: format!("unexpected end of input: {}", msg),
+            },
         }
     }
 
     /// statement := expr (⋄ expr)*  — here we parse one expression per call.
-    fn parse_expr(&mut self) -> Result<Instr, String> {
+    fn parse_expr(&mut self) -> Result<Instr, AplError> {
         self.parse_assign()
     }
 
     /// assign := symbol ← apply  (left-associative target)
-    fn parse_assign(&mut self) -> Result<Instr, String> {
+    fn parse_assign(&mut self) -> Result<Instr, AplError> {
         let save = self.pos;
         // lookahead: symbol ← ...
         if let Some(t) = self.peek() {
@@ -119,7 +129,7 @@ impl<'a> Parser<'a> {
     }
 
     /// apply := (fn term) | (term fn term)*  — monadic `f x` or dyadic `a f b` / trains.
-    fn parse_apply(&mut self) -> Result<Instr, String> {
+    fn parse_apply(&mut self) -> Result<Instr, AplError> {
         let first = self.parse_primary()?;
         // A leading symbol is parsed as a MONADIC application `f x` when:
         //   * it is a primitive AND the next token is a plain operand, or another primitive
@@ -313,12 +323,12 @@ impl<'a> Parser<'a> {
     }
 
     /// term := primary  (stranding handled inside parse_primary's caller via runs)
-    fn parse_term(&mut self) -> Result<Instr, String> {
+    fn parse_term(&mut self) -> Result<Instr, AplError> {
         self.parse_primary()
     }
 
     /// primary := number | char | string | symbol | ( expr ) | [ elements ] | ⍬
-    fn parse_primary(&mut self) -> Result<Instr, String> {
+    fn parse_primary(&mut self) -> Result<Instr, AplError> {
         let t = self.peek().ok_or_else(|| self.err("unexpected end of input"))?;
         match &t.token {
             Token::Literal(LiteralValue::Symbol { name, namespace }) => {
