@@ -241,6 +241,84 @@ impl KapNumber {
             Complex(r, i) => Complex(-r, -i),
         }
     }
+
+    /// Subtraction with the Kap promotion rules (Long/Double/BigInt/Rational/Complex).
+    pub fn sub(&self, other: &KapNumber) -> KapNumber {
+        use KapNumber::*;
+        match (self, other) {
+            (Long(a), Long(b)) => Long(a - b),
+            (Long(a), Double(b)) | (Double(b), Long(a)) => Double(*a as f64 - *b),
+            (Double(a), Double(b)) => Double(a - b),
+            (BigInt(a), BigInt(b)) => BigInt(a - b),
+            (Long(a), BigInt(b)) | (BigInt(b), Long(a)) => BigInt(num_bigint::BigInt::from(*a) - b),
+            (Rational(a), Rational(b)) => Rational(a - b),
+            (Long(a), Rational(b)) | (Rational(b), Long(a)) => {
+                Rational(b * -BigRational::new(num_bigint::BigInt::from(*a), num_bigint::BigInt::from(1)))
+                    .neg()
+            }
+            (Complex(ar, ai), Complex(br, bi)) => Complex(ar - br, ai - bi),
+            (Long(a), Complex(br, bi)) | (Complex(br, bi), Long(a)) => Complex(*a as f64 - br, -*bi),
+            (Double(a), Complex(br, bi)) | (Complex(br, bi), Double(a)) => Complex(a - br, -*bi),
+            _ => Double(self.as_double() - other.as_double()),
+        }
+    }
+
+    /// Division. Integer/integer -> Rational (Kap rule: `4 ÷ 2` is `2`, but `1 ÷ 2` is
+    /// `1r2`); float inputs -> Double; complex -> complex divide.
+    pub fn div(&self, other: &KapNumber) -> KapNumber {
+        use KapNumber::*;
+        // Integer ÷ integer where the divisor divides evenly -> integer result.
+        if let (Long(a), Long(b)) = (self, other) {
+            if *b != 0 && a % b == 0 {
+                return Long(a / b);
+            }
+            if *b == 0 {
+                return Rational(BigRational::new(num_bigint::BigInt::from(0), num_bigint::BigInt::from(0)));
+            }
+            return Rational(BigRational::new(num_bigint::BigInt::from(*a), num_bigint::BigInt::from(*b)));
+        }
+        match (self, other) {
+            (Long(a), Double(b)) | (Double(b), Long(a)) => Double(*a as f64 / *b),
+            (Double(a), Double(b)) => Double(a / b),
+            (BigInt(a), BigInt(b)) => {
+                if *b == num_bigint::BigInt::from(0) {
+                    return Rational(BigRational::new(num_bigint::BigInt::from(0), num_bigint::BigInt::from(0)));
+                }
+                Rational(BigRational::new(a.clone(), b.clone()))
+            }
+            (Long(a), BigInt(b)) | (BigInt(b), Long(a)) => {
+                Rational(BigRational::new(num_bigint::BigInt::from(*a), b.clone()))
+            }
+            (Rational(a), Rational(b)) => Rational(a / b),
+            (Long(a), Rational(b)) | (Rational(b), Long(a)) => {
+                Rational(BigRational::new(num_bigint::BigInt::from(*a), num_bigint::BigInt::from(1)) / b)
+            }
+            (Complex(ar, ai), Complex(br, bi)) => {
+                // (a+bi)/(c+di) = ((ac+bd) + (bc-ad)i) / (c^2+d^2)
+                let den = br * br + bi * bi;
+                if den == 0.0 {
+                    return Complex(0.0, 0.0);
+                }
+                Complex((ar * br + ai * bi) / den, (ai * br - ar * bi) / den)
+            }
+            (Long(a), Complex(br, bi)) | (Complex(br, bi), Long(a)) => {
+                let den = br * br + bi * bi;
+                if den == 0.0 {
+                    return Complex(0.0, 0.0);
+                }
+                let x = *a as f64;
+                Complex((x * br) / den, (x * -bi) / den)
+            }
+            (Double(a), Complex(br, bi)) | (Complex(br, bi), Double(a)) => {
+                let den = br * br + bi * bi;
+                if den == 0.0 {
+                    return Complex(0.0, 0.0);
+                }
+                Complex(a / br, -a / bi)
+            }
+            _ => Double(self.as_double() / other.as_double()),
+        }
+    }
 }
 
 #[cfg(test)]

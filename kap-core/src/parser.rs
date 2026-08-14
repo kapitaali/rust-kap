@@ -121,23 +121,39 @@ impl<'a> Parser<'a> {
     /// apply := (fn term) | (term fn term)*  — monadic `f x` or dyadic `a f b` / trains.
     fn parse_apply(&mut self) -> Result<Instr, String> {
         let first = self.parse_primary()?;
-        // Monadic form: function FIRST, then operand — `⍳5`, `≢arr`, `⊃arr`, `⍴arr`,
-        // `+ 5`. But a lone symbol with no following operand is a *variable reference*
-        // (e.g. `foo`), not an application. Only build `Apply` when an operand follows.
-        if matches!(first, Instr::Symbol { .. }) {
+        // A leading symbol is parsed as a MONADIC application `f x` when:
+        //   * it is a primitive AND the next token is a plain operand, or another primitive
+        //     (train: `⊃ ⍳5` = `⊃(⍳5)`, `≢ ⍳5` = `≢(⍳5)`); or
+        //   * it is a *user* symbol (variable/function) AND the next token is a plain operand
+        //     (`f 5`). When the next token is an OPERATOR (e.g. `x + 1`), a user symbol is NOT
+        //     monadic — it is the LEFT operand of the dyadic operator, so we fall through.
+        // Valence is ultimately resolved at runtime; this is a syntactic heuristic.
+        if let Instr::Symbol { name, .. } = &first {
+            let is_prim = Self::is_primitive_op(name);
             self.skip_newlines();
-            let operand_follows = match self.peek() {
+            let next = self.peek().map(|t| t.token.clone());
+            let next_is_operand_not_fn = match &next {
                 Some(t) => {
-                    !matches!(t.token, Token::EndOfFile)
-                        && !matches!(t.token, Token::Newline)
-                        && !matches!(t.token, Token::StatementSeparator)
-                        && !matches!(t.token, Token::CloseParen)
-                        && !matches!(t.token, Token::CloseBracket)
-                        && !matches!(t.token, Token::ListSeparator)
+                    !matches!(t, Token::EndOfFile)
+                        && !matches!(t, Token::Newline)
+                        && !matches!(t, Token::StatementSeparator)
+                        && !matches!(t, Token::CloseParen)
+                        && !matches!(t, Token::CloseBracket)
+                        && !matches!(t, Token::ListSeparator)
+                        && !matches!(t, Token::Literal(LiteralValue::Symbol { .. }))
                 }
                 None => false,
             };
-            if operand_follows {
+            let next_is_primitive = match &next {
+                Some(Token::Literal(LiteralValue::Symbol { name: nn, .. })) => Self::is_primitive_op(nn),
+                _ => false,
+            };
+            let do_monadic = if is_prim {
+                next_is_operand_not_fn || next_is_primitive
+            } else {
+                next_is_operand_not_fn
+            };
+            if do_monadic {
                 let operand = self.parse_apply()?;
                 return Ok(Instr::Apply {
                     fn_expr: Box::new(first),
@@ -145,24 +161,44 @@ impl<'a> Parser<'a> {
                     right: Box::new(operand),
                 });
             }
-            // lone symbol: variable reference
-            return Ok(first);
+            // Fall through: treat `first` as the LEFT operand of a following dyadic op.
         }
-        // Dyadic form: a f b (f c ...). `first` is a value operand.
+        // Stranding: consecutive operands with no operator between them form a vector.
+        // e.g. `1 2 3` -> [1 2 3]. Collect into `left` so a following dyadic operator
+        // (e.g. `1 2 3 + 10`) sees the strand as its left argument.
         let mut left = first;
         loop {
             self.skip_newlines();
-            // peek a function token (symbol, or '(' expr ')', or bracket) as the operator
-            let is_fn = match self.peek() {
-                Some(t) => matches!(t.token, Token::Literal(LiteralValue::Symbol { .. }))
-                    || matches!(t.token, Token::OpenParen)
-                    || matches!(t.token, Token::OpenBracket)
-                    || matches!(t.token, Token::LambdaToken)
-                    || matches!(t.token, Token::ApplyToken),
+            match self.peek() {
+                Some(t) if Self::is_strand_operand(&t.token) => {
+                    let operand = self.parse_primary()?;
+                    // Build a strand incrementally: if `left` is already an Array strand,
+                    // push; otherwise start one.
+                    if let Instr::Array { elements } = &mut left {
+                        elements.push(operand);
+                    } else {
+                        left = Instr::Array { elements: vec![left, operand] };
+                    }
+                }
+                _ => break,
+            }
+        }
+        // Dyadic form: a f b (f c ...). `left` may be a value or a strand. The operator must
+        // be a genuine primitive (not a user variable), otherwise we stop and leave `left`
+        // as a lone value / variable reference (e.g. `x` alone).
+        loop {
+            self.skip_newlines();
+            let is_operator = match self.peek() {
+                Some(t) => match &t.token {
+                    Token::Literal(LiteralValue::Symbol { .. }) => true,
+                    Token::OpenBracket => true,
+                    Token::LambdaToken => true,
+                    Token::Comma => true,
+                    _ => false,
+                },
                 None => false,
-                _ => false,
             };
-            if !is_fn {
+            if !is_operator {
                 break;
             }
             let fn_expr = self.parse_primary()?; // the operator (symbol or parenthesised)
@@ -175,6 +211,30 @@ impl<'a> Parser<'a> {
             };
         }
         Ok(left)
+    }
+
+    /// Whether a token can begin a strand element (an operand, not an operator/separator).
+    fn is_strand_operand(tok: &Token) -> bool {
+        matches!(tok, Token::Literal(LiteralValue::Number(_)))
+            || matches!(tok, Token::Literal(LiteralValue::Char(_)))
+            || matches!(tok, Token::Literal(LiteralValue::Str(_)))
+            || matches!(tok, Token::OpenParen)
+            || matches!(tok, Token::OpenBracket)
+            || matches!(tok, Token::LambdaToken)
+            || matches!(tok, Token::APLNullSym)
+    }
+
+    /// Kap primitive function/operator names (single-glyph). Used to decide monadic vs
+    /// dyadic parse for a leading symbol. A non-primitive (user) symbol is parsed as a
+    /// variable/function reference instead. This is a heuristic — Kap resolves valence
+    /// at runtime; the set is the primitives wired up in the evaluator.)
+    fn is_primitive_op(name: &str) -> bool {
+        matches!(
+            name,
+            "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"
+                | "↑" | "↓" | "⊂" | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
+                | "≤" | "≥" | ","
+        )
     }
 
     /// term := primary  (stranding handled inside parse_primary's caller via runs)
@@ -235,6 +295,58 @@ impl<'a> Parser<'a> {
             Token::APLNullSym => {
                 self.advance();
                 Ok(Instr::Empty)
+            }
+            Token::Comma => {
+                // Catenate is a dyadic operator; represent it as a symbol named ",".
+                self.advance();
+                Ok(Instr::Symbol {
+                    name: ",".to_string(),
+                    namespace: None,
+                })
+            }
+            Token::LambdaToken => {
+                // λ(params) body  — params are bare symbols (or a parenthesised list),
+                // body is the rest of the expression.
+                self.advance();
+                self.skip_newlines();
+                let mut params = Vec::new();
+                // optional parenthesised parameter list: (a b c) or (a,b,c)
+                if let Some(t) = self.peek() {
+                    if matches!(t.token, Token::OpenParen) {
+                        self.advance();
+                        loop {
+                            self.skip_newlines();
+                            match self.peek() {
+                                Some(t) if matches!(t.token, Token::CloseParen) => {
+                                    self.advance();
+                                    break;
+                                }
+                                Some(t) if matches!(t.token, Token::Literal(LiteralValue::Symbol { .. })) => {
+                                    if let Token::Literal(LiteralValue::Symbol { name, .. }) = &t.token {
+                                        params.push(name.clone());
+                                    }
+                                    self.advance();
+                                }
+                                Some(t) if matches!(t.token, Token::Comma) => {
+                                    self.advance();
+                                }
+                                _ => return Err(self.err("expected parameter name or ')'")),
+                            }
+                        }
+                    } else if let Some(t) = self.peek() {
+                        if let Token::Literal(LiteralValue::Symbol { name, .. }) = &t.token {
+                            // single unparenthesised param: λx x*2
+                            params.push(name.clone());
+                            self.advance();
+                        }
+                    }
+                }
+                self.skip_newlines();
+                let body = self.parse_expr()?;
+                Ok(Instr::Lambda {
+                    params,
+                    body: Box::new(body),
+                })
             }
             _ => Err(self.err("unexpected token in primary")),
         }

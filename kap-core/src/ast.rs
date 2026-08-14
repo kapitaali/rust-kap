@@ -30,7 +30,10 @@ pub enum Instr {
     },
     /// An array/vector literal: `[a;b;c]` (explicit) or a stranded vector `a b c`.
     Array { elements: Vec<Instr> },
-    /// Empty array / nil.
+    /// A lambda / anonymous function: `λ(params) body`. `params` are argument names;
+    /// `body` is the unevaluated expression. Evaluated (Phase 4) into an `APLValue::UserFn`.
+    Lambda { params: Vec<String>, body: Box<Instr> },
+    /// An empty array / nil.
     Empty,
 }
 

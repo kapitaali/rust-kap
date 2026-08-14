@@ -260,3 +260,62 @@
   `kap-cli`, Phase 6 breadth, Phase 7 parallel, Phase 8 broaden the Kap test harness.
 
 ---
+
+## 2026-08-14 — Phase 4 COMPLETE (builtins + variables + lambdas)
+
+**Goal:** Broaden the builtins and add persistent assignment, stranding, and user lambdas.
+
+**Changes made:**
+
+- **Persistent assignment (foundational fix).** `Environment.symbols` was
+  `HashMap<(..), AplRef<APLValue>>` (immutable), so `Assign` cloned-and-discarded the env
+  and variables never persisted. Changed to `RefCell<HashMap<..>>`; `lookup`/`define` go
+  through `borrow`/`borrow_mut`. `Instr::Symbol` eval now clones the inner value out of the
+  shared `Rc`. Assignment now persists: `x ← 5 ⋄ x + 1` → `6`.
+- **`UserFn` value + `Instr::Lambda`.** Added `APLValue::UserFn { params, body, env }` and
+  `Instr::Lambda { params, body }`. `λ(params) body` parses (parenthesised or single-param);
+  `apply_user_fn` builds a child scope from the closure env and binds params (dyadic:
+  left=first param, right=second; monadic: right=first param). `f ← λ(x) x * 2 ⋄ f 5` → `10`,
+  `g ← λ(a b) a + b ⋄ 3 g 4` → `7`.
+- **Arithmetic:** `-` (sub), `÷`/`/` (div → Rational for ints), `×` (mul alias), `*` (had).
+- **Comparisons:** `= ≠ < > ≤ ≥` → Kap boolean `1`/`0` (via `numeric_cmp`), scalar extension.
+- **Array/structural:** `,` (catenate, via `Token::Comma` + `Instr::Symbol(",")`),
+  `⌽`/`⊖` (reverse), `⍉` (transpose 2-D), `↑`/`↓` (take/drop), `⊂` (enclose), `⊃`/`≢`/`⍴`/`⍳`
+  (had). Scalar extension in `num2` so `1 2 3 + 10` → `[11 12 13]`.
+- **Stranding:** `1 2 3` → `[1 2 3]`; a stranded vector is the left arg of a following
+  dyadic operator.
+- **Formatting:** `format_value` uses APL-style output (`-3` → `¯3`, `1/2` → `1r2`).
+
+**Bugs found & fixed during Phase 4 (parser valence is the hard part):**
+
+1. **Lambda body swallowed the `⋄` separator.** `skip_newlines` was skipping `⋄`
+   (`StatementSeparator`) *everywhere*, so `f ← λ(x) x*2 ⋄ f 5` parsed `⋄` *inside* the lambda
+   value, corrupting the stream. **Fix:** `skip_newlines` now skips only `Newline`; `⋄` is
+   consumed **only** at the top-level `parse()` statement boundary. (Most subtle bug — it made
+   every multi-statement program with a lambda/assignment fail.)
+2. **Leading-symbol monadic heuristic.** A leading `Symbol` must be monadic (`f x`, `⍳5`,
+   `⊃ ⍳5`) but a *user* symbol followed by an operator is the LEFT operand of a dyadic
+   (`x + 1`). Rule: primitive + (plain operand | another primitive) → monadic; user symbol +
+   plain operand → monadic; otherwise fall through to dyadic. Without this `x + 1` became
+   `x (+ 1)` (monadic + with one arg → "+ needs two args").
+3. **Early-return bug.** The leading-symbol branch `return Ok(first)` *before* the dyadic
+   loop meant a non-monadic leading symbol (`x` in `x + 1`) never reached the dyadic loop, so
+   `+ 1` parsed as a *monadic* apply → "+ needs two args". Fixed by falling through.
+4. **`Comma` as operator.** `,` (catenate) had no `Token` and `parse_primary` had no arm for
+   `Token::Comma` → "unexpected token in primary" for `1 , 2`. Added `Token::Comma`, lexed it,
+   and made `parse_primary` emit `Instr::Symbol(",")` for it.
+5. **Dyadic operator must accept user functions.** The dyadic loop only treated *primitive*
+   symbols as operators, so `3 g 4` (dyadic user fn) failed with "unknown function: g".
+   Fixed: any `Symbol` is a valid dyadic operator; the leading-monadic logic already routes
+   `f 5` (user fn + operand) to monadic apply correctly.
+
+**Verification:** `cargo test` (whole workspace) → **42 passed, 0 failed** (number 10 /
+array 3 / lexer 10 / parser 6 / evaluator 13). Phase-4 evaluator tests added:
+`eval_sub_neg`, `eval_div_rational`, `eval_comparisons`, `eval_strand`, `eval_catenate`,
+`eval_reverse`, `eval_transpose`, `eval_take_drop`, `eval_enclose`, `eval_assign_and_var`,
+`eval_lambda_apply` (11 new, all green). No OOM / no SIGKILL (memory-capped profile holds).
+
+**Next:** Phase 5 — REPL + `.kap` runner in `kap-cli` (thin native binary: read file or
+stdin, tokenise→parse→eval, print `format_value`); wire `Engine::eval_string` to it.
+
+

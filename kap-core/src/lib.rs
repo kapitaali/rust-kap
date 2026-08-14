@@ -8,6 +8,7 @@
 //!   D1 single-threaded `Rc<APLValue>`, immutable arrays.
 //!   D2 `num-bigint`/`num-rational` for numbers (no GMP yet).
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -46,6 +47,10 @@ pub enum APLValue {
     /// An unevaluated expression (lazy thunk). `instr` is the tree; `env` is the lexical
     /// environment captured at the point of deferral.
     Deferred { instr: AplRef<ast::Instr>, env: AplRef<Environment> },
+    /// A user-defined function (lambda / tradfn). `params` are argument names; `body` is
+    /// the unevaluated expression; `env` is the closure captured at definition time
+    /// (used to build a child scope when the function is applied).
+    UserFn { params: Vec<String>, body: AplRef<ast::Instr>, env: AplRef<Environment> },
 }
 
 impl APLValue {
@@ -56,7 +61,7 @@ impl APLValue {
     /// Render a value for display (REPL / tests). Mirrors Kap's value printing.
     pub fn format_value(&self) -> String {
         match self {
-            APLValue::Number(n) => n.format(false),
+            APLValue::Number(n) => n.format(true),
             APLValue::Char(c) => c.to_string(),
             APLValue::Str(s) => s.clone(),
             APLValue::Null => "null".to_string(),
@@ -66,16 +71,18 @@ impl APLValue {
                 format!("[{}]", parts.join(" "))
             }
             APLValue::Deferred { .. } => "<deferred>".to_string(),
+            APLValue::UserFn { .. } => "<function>".to_string(),
         }
     }
 }
 
-/// Lexical environment. Phase 3: symbol table + parent link. A `Deferred` value
-/// closes over one of these.
+/// Lexical environment. Symbols live behind a `RefCell` so assignment can mutate the
+/// shared `Rc<Environment>` in place (single-threaded, per D1). `parent` enables lexical
+/// scoping: a lookup walks outward until it finds the name.
 #[derive(Debug, Default, Clone)]
 pub struct Environment {
-    /// Symbols defined in this scope: key = (name, namespace).
-    pub symbols: HashMap<(String, Option<String>), AplRef<APLValue>>,
+    /// Symbols defined in this scope: key = (name, namespace). Values are shared refs.
+    pub symbols: RefCell<HashMap<(String, Option<String>), AplRef<APLValue>>>,
     /// Parent scope for lexical lookup.
     pub parent: Option<AplRef<Environment>>,
 }

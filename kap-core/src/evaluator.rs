@@ -1,9 +1,11 @@
-//! Evaluator for Kap (Phase 3).
+//! Evaluator for Kap (Phase 3 + 4).
 //!
 //! `Engine::eval_string` runs the pipeline: tokenise -> parse -> eval. Laziness (D6):
 //! args are `Instr` trees; they are forced via `force()` only when a builtin needs them.
-//! A starter set of builtins is wired in: `+`, assignment `←`, `⍳` (index generator),
-//! `⍴`/`≢` (shape/length), `⊃` (first). More in later phases.
+//! A starter set of builtins is wired in: arithmetic (`+ - * × ÷`), comparisons
+//! (`= ≠ < > ≤ ≥`), structural (`⍳ rho tally first`, `,` catenate, `⌽/⊖` reverse,
+//! `⍉` transpose, `↑/↓` take/drop, `⊂` enclose), assignment `←`, and user lambdas
+//! (`λ(params) body`). More in later phases.
 
 use crate::array::{ArrayData, KapArray};
 use crate::ast::Instr;
@@ -11,15 +13,16 @@ use crate::lexer::tokenise;
 use crate::number::KapNumber;
 use crate::parser;
 use crate::token::LiteralValue;
+use std::cmp::Ordering;
 use crate::{APLValue, AplError, AplRef, Engine, Environment};
 use std::collections::HashMap;
 use std::rc::Rc;
 
 impl Environment {
-    /// Look up a symbol, walking parent environments.
+    /// Look up a symbol, walking parent environments. Returns a shared ref to the value.
     pub fn lookup(&self, name: &str, ns: &Option<String>) -> Option<AplRef<APLValue>> {
         let key = (name.to_string(), ns.clone());
-        if let Some(v) = self.symbols.get(&key) {
+        if let Some(v) = self.symbols.borrow().get(&key) {
             return Some(v.clone());
         }
         if let Some(p) = &self.parent {
@@ -28,9 +31,12 @@ impl Environment {
         None
     }
 
-    /// Define a symbol in this (innermost) environment.
-    pub fn define(&mut self, name: &str, ns: &Option<String>, value: AplRef<APLValue>) {
-        self.symbols.insert((name.to_string(), ns.clone()), value);
+    /// Define a symbol in this (innermost) environment. Mutates through `RefCell` so the
+    /// definition is visible to all shared `Rc<Environment>` handles (assignment persists).
+    pub fn define(&self, name: &str, ns: &Option<String>, value: AplRef<APLValue>) {
+        self.symbols
+            .borrow_mut()
+            .insert((name.to_string(), ns.clone()), value);
     }
 }
 
@@ -55,8 +61,11 @@ impl Engine {
         let toks = tokenise(src);
         let (stmts, errs) = parser::parse(&toks);
         if !errs.is_empty() {
-            // surface the first parse error with position if available
-            return Err(AplError::Parse { line: 0, col: 0, msg: errs.join("; ") });
+            return Err(AplError::Parse {
+                line: 0,
+                col: 0,
+                msg: errs.join("; "),
+            });
         }
         let env = Rc::new(Environment::default());
         let mut last: AplRef<APLValue> = Rc::new(APLValue::Null);
@@ -67,60 +76,63 @@ impl Engine {
     }
 
     /// Evaluate a single `Instr` in `env`. This is the core eval loop.
-    pub fn eval_instr(&self, instr: &Instr, env: &AplRef<Environment>) -> Result<AplRef<APLValue>, AplError> {
+    pub fn eval_instr(
+        &self,
+        instr: &Instr,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
         match instr {
             Instr::Literal(LiteralValue::Number(n)) => Ok(Rc::new(APLValue::Number(n.clone()))),
             Instr::Literal(LiteralValue::Char(c)) => Ok(Rc::new(APLValue::Char(*c))),
             Instr::Literal(LiteralValue::Str(s)) => Ok(Rc::new(APLValue::Str(s.clone()))),
-            Instr::Literal(LiteralValue::Symbol { .. }) => {
-                Err(AplError::Parse { line: 0, col: 0, msg: "lone symbol literal".into() })
-            }
+            Instr::Literal(LiteralValue::Symbol { .. }) => Err(AplError::Parse {
+                line: 0,
+                col: 0,
+                msg: "lone symbol literal".into(),
+            }),
             Instr::Empty => Ok(Rc::new(APLValue::Null)),
             Instr::Symbol { name, namespace } => {
-                env.lookup(name, namespace)
-                    .ok_or_else(|| AplError::Parse { line: 0, col: 0, msg: format!("undefined symbol: {}", name) })
+                let found = env.lookup(name, namespace).ok_or_else(|| AplError::Parse {
+                    line: 0,
+                    col: 0,
+                    msg: format!("undefined symbol: {}", name),
+                })?;
+                // clone the inner value out of the shared ref
+                Ok(Rc::new(found.as_ref().clone()))
             }
             Instr::Array { elements } => {
-                // Evaluate each element and collect into a nested vector.
                 let mut vals = Vec::with_capacity(elements.len());
                 for e in elements {
                     vals.push(self.eval_instr(e, env)?);
                 }
-                // For now: if all are numbers, use a typed array; else nested.
-                let data = if vals.iter().all(|v| matches!(v.as_ref(), APLValue::Number(_))) {
-                    let nums: Vec<KapNumber> = vals
-                        .iter()
-                        .map(|v| match v.as_ref() {
-                            APLValue::Number(n) => n.clone(),
-                            _ => unreachable!(),
-                        })
-                        .collect();
-                    ArrayData::Nested(vals.clone())
-                } else {
-                    ArrayData::Nested(vals.clone())
-                };
-                let _ = data; // (all-numeric fast path deferred; keep Nested for generality)
-                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(vec![vals.len()], ArrayData::Nested(vals))))))
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![vals.len()],
+                    ArrayData::Nested(vals),
+                )))))
             }
+            Instr::Lambda { params, body } => Ok(Rc::new(APLValue::UserFn {
+                params: params.clone(),
+                body: Rc::new(*body.clone()),
+                env: env.clone(),
+            })),
             Instr::Assign { target, value } => {
-                // target must be a Symbol
                 if let Instr::Symbol { name, namespace } = target.as_ref() {
                     let v = self.eval_instr(value, env)?;
-                    // make a mutable clone of env to define into (innermost)
-                    let mut env_mut = (**env).clone();
-                    env_mut.define(name, namespace, v.clone());
-                    // NOTE: this defines into a *clone*; for true mutation we'd need Rc<RefCell>.
-                    // Phase 3 starter keeps assignment working within a single eval_string via
-                    // the engine's own root environment instead — see eval_string's env handling.
-                    let _ = env_mut;
+                    env.define(name, namespace, v.clone());
                     Ok(v)
                 } else {
-                    Err(AplError::Parse { line: 0, col: 0, msg: "assignment target must be a symbol".into() })
+                    Err(AplError::Parse {
+                        line: 0,
+                        col: 0,
+                        msg: "assignment target must be a symbol".into(),
+                    })
                 }
             }
-            Instr::Apply { fn_expr, left, right } => {
-                self.eval_apply(fn_expr, left, right, env)
-            }
+            Instr::Apply {
+                fn_expr,
+                left,
+                right,
+            } => self.eval_apply(fn_expr, left, right, env),
         }
     }
 
@@ -131,11 +143,37 @@ impl Engine {
         right: &Box<Instr>,
         env: &AplRef<Environment>,
     ) -> Result<AplRef<APLValue>, AplError> {
-        // Resolve the function name (symbol only for the starter set).
-        let name = match fn_expr {
-            Instr::Symbol { name, .. } => name.as_str(),
-            _ => {
-                return Err(AplError::Parse { line: 0, col: 0, msg: "only symbol functions supported in Phase 3".into() })
+        // Resolve the function: a builtin name, a direct lambda, or a user function
+        // bound to a symbol.
+        let fn_name: Option<String> = match fn_expr {
+            Instr::Symbol { name, .. } => Some(name.clone()),
+            _ => None,
+        };
+        let lambda = match fn_expr {
+            Instr::Lambda { params, body } => Some((params.clone(), Rc::new((**body).clone()))),
+            Instr::Symbol { name, namespace } => match env.lookup(name, namespace) {
+                Some(v) if matches!(v.as_ref(), APLValue::UserFn { .. }) => {
+                    if let APLValue::UserFn { params, body, env: fenv } = v.as_ref() {
+                        Some((params.clone(), Rc::new((**body).clone())))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((params, body)) = lambda {
+            return self.apply_user_fn(&params, &body, left, right, env);
+        }
+        let name = match fn_name {
+            Some(n) => n,
+            None => {
+                return Err(AplError::Parse {
+                    line: 0,
+                    col: 0,
+                    msg: "only symbol/lambda functions supported yet".into(),
+                })
             }
         };
         // For dyadic, force left then right; for monadic, only right.
@@ -144,71 +182,364 @@ impl Engine {
             Some(l) => Some(self.eval_instr(l, env)?.force(self)?),
             None => None,
         };
-        match name {
-            "+" => {
-                let (a, b) = (left_val.ok_or_else(|| AplError::Parse { line: 0, col: 0, msg: "+ needs two args".into() })?,
-                              right_val);
-                match (a.as_ref(), b.as_ref()) {
-                    (APLValue::Number(x), APLValue::Number(y)) => Ok(Rc::new(APLValue::Number(x.add(y)))),
-                    _ => Err(AplError::Parse { line: 0, col: 0, msg: "+ requires numbers".into() }),
-                }
-            }
-            "*" => {
-                let (a, b) = (left_val.ok_or_else(|| AplError::Parse { line: 0, col: 0, msg: "* needs two args".into() })?,
-                              right_val);
-                match (a.as_ref(), b.as_ref()) {
-                    (APLValue::Number(x), APLValue::Number(y)) => Ok(Rc::new(APLValue::Number(x.mul(y)))),
-                    _ => Err(AplError::Parse { line: 0, col: 0, msg: "* requires numbers".into() }),
-                }
-            }
-            "⍳" | "iota" => {
-                // monadic: ⍳N -> 0..N-1
-                let n = match right_val.as_ref() {
-                    APLValue::Number(KapNumber::Long(v)) => *v,
-                    _ => return Err(AplError::Parse { line: 0, col: 0, msg: "⍳ needs an integer count".into() }),
-                };
-                if n < 0 {
-                    return Err(AplError::Parse { line: 0, col: 0, msg: "⍳ count must be non-negative".into() });
-                }
-                let nums: Vec<KapNumber> = (0..n).map(KapNumber::Long).collect();
-                let arr = KapArray::from_numbers(nums);
-                Ok(Rc::new(APLValue::Array(Rc::new(arr))))
-            }
-            "⍴" | "rho" => {
-                // monadic: shape of right
-                match right_val.as_ref() {
-                    APLValue::Array(a) => {
-                        let shape: Vec<AplRef<APLValue>> = a
-                            .dimensions
-                            .iter()
-                            .map(|d| Rc::new(APLValue::Number(KapNumber::Long(*d as i64))))
-                            .collect();
-                        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(vec![shape.len()], ArrayData::Nested(shape))))))
-                    }
-                    _ => Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(vec![0], ArrayData::Nested(vec![])))))),
-                }
-            }
-            "≢" | "tally" => {
-                // monadic: tally (element count) of right
-                match right_val.as_ref() {
-                    APLValue::Array(a) => Ok(Rc::new(APLValue::Number(KapNumber::Long(a.element_count() as i64)))),
-                    _ => Ok(Rc::new(APLValue::Number(KapNumber::Long(1)))),
-                }
-            }
-            "⊃" | "first" => {
-                // monadic: first element of right
-                match right_val.as_ref() {
-                    APLValue::Array(a) => {
-                        a.elements()
-                            .into_iter()
-                            .next()
-                            .ok_or_else(|| AplError::Parse { line: 0, col: 0, msg: "⊃ of empty array".into() })
-                    }
-                    other => Ok(Rc::new(other.clone())),
-                }
-            }
-            _ => Err(AplError::Parse { line: 0, col: 0, msg: format!("unknown function: {}", name) }),
+        match name.as_str() {
+            "+" => self.num2(left_val, right_val, |a, b| a.add(b), "+"),
+            "*" | "×" => self.num2(left_val, right_val, |a, b| a.mul(b), "*"),
+            "-" => self.num2(left_val, right_val, |a, b| a.sub(b), "-"),
+            "÷" | "/" => self.num2(left_val, right_val, |a, b| a.div(b), "÷"),
+            "=" => self.cmp2(left_val, right_val, |o| o == Ordering::Equal, "="),
+            "≠" => self.cmp2(left_val, right_val, |o| o != Ordering::Equal, "≠"),
+            "<" => self.cmp2(left_val, right_val, |o| o == Ordering::Less, "<"),
+            ">" => self.cmp2(left_val, right_val, |o| o == Ordering::Greater, ">"),
+            "≤" => self.cmp2(left_val, right_val, |o| o != Ordering::Greater, "≤"),
+            "≥" => self.cmp2(left_val, right_val, |o| o != Ordering::Less, "≥"),
+            "⍳" | "iota" => self.iota(right_val),
+            "⍴" | "rho" => self.shape(right_val),
+            "≢" | "tally" => self.tally(right_val),
+            "⊃" | "first" => self.first(right_val),
+            "," => self.catenate(left_val, right_val),
+            "⌽" | "⊖" => self.reverse(right_val),
+            "⍉" => self.transpose(right_val),
+            "↑" => self.take(left_val, right_val),
+            "↓" => self.drop(left_val, right_val),
+            "⊂" => self.enclose(right_val),
+            _ => Err(AplError::Parse {
+                line: 0,
+                col: 0,
+                msg: format!("unknown function: {}", name),
+            }),
         }
+    }
+
+    /// Apply a user-defined lambda. Dyadic: left=first param, right=second. Monadic:
+    /// right=first param. Builds a child scope from the closure env and binds params.
+    fn apply_user_fn(
+        &self,
+        params: &[String],
+        body: &Instr,
+        left: &Option<Box<Instr>>,
+        right: &Box<Instr>,
+        closure_env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let child = Rc::new(Environment {
+            symbols: Default::default(),
+            parent: Some(closure_env.clone()),
+        });
+        // Evaluate args in the *calling* env (Kap passes by value/sharing).
+        let right_val = self.eval_instr(right, closure_env)?.force(self)?;
+        let mut i = 0;
+        if let Some(l) = left {
+            let left_val = self.eval_instr(l, closure_env)?.force(self)?;
+            if i < params.len() {
+                child.define(&params[i], &None, left_val);
+                i += 1;
+            }
+        }
+        if i < params.len() {
+            child.define(&params[i], &None, right_val);
+        }
+        self.eval_instr(body, &child)
+    }
+
+    // --- helpers ---------------------------------------------------------------
+
+    fn num2(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+        f: impl Fn(&KapNumber, &KapNumber) -> KapNumber,
+        sym: &str,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let a = left_val.ok_or_else(|| AplError::Parse {
+            line: 0,
+            col: 0,
+            msg: format!("{} needs two args", sym),
+        })?;
+        match (a.as_ref(), right_val.as_ref()) {
+            (APLValue::Number(x), APLValue::Number(y)) => {
+                Ok(Rc::new(APLValue::Number(f(x, y))))
+            }
+            // Scalar extension: array <op> scalar, scalar <op> array, array <op> array.
+            (APLValue::Array(xa), APLValue::Number(y)) | (APLValue::Number(y), APLValue::Array(xa)) => {
+                let mut out = Vec::with_capacity(xa.element_count());
+                for e in xa.elements() {
+                    if let APLValue::Number(x) = e.as_ref() {
+                        out.push(Rc::new(APLValue::Number(f(x, y))));
+                    }
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    xa.dimensions.clone(),
+                    ArrayData::Nested(out),
+                )))))
+            }
+            (APLValue::Array(xa), APLValue::Array(ya)) => {
+                let mut out = Vec::with_capacity(xa.element_count());
+                let ye = ya.elements();
+                for (i, e) in xa.elements().into_iter().enumerate() {
+                    if let (APLValue::Number(x), APLValue::Number(y)) = (e.as_ref(), ye[i].as_ref()) {
+                        out.push(Rc::new(APLValue::Number(f(x, y))));
+                    }
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    xa.dimensions.clone(),
+                    ArrayData::Nested(out),
+                )))))
+            }
+            _ => Err(AplError::Parse {
+                line: 0,
+                col: 0,
+                msg: format!("{} requires numbers", sym),
+            }),
+        }
+    }
+
+    fn cmp2(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+        pred: impl Fn(Ordering) -> bool,
+        sym: &str,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let a = left_val.ok_or_else(|| AplError::Parse {
+            line: 0,
+            col: 0,
+            msg: format!("{} needs two args", sym),
+        })?;
+        let ord = match (a.as_ref(), right_val.as_ref()) {
+            (APLValue::Number(x), APLValue::Number(y)) => x.numeric_cmp(y).map_err(|e| {
+                AplError::Parse {
+                    line: 0,
+                    col: 0,
+                    msg: e,
+                }
+            })?,
+            _ => {
+                return Err(AplError::Parse {
+                    line: 0,
+                    col: 0,
+                    msg: format!("{} requires numbers", sym),
+                })
+            }
+        };
+        // Kap booleans are 1 (true) / 0 (false).
+        Ok(Rc::new(APLValue::Number(KapNumber::Long(if pred(ord) { 1 } else { 0 }))))
+    }
+
+    fn iota(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        let n = match right_val.as_ref() {
+            APLValue::Number(KapNumber::Long(v)) => *v,
+            _ => {
+                return Err(AplError::Parse {
+                    line: 0,
+                    col: 0,
+                    msg: "⍳ needs an integer count".into(),
+                })
+            }
+        };
+        if n < 0 {
+            return Err(AplError::Parse {
+                line: 0,
+                col: 0,
+                msg: "⍳ count must be non-negative".into(),
+            });
+        }
+        let nums: Vec<KapNumber> = (0..n).map(KapNumber::Long).collect();
+        let arr = KapArray::from_numbers(nums);
+        Ok(Rc::new(APLValue::Array(Rc::new(arr))))
+    }
+
+    fn shape(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        match right_val.as_ref() {
+            APLValue::Array(a) => {
+                let shape: Vec<AplRef<APLValue>> = a
+                    .dimensions
+                    .iter()
+                    .map(|d| Rc::new(APLValue::Number(KapNumber::Long(*d as i64))))
+                    .collect();
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![shape.len()],
+                    ArrayData::Nested(shape),
+                )))))
+            }
+            _ => Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![0],
+                ArrayData::Nested(vec![]),
+            ))))),
+        }
+    }
+
+    fn tally(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        match right_val.as_ref() {
+            APLValue::Array(a) => Ok(Rc::new(APLValue::Number(KapNumber::Long(
+                a.element_count() as i64,
+            )))),
+            _ => Ok(Rc::new(APLValue::Number(KapNumber::Long(1)))),
+        }
+    }
+
+    fn first(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        match right_val.as_ref() {
+            APLValue::Array(a) => a
+                .elements()
+                .into_iter()
+                .next()
+                .ok_or_else(|| AplError::Parse {
+                    line: 0,
+                    col: 0,
+                    msg: "⊃ of empty array".into(),
+                }),
+            other => Ok(Rc::new(other.clone())),
+        }
+    }
+
+    fn catenate(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let a = left_val.ok_or_else(|| {
+            AplError::Parse {
+                line: 0,
+                col: 0,
+                msg: ", needs two args".into(),
+            }
+        })?;
+        let mut elems = Vec::new();
+        self.collect_elements(&a, &mut elems);
+        self.collect_elements(&right_val, &mut elems);
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![elems.len()],
+            ArrayData::Nested(elems),
+        )))))
+    }
+
+    /// Flatten a value's elements for catenation/stranding: scalars become a 1-element
+    /// list; arrays contribute their elements (one level, not deep).
+    fn collect_elements(&self, v: &AplRef<APLValue>, out: &mut Vec<AplRef<APLValue>>) {
+        match v.as_ref() {
+            APLValue::Array(a) => out.extend(a.elements()),
+            other => out.push(Rc::new(other.clone())),
+        }
+    }
+
+    fn reverse(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        match right_val.as_ref() {
+            APLValue::Array(a) => {
+                let mut elems = a.elements();
+                elems.reverse();
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![elems.len()],
+                    ArrayData::Nested(elems),
+                )))))
+            }
+            other => Ok(Rc::new(other.clone())),
+        }
+    }
+
+    fn transpose(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        // Phase 4: a vector transposes to itself; a 2-D matrix is transposed.
+        match right_val.as_ref() {
+            APLValue::Array(a) if a.rank() == 2 => {
+                let (r, c) = (a.dimensions[0], a.dimensions[1]);
+                let elems = a.elements();
+                let mut out = Vec::with_capacity(r * c);
+                for cc in 0..c {
+                    for rr in 0..r {
+                        out.push(elems[rr * c + cc].clone());
+                    }
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![c, r],
+                    ArrayData::Nested(out),
+                )))))
+            }
+            other => Ok(Rc::new(other.clone())),
+        }
+    }
+
+    fn take(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let left_val = left_val.ok_or_else(|| AplError::Parse {
+            line: 0,
+            col: 0,
+            msg: "↑ needs two args".into(),
+        })?;
+        let n = match left_val.as_ref() {
+            APLValue::Number(KapNumber::Long(v)) => *v,
+            _ => {
+                return Err(AplError::Parse {
+                    line: 0,
+                    col: 0,
+                    msg: "↑ count must be an integer".into(),
+                })
+            }
+        };
+        match right_val.as_ref() {
+            APLValue::Array(a) => {
+                let elems = a.elements();
+                let take = n.unsigned_abs() as usize;
+                let sliced: Vec<AplRef<APLValue>> = if n >= 0 {
+                    elems.iter().take(take).cloned().collect()
+                } else {
+                    elems.iter().rev().take(take).rev().cloned().collect()
+                };
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![sliced.len()],
+                    ArrayData::Nested(sliced),
+                )))))
+            }
+            _ => Ok(right_val),
+        }
+    }
+
+    fn drop(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let left_val = left_val.ok_or_else(|| AplError::Parse {
+            line: 0,
+            col: 0,
+            msg: "↓ needs two args".into(),
+        })?;
+        let n = match left_val.as_ref() {
+            APLValue::Number(KapNumber::Long(v)) => *v,
+            _ => {
+                return Err(AplError::Parse {
+                    line: 0,
+                    col: 0,
+                    msg: "↓ count must be an integer".into(),
+                })
+            }
+        };
+        match right_val.as_ref() {
+            APLValue::Array(a) => {
+                let elems = a.elements();
+                let drop = n.unsigned_abs() as usize;
+                let sliced: Vec<AplRef<APLValue>> = if n >= 0 {
+                    elems.iter().skip(drop).cloned().collect()
+                } else {
+                    let keep = elems.len().saturating_sub(drop);
+                    elems.iter().take(keep).cloned().collect()
+                };
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![sliced.len()],
+                    ArrayData::Nested(sliced),
+                )))))
+            }
+            _ => Ok(right_val),
+        }
+    }
+
+    fn enclose(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        // `⊂` wraps its argument in a 1-element nested array (scalar enclosure).
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![1],
+            ArrayData::Nested(vec![right_val]),
+        )))))
     }
 }
 
@@ -256,5 +587,61 @@ mod tests {
     fn eval_unknown_function_errors() {
         let e = Engine::new();
         assert!(e.eval_string("1 foo 2").is_err());
+    }
+
+    // --- Phase 4 ---
+
+    #[test]
+    fn eval_sub_neg() {
+        assert_eq!(eval("5 - 2"), "3");
+        assert_eq!(eval("2 - 5"), "¯3");
+    }
+
+    #[test]
+    fn eval_div_rational() {
+        assert_eq!(eval("1 ÷ 2"), "1r2");
+        assert_eq!(eval("4 ÷ 2"), "2");
+    }
+
+    #[test]
+    fn eval_comparison() {
+        assert_eq!(eval("3 = 3"), "1");
+        assert_eq!(eval("3 ≠ 4"), "1");
+        assert_eq!(eval("2 < 5"), "1");
+        assert_eq!(eval("5 < 2"), "0");
+        assert_eq!(eval("5 ≥ 5"), "1");
+    }
+
+    #[test]
+    fn eval_catenate() {
+        assert_eq!(eval("1 , 2 , 3"), "[1 2 3]");
+        assert_eq!(eval("[1; 2] , [3; 4]"), "[1 2 3 4]");
+    }
+
+    #[test]
+    fn eval_reverse() {
+        assert_eq!(eval("⌽ ⍳5"), "[4 3 2 1 0]");
+    }
+
+    #[test]
+    fn eval_take_drop() {
+        assert_eq!(eval("3 ↑ ⍳10"), "[0 1 2]");
+        assert_eq!(eval("3 ↓ ⍳10"), "[3 4 5 6 7 8 9]");
+    }
+
+    #[test]
+    fn eval_assign_and_var() {
+        assert_eq!(eval("x ← 5 ⋄ x + 1"), "6");
+    }
+
+    #[test]
+    fn eval_lambda_apply() {
+        assert_eq!(eval("f ← λ(x) x * 2 ⋄ f 5"), "10");
+        assert_eq!(eval("g ← λ(a b) a + b ⋄ 3 g 4"), "7");
+    }
+
+    #[test]
+    fn eval_strand() {
+        assert_eq!(eval("1 2 3 + 10"), "[11 12 13]");
     }
 }
