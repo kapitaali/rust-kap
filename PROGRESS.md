@@ -318,4 +318,34 @@ array 3 / lexer 10 / parser 6 / evaluator 13). Phase-4 evaluator tests added:
 **Next:** Phase 5 — REPL + `.kap` runner in `kap-cli` (thin native binary: read file or
 stdin, tokenise→parse→eval, print `format_value`); wire `Engine::eval_string` to it.
 
+---
+
+## 2026-08-14 — Parenthesization hardening (Phase 4 follow-up)
+
+User flagged that parentheses must be parsed fully because "Kap is very LISPish". Probed the
+actual behavior first; most already worked. Added the genuinely-missing LISPish cases.
+
+**What already worked (verified, not changed):** nested groups `(1+2)*3`, groups with
+assignment/lambda/strand inside `(x ← 5) + 1`, `(f 5)+1`, `(1 2 3)+10`; unclosed-paren gives a
+clean "expected ')'" error.
+
+**Gaps fixed:**
+
+1. **Ambivalent arithmetic.** `-`/`+` were dyadic-only → `-(1+2)` errored "needs two args".
+   Now monadic `- x` = negate (with array scalar-extension: `-(3 1 4)` → `¯3 ¯1 ¯4`),
+   monadic `+ x` = identity. Added `Engine::negate`. `-(1+2)` → `¯3`, `+(1+2)` → `3`.
+2. **Parenthesised operators as derived functions** (`(OP)`). `2 (+) 3` / `3 (×) 4` parsed the
+   group as a strand operand → "undefined symbol". Added `Parser::next_is_paren_operator`
+   (peeks `( OP )` without consuming) so the strand loop does NOT swallow `(+)` and the dyadic
+   loop treats `(OP)` as the operator. `2 (+) 3` → `5`, `3 (×) 4` → `12`.
+   - Critical correctness rule preserved: a group is a derived *operator* ONLY when its sole
+     content is a bare operator symbol. `(1+2)` (contains an `Apply`) stays a plain operand, so
+     `(1+2)(3+4)` correctly strands to `[3 7]` (per user's explicit spec), never an Apply.
+
+**Tests added (evaluator):** `eval_parenthesised_groups`, `eval_juxtaposed_groups_strand`,
+`eval_monadic_arithmetic`, `eval_paren_operator`, `eval_unclosed_paren_errors`.
+
+**Verification:** `cargo test` (whole workspace) → **47 passed, 0 failed** (number 10 / array
+3 / lexer 10 / parser 6 / evaluator 18). No OOM / no SIGKILL.
+
 

@@ -183,9 +183,21 @@ impl Engine {
             None => None,
         };
         match name.as_str() {
-            "+" => self.num2(left_val, right_val, |a, b| a.add(b), "+"),
+            "+" => {
+                // Ambivalent: monadic `+ x` = identity (return x); dyadic = add.
+                match left_val {
+                    None => Ok(right_val),
+                    Some(_) => self.num2(left_val, right_val, |a, b| a.add(b), "+"),
+                }
+            }
             "*" | "×" => self.num2(left_val, right_val, |a, b| a.mul(b), "*"),
-            "-" => self.num2(left_val, right_val, |a, b| a.sub(b), "-"),
+            "-" => {
+                // Ambivalent: monadic `- x` = negate; dyadic = subtract.
+                match left_val {
+                    None => self.negate(right_val),
+                    Some(_) => self.num2(left_val, right_val, |a, b| a.sub(b), "-"),
+                }
+            }
             "÷" | "/" => self.num2(left_val, right_val, |a, b| a.div(b), "÷"),
             "=" => self.cmp2(left_val, right_val, |o| o == Ordering::Equal, "="),
             "≠" => self.cmp2(left_val, right_val, |o| o != Ordering::Equal, "≠"),
@@ -289,6 +301,30 @@ impl Engine {
                 line: 0,
                 col: 0,
                 msg: format!("{} requires numbers", sym),
+            }),
+        }
+    }
+
+    /// Monadic negation: `- x` over a number or an array of numbers (scalar extension).
+    fn negate(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        match right_val.as_ref() {
+            APLValue::Number(x) => Ok(Rc::new(APLValue::Number(x.neg()))),
+            APLValue::Array(a) => {
+                let mut out = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    if let APLValue::Number(x) = e.as_ref() {
+                        out.push(Rc::new(APLValue::Number(x.neg())));
+                    }
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    a.dimensions.clone(),
+                    ArrayData::Nested(out),
+                )))))
+            }
+            _ => Err(AplError::Parse {
+                line: 0,
+                col: 0,
+                msg: "- requires a number".into(),
             }),
         }
     }
@@ -561,6 +597,51 @@ mod tests {
     #[test]
     fn eval_nested_addition() {
         assert_eq!(eval("(1 + 2) * 3"), "9");
+    }
+
+    #[test]
+    fn eval_parenthesised_groups() {
+        // Grouping in arithmetic and with assignment/lambda/strand inside.
+        assert_eq!(eval("(1 + 2) * 3"), "9");
+        assert_eq!(eval("2 * (3 + 4)"), "14");
+        assert_eq!(eval("(1 + 2) * (3 + 4)"), "21");
+        assert_eq!(eval("((1 + 2))"), "3");
+        assert_eq!(eval("(⍳3) + 10"), "[10 11 12]");
+        assert_eq!(eval("1 + (2 * 3)"), "7");
+        assert_eq!(eval("(x ← 5) + 1"), "6");
+        assert_eq!(eval("f ← λ(x) x * 2 ⋄ (f 5) + 1"), "11");
+        assert_eq!(eval("(1 2 3) + 10"), "[11 12 13]");
+        assert_eq!(eval("f ← λ(x) x * 2 ⋄ f (3 + 4)"), "14");
+    }
+
+    #[test]
+    fn eval_juxtaposed_groups_strand() {
+        // Two juxtaposed parenthesised groups form a strand (vector), not application.
+        assert_eq!(eval("(1 + 2)(3 + 4)"), "[3 7]");
+        assert_eq!(eval("(1 2 3)"), "[1 2 3]");
+    }
+
+    #[test]
+    fn eval_monadic_arithmetic() {
+        // `+` and `-` are ambivalent: monadic `- x` = negate, `+ x` = identity.
+        assert_eq!(eval("-(1 + 2)"), "¯3");
+        assert_eq!(eval("+(1 + 2)"), "3");
+        assert_eq!(eval("-(3 1 4)"), "[¯3 ¯1 ¯4]");
+    }
+
+    #[test]
+    fn eval_paren_operator() {
+        // A parenthesised operator `(OP)` is a derived function usable in dyadic position.
+        assert_eq!(eval("2 (+) 3"), "5");
+        assert_eq!(eval("3 (×) 4"), "12");
+    }
+
+    #[test]
+    fn eval_unclosed_paren_errors() {
+        // An unclosed group is a parse error, not a hang or panic.
+        let e = Engine::new();
+        let r = e.eval_string("(2 + 3");
+        assert!(r.is_err());
     }
 
     #[test]

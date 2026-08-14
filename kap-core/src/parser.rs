@@ -165,12 +165,14 @@ impl<'a> Parser<'a> {
         }
         // Stranding: consecutive operands with no operator between them form a vector.
         // e.g. `1 2 3` -> [1 2 3]. Collect into `left` so a following dyadic operator
-        // (e.g. `1 2 3 + 10`) sees the strand as its left argument.
+        // (e.g. `1 2 3 + 10`) sees the strand as its left argument. A `( OP )` parenthesised
+        // operator is NOT an operand here (it is a derived function, e.g. `(+)`).
         let mut left = first;
         loop {
             self.skip_newlines();
+            let paren_op = self.next_is_paren_operator();
             match self.peek() {
-                Some(t) if Self::is_strand_operand(&t.token) => {
+                Some(t) if Self::is_strand_operand(&t.token) && !paren_op => {
                     let operand = self.parse_primary()?;
                     // Build a strand incrementally: if `left` is already an Array strand,
                     // push; otherwise start one.
@@ -183,14 +185,15 @@ impl<'a> Parser<'a> {
                 _ => break,
             }
         }
-        // Dyadic form: a f b (f c ...). `left` may be a value or a strand. The operator must
-        // be a genuine primitive (not a user variable), otherwise we stop and leave `left`
-        // as a lone value / variable reference (e.g. `x` alone).
+        // Dyadic form: a f b (f c ...). `left` may be a value or a strand. The operator may
+        // be a symbol, a parenthesised operator `(+)`, an open-bracket, a lambda, or comma.
         loop {
             self.skip_newlines();
+            let paren_op = self.next_is_paren_operator();
             let is_operator = match self.peek() {
                 Some(t) => match &t.token {
                     Token::Literal(LiteralValue::Symbol { .. }) => true,
+                    Token::OpenParen => paren_op,
                     Token::OpenBracket => true,
                     Token::LambdaToken => true,
                     Token::Comma => true,
@@ -211,6 +214,35 @@ impl<'a> Parser<'a> {
             };
         }
         Ok(left)
+    }
+
+    /// Whether the upcoming tokens form a *parenthesised operator*: `( OP )` where OP is
+    /// a single function symbol. This is Kap's "derived function" syntax, e.g. `(+)`,
+    /// `(×)`. Such a group is NOT a plain operand — in dyadic position it is the operator
+    /// (`2 (+) 3` = `5`), and it must not be swallowed into a strand (`(1+2)(3+4)` is a
+    /// strand of two *groups*, not `(+)`).
+    fn next_is_paren_operator(&mut self) -> bool {
+        let saved = self.pos;
+        let mut ok = false;
+        if let Some(t) = self.peek() {
+            if !matches!(t.token, Token::OpenParen) {
+                return false;
+            }
+            self.pos += 1;
+            self.skip_newlines();
+            ok = matches!(
+                self.peek().map(|t| &t.token),
+                Some(Token::Literal(LiteralValue::Symbol { .. }))
+            );
+            if ok {
+                // advance past the inner operator symbol, then expect ')'
+                self.advance();
+                self.skip_newlines();
+                ok = matches!(self.peek().map(|t| &t.token), Some(Token::CloseParen));
+            }
+        }
+        self.pos = saved;
+        ok
     }
 
     /// Whether a token can begin a strand element (an operand, not an operator/separator).
