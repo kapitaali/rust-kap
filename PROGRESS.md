@@ -526,5 +526,29 @@ Blocks `{ }` are already lexed/parsed (lambda / `∇` bodies). The real structur
 `if`/`while`/`when` as *syntactic keywords* (not symbols) and evaluating their bodies as statement
 sequences in a block context — not inside the pure expression grammar.
 
-**Next (per user order):** control flow (Phase 8), then trains.
+---
+
+## Phase 8: control flow — IMPLEMENTED (commit after this log)
+
+Implemented `if`/`else`/`while`/`when` and blocks `{ }` with **no APL colon prefix** (per the
+design rule above). 70 tests pass (69 lib + 1 integration), REPL-verified.
+
+- **Lexer:** `{` → `OpenBrace`, `}` → `CloseBrace` tokens added.
+- **AST:** new `Instr` variants `Block { body }`, `If { cond, then_block, else_block }`,
+  `While { cond, body }`, `When { clauses: Vec<(cond, body)> }`.
+- **Parser:** `if`/`while`/`when` detected as *syntactic keywords* at the `parse_expr` entry
+  (peek at leading Symbol, dispatch). `parse_block` reads a `⋄`/`;`/newline-separated statement
+  list until `}`. Keyword parsers consume their own keyword token first.
+- **Evaluator:** `eval_instr` handles the four new variants. `truthy()` = non-zero number,
+  non-empty array, non-empty string, non-null. `Block` evaluates statements in order, returning
+  the last. `If`/`While`/`When` eval cond then body blocks.
+- **Verified REPL:** `if (1<2){42}`→`42`; `if (1>2){42}else{7}`→`7`; `{1 ⋄ 2 ⋄ 3}`→`3`;
+  `while`-sum `1..5`→`10`; `when` multi-clause with `(1)` default→`two`; block-local assignment
+  visible outside→`9`. `if (0){1}` (false, no else)→`null`.
+
+**Deferred (not in this phase):** `→` (return from function) — needs call-stack/non-local-exit
+plumbing; lambdas/`∇` don't yet support early return. Trains (roadmap item 4) still pending.
+
+**Next (per user order):** trains (the last roadmap item). After that: implement `→` return,
+`for`/`repeat`, and richer error handling (`throw`/`catch`) if desired.
 

@@ -144,6 +144,8 @@ fn single_char_token(c: char) -> Option<Token> {
     Some(match c {
         '(' => Token::OpenParen,
         ')' => Token::CloseParen,
+        '{' => Token::OpenBrace,
+        '}' => Token::CloseBrace,
         '[' => Token::OpenBracket,
         ']' => Token::CloseBracket,
         '}' => Token::CloseFnDef,

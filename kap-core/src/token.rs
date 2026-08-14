@@ -26,6 +26,8 @@ pub enum Token {
     EndOfFile,
     OpenParen,
     CloseParen,
+    OpenBrace,    // {
+    CloseBrace,   // }
     OpenFnDef,    // ∇
     CloseFnDef,   // }
     OpenBracket,  // [
@@ -47,6 +49,7 @@ pub enum Token {
     IfToken,      // if(
     ElseToken,
     WhileToken,
+    WhenToken,
     LeftForkToken,  // «
     RightForkToken, // »
     DynassignToken, // ⇐

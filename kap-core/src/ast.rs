@@ -34,9 +34,23 @@ pub enum Instr {
     /// `body` is the unevaluated expression. Evaluated (Phase 4) into an `APLValue::UserFn`.
     Lambda { params: Vec<String>, body: Box<Instr> },
     /// A *derived function* from an adverb: `func op` (e.g. `+/`, `×¨`). `func` is the
-    /// function operand, `op` is the adverb (`/`, `\`, `¨`). The evaluator resolves `op`
+    /// function operand, `op` is the adverb (`/`, `\\`, `¨`). The evaluator resolves `op`
     /// to reduce/scan/each and applies `func` to the data arguments.
     Derived { func: Box<Instr>, op: Box<Instr> },
+    /// A block: `{ stmt1 ⋄ stmt2 ⋄ ... }` — a sequence of statements evaluated in order;
+    /// the value of the block is the value of its last statement. Used for control-flow
+    /// bodies and as a standalone scoped expression.
+    Block { body: Vec<Instr> },
+    /// `if (cond) { then }` or `if (cond) { then } else { alt }`.
+    If {
+        cond: Box<Instr>,
+        then_block: Box<Instr>,
+        else_block: Option<Box<Instr>>,
+    },
+    /// `while (cond) { body }` — repeats `body` while `cond` is truthy.
+    While { cond: Box<Instr>, body: Box<Instr> },
+    /// `when { (cond){ body } … (1){ default } }` — first truthy clause's body is evaluated.
+    When { clauses: Vec<(Instr, Instr)> },
     /// An empty array / nil.
     Empty,
 }

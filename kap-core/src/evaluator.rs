@@ -139,6 +139,68 @@ impl Engine {
             Instr::Derived { .. } => Err(AplError::runtime(
                 "derived function used without an argument".into(),
             )),
+            Instr::Block { body } => self.eval_block(body, env),
+            Instr::If {
+                cond,
+                then_block,
+                else_block,
+            } => {
+                let c = self.eval_instr(cond, env)?;
+                if self.truthy(&c) {
+                    self.eval_instr(then_block, env)
+                } else if let Some(alt) = else_block {
+                    self.eval_instr(alt, env)
+                } else {
+                    Ok(Rc::new(APLValue::Null))
+                }
+            }
+            Instr::While { cond, body } => {
+                let mut last = Rc::new(APLValue::Null);
+                loop {
+                    let c = self.eval_instr(cond, env)?;
+                    if !self.truthy(&c) {
+                        break;
+                    }
+                    last = self.eval_instr(body, env)?;
+                }
+                Ok(last)
+            }
+            Instr::When { clauses } => {
+                for (c, b) in clauses {
+                    let cv = self.eval_instr(c, env)?;
+                    if self.truthy(&cv) {
+                        return self.eval_instr(b, env);
+                    }
+                }
+                Ok(Rc::new(APLValue::Null))
+            }
+        }
+    }
+
+    /// Evaluate a block: statements in order; the value is the last statement's value.
+    fn eval_block(
+        &self,
+        body: &[Instr],
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let mut result = Rc::new(APLValue::Null);
+        for stmt in body {
+            result = self.eval_instr(stmt, env)?;
+        }
+        Ok(result)
+    }
+
+    /// Kap truthiness: a number is truthy iff non-zero; an array is truthy iff non-empty;
+    /// null/empty string is falsy; a non-empty string is truthy.
+    fn truthy(&self, v: &APLValue) -> bool {
+        match v {
+            APLValue::Number(n) => n.as_boolean(),
+            APLValue::Array(a) => a.element_count() > 0,
+            APLValue::Str(s) => !s.is_empty(),
+            APLValue::Char(_) => true,
+            APLValue::Null => false,
+            APLValue::UserFn { .. } => true,
+            APLValue::Deferred { .. } => false,
         }
     }
 
@@ -1165,5 +1227,39 @@ mod tests {
         assert_eq!(eval("1 2 3 +¨ 4 5 6"), "[5 7 9]");
         // vector × vector each
         assert_eq!(eval("1 2 3 ×¨ 4 5 6"), "[4 10 18]");
+    }
+
+    // --- Phase 8: control flow (if / while / when / block) ---
+
+    #[test]
+    fn eval_if_then() {
+        assert_eq!(eval("if (1 < 2) { 42 }"), "42");
+        assert_eq!(eval("if (1 > 2) { 42 } else { 7 }"), "7");
+        // no else, false condition -> null
+        assert_eq!(eval("if (0) { 1 }"), "null");
+    }
+
+    #[test]
+    fn eval_block_value() {
+        // block returns last statement's value
+        assert_eq!(eval("{ 1 ⋄ 2 ⋄ 3 }"), "3");
+        // assignment inside a block is visible after (same env)
+        assert_eq!(eval("x ← 0 ⋄ { x ← 5 } ⋄ x"), "5");
+    }
+
+    #[test]
+    fn eval_while_loop() {
+        // sum 1..5 via while
+        assert_eq!(
+            eval("i ← 0 ⋄ s ← 0 ⋄ while (i < 5) { s ← s + i ⋄ i ← i + 1 } ⋄ s"),
+            "10"
+        );
+    }
+
+    #[test]
+    fn eval_when() {
+        // when with a trailing (1) default clause
+        assert_eq!(eval("b ← 2 ⋄ when { (b=1){ \"one\" } (b=2){ \"two\" } (1){ \"other\" } }"), "two");
+        assert_eq!(eval("b ← 9 ⋄ when { (b=1){ \"one\" } (b=2){ \"two\" } (1){ \"other\" } }"), "other");
     }
 }

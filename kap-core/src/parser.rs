@@ -98,7 +98,166 @@ impl<'a> Parser<'a> {
 
     /// statement := expr (⋄ expr)*  — here we parse one expression per call.
     fn parse_expr(&mut self) -> Result<Instr, AplError> {
+        // Control-flow keywords are *syntactic* (not symbols): `if`/`while`/`when`.
+        // Detect a leading keyword symbol and dispatch to the dedicated parser.
+        if let Some(t) = self.peek() {
+            if let Token::Literal(LiteralValue::Symbol { name, .. }) = &t.token {
+                match name.as_str() {
+                    "if" => return self.parse_if(),
+                    "while" => return self.parse_while(),
+                    "when" => return self.parse_when(),
+                    _ => {}
+                }
+            }
+        }
         self.parse_assign()
+    }
+
+    /// block := `{` statement* `}`  — a sequence of statements separated by ⋄/;/newline.
+    fn parse_block(&mut self) -> Result<Instr, AplError> {
+        // Assumes the opening `{` (OpenBrace) has already been consumed.
+        let mut body = Vec::new();
+        loop {
+            self.skip_newlines();
+            match self.peek() {
+                Some(t) if matches!(t.token, Token::CloseBrace) => {
+                    self.advance();
+                    break;
+                }
+                Some(t) if matches!(t.token, Token::StatementSeparator) => {
+                    self.advance();
+                    continue;
+                }
+                Some(t) if matches!(t.token, Token::ListSeparator) => {
+                    // `;` also separates statements inside a block
+                    self.advance();
+                    continue;
+                }
+                Some(_) => {
+                    let stmt = self.parse_expr()?;
+                    body.push(stmt);
+                }
+                None => return Err(self.err("expected '}' to close block")),
+            }
+            // after a statement, swallow a trailing separator
+            self.skip_newlines();
+            if let Some(t) = self.peek() {
+                if matches!(t.token, Token::StatementSeparator)
+                    || matches!(t.token, Token::ListSeparator)
+                {
+                    self.advance();
+                }
+            }
+        }
+        Ok(Instr::Block { body })
+    }
+
+    /// if (cond) { then } [ else { alt } ]
+    fn parse_if(&mut self) -> Result<Instr, AplError> {
+        // `if` is the current token (dispatch in parse_expr peeked it but did not consume).
+        self.advance();
+        self.skip_newlines();
+        if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenParen)) {
+            return Err(self.err("expected '(' after if"));
+        }
+        self.advance();
+        let cond = self.parse_expr()?;
+        self.skip_newlines();
+        if !matches!(self.peek(), Some(t) if matches!(t.token, Token::CloseParen)) {
+            return Err(self.err("expected ')' after if condition"));
+        }
+        self.advance();
+        self.skip_newlines();
+        let then_block = self.parse_block_body()?;
+        // optional `else { ... }`
+        let mut else_block = None;
+        self.skip_newlines();
+        if let Some(t) = self.peek() {
+            if let Token::Literal(LiteralValue::Symbol { name, .. }) = &t.token {
+                if name == "else" {
+                    self.advance();
+                    self.skip_newlines();
+                    else_block = Some(Box::new(self.parse_block_body()?));
+                }
+            }
+        }
+        Ok(Instr::If {
+            cond: Box::new(cond),
+            then_block: Box::new(then_block),
+            else_block,
+        })
+    }
+
+    /// Helper: expect `{ body }` and return the Block.
+    fn parse_block_body(&mut self) -> Result<Instr, AplError> {
+        self.skip_newlines();
+        if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenBrace)) {
+            return Err(self.err("expected '{' to start block"));
+        }
+        self.advance();
+        self.parse_block()
+    }
+
+    /// while (cond) { body }
+    fn parse_while(&mut self) -> Result<Instr, AplError> {
+        self.advance();
+        self.skip_newlines();
+        if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenParen)) {
+            return Err(self.err("expected '(' after while"));
+        }
+        self.advance();
+        let cond = self.parse_expr()?;
+        self.skip_newlines();
+        if !matches!(self.peek(), Some(t) if matches!(t.token, Token::CloseParen)) {
+            return Err(self.err("expected ')' after while condition"));
+        }
+        self.advance();
+        self.skip_newlines();
+        let body = self.parse_block_body()?;
+        Ok(Instr::While {
+            cond: Box::new(cond),
+            body: Box::new(body),
+        })
+    }
+
+    /// when { (cond){ body } … (1){ default } }
+    fn parse_when(&mut self) -> Result<Instr, AplError> {
+        self.advance();
+        self.skip_newlines();
+        if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenBrace)) {
+            return Err(self.err("expected '{' after when"));
+        }
+        self.advance();
+        let mut clauses = Vec::new();
+        loop {
+            self.skip_newlines();
+            match self.peek() {
+                Some(t) if matches!(t.token, Token::CloseBrace) => {
+                    self.advance();
+                    break;
+                }
+                _ => {}
+            }
+            // each clause: ( cond ) { body }
+            self.skip_newlines();
+            if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenParen)) {
+                return Err(self.err("expected '(' to start a when clause"));
+            }
+            self.advance();
+            let cond = self.parse_expr()?;
+            self.skip_newlines();
+            if !matches!(self.peek(), Some(t) if matches!(t.token, Token::CloseParen)) {
+                return Err(self.err("expected ')' after when clause condition"));
+            }
+            self.advance();
+            self.skip_newlines();
+            let body = self.parse_block_body()?;
+            clauses.push((cond, body));
+        }
+        if clauses.is_empty() {
+            return Err(self.err("when requires at least one clause"));
+        }
+        Ok(Instr::When { clauses })
     }
 
     /// assign := symbol ← apply  (left-associative target)
@@ -414,6 +573,10 @@ impl<'a> Parser<'a> {
                     }
                     _ => Err(self.err("expected ')'")),
                 }
+            }
+            Token::OpenBrace => {
+                self.advance();
+                self.parse_block()
             }
             Token::OpenBracket => {
                 self.advance();
