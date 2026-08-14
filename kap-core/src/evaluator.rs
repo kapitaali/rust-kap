@@ -189,7 +189,6 @@ impl Engine {
                     Some(_) => self.num2(left_val, right_val, |a, b| a.add(b), "+"),
                 }
             }
-            "*" | "×" => self.num2(left_val, right_val, |a, b| a.mul(b), "*"),
             "-" => {
                 // Ambivalent: monadic `- x` = negate; dyadic = subtract.
                 match left_val {
@@ -214,6 +213,25 @@ impl Engine {
             "↑" => self.take(left_val, right_val),
             "↓" => self.drop(left_val, right_val),
             "⊂" => self.enclose(right_val),
+            // --- more builtins (Phase 6) ---
+            "⌈" | "ceil" => self.scalar1(right_val, |x| x.ceil(), "⌈"),
+            "⌊" | "floor" => self.scalar1(right_val, |x| x.floor(), "⌊"),
+            "|" | "mod" => self.num2(left_val, right_val, |a, b| a.modulo(b), "|"),
+            "*" | "×" => match left_val {
+                None => self.scalar1(right_val, |x| x.exp(), "*"),
+                Some(_) => self.num2(left_val, right_val, |a, b| a.mul(b), "*"),
+            },
+            "⍟" | "log" => match left_val {
+                None => self.scalar1(right_val, |x| x.nat_log(), "⍟"),
+                Some(_) => self.num2(left_val, right_val, |a, b| b.log(a), "⍟"),
+            },
+            "∧" => self.bool2(left_val, right_val, |a, b| a & b, "∧"),
+            "∨" => self.bool2(left_val, right_val, |a, b| a | b, "∨"),
+            "~" | "not" => self.scalar1(right_val, |x| x.not(), "~"),
+            "∊" | "in" => self.membership(left_val, right_val),
+            "⍋" | "grade" => self.grade_up(right_val),
+            "⊤" | "encode" => self.encode(left_val, right_val),
+            "⊥" | "decode" => self.decode(left_val, right_val),
             _ => Err(AplError::runtime(format!("unknown function: {}", name))),
         }
     }
@@ -516,6 +534,212 @@ impl Engine {
             ArrayData::Nested(vec![right_val]),
         )))))
     }
+
+    /// Apply a unary numeric function to a scalar, or element-wise to an array.
+    fn scalar1(
+        &self,
+        right_val: AplRef<APLValue>,
+        f: impl Fn(&KapNumber) -> KapNumber,
+        sym: &str,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        match right_val.as_ref() {
+            APLValue::Number(x) => Ok(Rc::new(APLValue::Number(f(x)))),
+            APLValue::Array(a) => {
+                let mut out = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    match e.as_ref() {
+                        APLValue::Number(x) => out.push(Rc::new(APLValue::Number(f(x)))),
+                        _ => return Err(AplError::runtime(format!("{} requires numbers", sym))),
+                    }
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    a.dimensions.clone(),
+                    ArrayData::Nested(out),
+                )))))
+            }
+            _ => Err(AplError::runtime(format!("{} requires a number", sym))),
+        }
+    }
+
+    /// Dyadic boolean AND/OR: operands are 0/1 (truthy: non-zero). Result 0/1.
+    fn bool2(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+        f: impl Fn(bool, bool) -> bool,
+        sym: &str,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let a = left_val.ok_or_else(|| AplError::runtime(format!("{} needs two args", sym)))?;
+        let (x, y) = match (a.as_ref(), right_val.as_ref()) {
+            (APLValue::Number(x), APLValue::Number(y)) => (x.as_boolean(), y.as_boolean()),
+            _ => return Err(AplError::runtime(format!("{} requires booleans", sym))),
+        };
+        Ok(Rc::new(APLValue::Number(KapNumber::Long(if f(x, y) { 1 } else { 0 }))))
+    }
+
+    /// Membership `a ∊ b`: for each element of `a`, 1 if present in `b`, else 0.
+    /// Returns a vector (same shape as `a`) of 0/1.
+    fn membership(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let a = left_val.ok_or_else(|| AplError::runtime("∊ needs two args".into()))?;
+        // Collect the set of "keys" in b (compare by formatted value for simplicity).
+        let mut keys = std::collections::HashSet::new();
+        match right_val.as_ref() {
+            APLValue::Array(b) => {
+                for e in b.elements() {
+                    keys.insert(e.format_value());
+                }
+            }
+            other => {
+                keys.insert(other.format_value());
+            }
+        }
+        let mut out = Vec::new();
+        match a.as_ref() {
+            APLValue::Array(aa) => {
+                for e in aa.elements() {
+                    let hit = if keys.contains(&e.format_value()) { 1 } else { 0 };
+                    out.push(Rc::new(APLValue::Number(KapNumber::Long(hit))));
+                }
+            }
+            other => {
+                let hit = if keys.contains(&other.format_value()) { 1 } else { 0 };
+                out.push(Rc::new(APLValue::Number(KapNumber::Long(hit))));
+            }
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![out.len()],
+            ArrayData::Nested(out),
+        )))))
+    }
+
+    /// Grade up `⍋ x`: 1-based indices that would sort `x` ascending.
+    fn grade_up(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        let elems: Vec<(usize, AplRef<APLValue>)> = match right_val.as_ref() {
+            APLValue::Array(a) => a
+                .elements()
+                .into_iter()
+                .enumerate()
+                .collect(),
+            other => vec![(0, Rc::new(other.clone()))],
+        };
+        // Stable sort by formatted value (orderable across all types via numeric_cmp where possible).
+        let mut idx: Vec<usize> = (0..elems.len()).collect();
+        idx.sort_by(|&i, &j| {
+            let vi = &elems[i].1;
+            let vj = &elems[j].1;
+            match (vi.as_ref(), vj.as_ref()) {
+                (APLValue::Number(x), APLValue::Number(y)) => x
+                    .numeric_cmp(y)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+                _ => vi
+                    .format_value()
+                    .cmp(&vj.format_value()),
+            }
+        });
+        let out: Vec<AplRef<APLValue>> = idx
+            .into_iter()
+            .map(|i| Rc::new(APLValue::Number(KapNumber::Long((i + 1) as i64))))
+            .collect();
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![out.len()],
+            ArrayData::Nested(out),
+        )))))
+    }
+
+    /// Encode `base ⊤ value`: represent `value` in the mixed radix given by `base`
+    /// (a vector of radices, most significant first). Returns a vector.
+    fn encode(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let base = left_val.ok_or_else(|| AplError::runtime("⊤ needs two args".into()))?;
+        let radices: Vec<i64> = match base.as_ref() {
+            APLValue::Array(a) => a
+                .elements()
+                .iter()
+                .filter_map(|e| match e.as_ref() {
+                    APLValue::Number(n) => n.as_long().ok(),
+                    _ => None,
+                })
+                .collect(),
+            APLValue::Number(n) => match n.as_long() {
+                Ok(v) => vec![v],
+                Err(_) => return Err(AplError::runtime("⊤ base must be integer".into())),
+            },
+            _ => return Err(AplError::runtime("⊤ base must be a number".into())),
+        };
+        let total: i64 = match right_val.as_ref() {
+            APLValue::Number(n) => n.as_long().unwrap_or(0),
+            _ => return Err(AplError::runtime("⊤ value must be a number".into())),
+        };
+        // Standard APL mixed-radix: digits d_k = floor(total / prod(radices[k+1..])) mod radices[k]
+        let mut prod_after = 1i64;
+        for r in radices.iter().rev() {
+            prod_after *= (*r).max(1);
+        }
+        let mut out = Vec::with_capacity(radices.len());
+        let mut rem = total;
+        for r in &radices {
+            let r = (*r).max(1);
+            prod_after /= r;
+            let digit = (rem / prod_after) % r;
+            out.push(Rc::new(APLValue::Number(KapNumber::Long(digit))));
+            rem %= prod_after;
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![out.len()],
+            ArrayData::Nested(out),
+        )))))
+    }
+
+    /// Decode `base ⊥ digits`: mixed-radix value of `digits` under radices `base`.
+    fn decode(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let base = left_val.ok_or_else(|| AplError::runtime("⊥ needs two args".into()))?;
+        let radices: Vec<i64> = match base.as_ref() {
+            APLValue::Array(a) => a
+                .elements()
+                .iter()
+                .filter_map(|e| match e.as_ref() {
+                    APLValue::Number(n) => n.as_long().ok(),
+                    _ => None,
+                })
+                .collect(),
+            APLValue::Number(n) => match n.as_long() {
+                Ok(v) => vec![v],
+                Err(_) => return Err(AplError::runtime("⊥ base must be integer".into())),
+            },
+            _ => return Err(AplError::runtime("⊥ base must be a number".into())),
+        };
+        let digits: Vec<i64> = match right_val.as_ref() {
+            APLValue::Array(a) => a
+                .elements()
+                .iter()
+                .filter_map(|e| match e.as_ref() {
+                    APLValue::Number(n) => n.as_long().ok(),
+                    _ => None,
+                })
+                .collect(),
+            APLValue::Number(n) => match n.as_long() {
+                Ok(v) => vec![v],
+                Err(_) => return Err(AplError::runtime("⊥ digits must be integer".into())),
+            },
+            _ => return Err(AplError::runtime("⊥ digits must be a number".into())),
+        };
+        let mut total = 0i64;
+        for (r, d) in radices.iter().zip(digits.iter()) {
+            total = total * (*r).max(1) + d;
+        }
+        Ok(Rc::new(APLValue::Number(KapNumber::Long(total))))
+    }
 }
 
 #[cfg(test)]
@@ -663,5 +887,69 @@ mod tests {
     #[test]
     fn eval_strand() {
         assert_eq!(eval("1 2 3 + 10"), "[11 12 13]");
+    }
+
+    // --- Phase 6: more builtins ---
+
+    #[test]
+    fn eval_ceil_floor() {
+        assert_eq!(eval("⌈ 3.2"), "4.0");
+        assert_eq!(eval("⌊ 3.8"), "3.0");
+        assert_eq!(eval("⌈ 5"), "5");
+        assert_eq!(eval("⌈ 1.5 2.5 3.5"), "[2.0 3.0 4.0]");
+    }
+
+    #[test]
+    fn eval_exp_log() {
+        assert_eq!(eval("* 0"), "1.0");
+        assert_eq!(eval("* 1"), "2.718281828459045");
+        // natural log (monadic ⍟): ln(1) = 0 exactly (but typed Double -> "0.0")
+        assert_eq!(eval("⍟ 1"), "0.0");
+        // dyadic log: log base 2 of 8 = 3
+        assert_eq!(eval("2 ⍟ 8"), "3.0");
+    }
+
+    #[test]
+    fn eval_modulo() {
+        assert_eq!(eval("7 | 3"), "1");
+        assert_eq!(eval("8 | 3"), "2");
+        assert_eq!(eval("10 | 3"), "1");
+    }
+
+    #[test]
+    fn eval_boolean_and_or() {
+        assert_eq!(eval("1 ∧ 1"), "1");
+        assert_eq!(eval("1 ∧ 0"), "0");
+        assert_eq!(eval("0 ∨ 1"), "1");
+        assert_eq!(eval("0 ∨ 0"), "0");
+        // comparisons yield booleans, combine with ∧/∨
+        assert_eq!(eval("(3 < 5) ∧ (2 < 4)"), "1");
+    }
+
+    #[test]
+    fn eval_not() {
+        assert_eq!(eval("~ 0"), "1");
+        assert_eq!(eval("~ 5"), "0");
+        assert_eq!(eval("~ 1 0 3"), "[0 1 0]");
+    }
+
+    #[test]
+    fn eval_membership() {
+        assert_eq!(eval("2 9 4 ∊ 1 2 3 4"), "[1 0 1]");
+    }
+
+    #[test]
+    fn eval_grade_up() {
+        assert_eq!(eval("⍋ 3 1 4 1 5"), "[2 4 1 3 5]");
+    }
+
+    #[test]
+    fn eval_encode_decode() {
+        // 2 2 2 ⊤ 5  -> binary-ish mixed radix of 5 = [1 0 1]
+        assert_eq!(eval("2 2 2 ⊤ 5"), "[1 0 1]");
+        // inverse: 2 2 2 ⊥ 1 0 1 -> 1*4 + 0*2 + 1 = 5
+        assert_eq!(eval("2 2 2 ⊥ 1 0 1"), "5");
+        // 24 60 ⊤ 90 -> 1 hour 30 min
+        assert_eq!(eval("24 60 ⊤ 90"), "[1 30]");
     }
 }

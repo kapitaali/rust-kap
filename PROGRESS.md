@@ -406,3 +406,47 @@ buried in the message text. Now:
 **Verification:** `cargo test` → **53 passed, 0 failed** (added `parse_errors_carry_real_position`
 + `runtime_errors_separate_from_parse`). Manual REPL check: `2 (` → `parse error at 2:1`,
 `foo 3` → `error: unknown function: foo`.
+
+---
+
+## 2026-08-14 — Phase 6: more builtins
+
+Added a batch of scalar/array builtins (the "easy" next feature, per user's requested order:
+builtins → adverbs → control flow → trains).
+
+**New monadic/ambivalent functions** (in `evaluator.rs` `eval_apply`):
+- `⌈`/`ceil`, `⌊`/`floor` — element-wise ceil/floor via `KapNumber::ceil/floor`.
+- `*` — **ambivalent**: monadic `*` = exp (`x.exp()`), dyadic `*`/`×` = multiply. (Was dyadic-only
+  before; made ambivalent like `+`/`-`.)
+- `⍟`/`log` — **ambivalent**: monadic `⍟` = natural log (`KapNumber::nat_log`); dyadic `a ⍟ b`
+  = log base `a` of `b` = `ln(b)/ln(a)` (Kap/APL convention: `X ⍟ Y` = log base X of Y).
+- `|`/`mod` — residue/modulo (`KapNumber::modulo`, rem_euclid semantics).
+- `∧`/`∨` — boolean AND/OR on 0/1 (`bool2` helper).
+- `~`/`not` — logical not (`KapNumber::not`: zero→1, non-zero→0), element-wise.
+- `∊`/`in` — membership: for each of `a`'s elements, 1 if present in `b` else 0 (`membership`).
+- `⍋`/`grade` — grade up: 1-based indices that would sort ascending (`grade_up`).
+- `⊤`/`encode`, `⊥`/`decode` — mixed-radix base conversion (`encode`/`decode`).
+
+**Supporting changes:**
+- `number.rs`: added `ceil`, `floor`, `exp`, `nat_log`, `log`, `modulo`, `not` to `KapNumber`
+  (with Complex/BigInt/Rational branches where meaningful).
+- `parser.rs`: added the new glyphs to `is_primitive_op` so they parse as operators, not vars.
+- Added helper methods `scalar1`, `bool2`, `membership`, `grade_up`, `encode`, `decode` to
+  `Engine`.
+
+**Bugs caught & fixed during this phase:**
+1. New glyphs missing from `is_primitive_op` → parsed as undefined variables
+   (`undefined symbol: ⍟`). Added them.
+2. Duplicate `"*"` match arm (old dyadic `*`) shadowed the new ambivalent `*` arm → `*` was
+   always dyadic. Removed the stale duplicate.
+3. `⍟` monadic initially used `x.log(Long(e))` (wrong: ln(x)/ln(e) ≠ ln(x)); replaced with
+   dedicated `nat_log`. Dyadic `⍟` call flipped to `b.log(a)` for correct base convention.
+4. `modulo` BigInt branch used `mod_floor` (trait not in scope) → fell back to Double path.
+
+**Verification:** `cargo test` → **62 passed, 0 failed** (added 9 builtin tests). REPL smoke-tested
+end-to-end: `⌈ 3.2`→`4.0`, `⌊ 3.8`→`3.0`, `7 | 3`→`1`, `1 ∧ 0`→`0`, `~ 1 0 3`→`[0 1 0]`,
+`2 9 4 ∊ 1 2 3 4`→`[1 0 1]`, `⍋ 3 1 4 1 5`→`[2 4 1 3 5]`, `2 2 2 ⊤ 5`→`[1 0 1]`,
+`2 2 2 ⊥ 1 0 1`→`5`, `* 2`→`7.389`, `2 ⍟ 8`→`3.0`.
+
+**Next (per user order):** adverbs `/` `\` `¨`, then control flow, then trains.
+

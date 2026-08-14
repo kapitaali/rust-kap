@@ -319,6 +319,125 @@ impl KapNumber {
             _ => Double(self.as_double() / other.as_double()),
         }
     }
+
+    /// Ceiling: smallest integer ≥ self. Identity for integer kinds; f64 ceil for Double.
+    pub fn ceil(&self) -> KapNumber {
+        use KapNumber::*;
+        match self {
+            Long(v) => Long(*v),
+            Double(v) => Double(v.ceil()),
+            BigInt(v) => BigInt(v.clone()),
+            Rational(v) => {
+                // ceil of a/b = -floor(-a/b)
+                let c = (-v).floor();
+                Rational(-c)
+            }
+            Complex(r, i) => Complex(r.ceil(), i.ceil()),
+        }
+    }
+
+    /// Floor: largest integer ≤ self.
+    pub fn floor(&self) -> KapNumber {
+        use KapNumber::*;
+        match self {
+            Long(v) => Long(*v),
+            Double(v) => Double(v.floor()),
+            BigInt(v) => BigInt(v.clone()),
+            Rational(v) => Rational(v.floor()),
+            Complex(r, i) => Complex(r.floor(), i.floor()),
+        }
+    }
+
+    /// Natural exponential (base e).
+    pub fn exp(&self) -> KapNumber {
+        use KapNumber::*;
+        match self {
+            Complex(r, i) => {
+                // e^(a+bi) = e^a (cos b + i sin b)
+                let ea = r.exp();
+                Complex(ea * bcos(*i), ea * bsin(*i))
+            }
+            other => Double(other.as_double().exp()),
+        }
+    }
+
+    /// Natural logarithm (monadic `⍟`).
+    pub fn nat_log(&self) -> KapNumber {
+        use KapNumber::*;
+        match self {
+            Complex(r, i) => {
+                // ln(z) = ln|z| + i arg(z)
+                let (mag, arg) = (babs((*r, *i)), barg((*r, *i)));
+                Complex(mag.ln(), arg)
+            }
+            other => Double(other.as_double().ln()),
+        }
+    }
+
+    /// Logarithm. Monadic `⍟ x` = natural log; dyadic `a ⍟ b` = log base b of a.
+    pub fn log(&self, base: &KapNumber) -> KapNumber {
+        use KapNumber::*;
+        match (self, base) {
+            (Complex(r, i), _) => {
+                // ln(z) = ln|z| + i arg(z)
+                let z = (*r, *i);
+                let (mag, arg) = (babs(z), barg(z));
+                Complex(mag.ln(), arg)
+            }
+            (a, b) => Double(a.as_double().ln() / b.as_double().ln()),
+        }
+    }
+
+    /// Kap residue/modulo: `|` is the modulus such that `a = (a|b) + b * floor(a/b)`.
+    /// For positive divisor this matches `a % b`; sign follows the divisor (Kap/APL rule).
+    pub fn modulo(&self, other: &KapNumber) -> KapNumber {
+        use KapNumber::*;
+        match (self, other) {
+            (Long(a), Long(b)) if *b != 0 => Long(a.rem_euclid(*b)),
+            (Long(a), BigInt(b)) if *b != num_bigint::BigInt::from(0) => {
+                // Fall through to Double for the big-int divisor case (keeps it simple
+                // and matches Kap's residue semantics for typical inputs).
+                let a = *a as f64;
+                let b = b.to_string().parse::<f64>().unwrap_or(0.0);
+                if b == 0.0 {
+                    Double(0.0)
+                } else {
+                    Double(a.rem_euclid(b))
+                }
+            }
+            _ => {
+                let a = self.as_double();
+                let b = other.as_double();
+                if b == 0.0 {
+                    return Double(0.0);
+                }
+                Double(a.rem_euclid(b))
+            }
+        }
+    }
+
+    /// Logical not (boolean). Non-zero -> 0, zero -> 1 (Kap booleans are 1/0).
+    pub fn not(&self) -> KapNumber {
+        if self.is_zero() {
+            KapNumber::Long(1)
+        } else {
+            KapNumber::Long(0)
+        }
+    }
+}
+
+// Small complex helpers used by exp/log above.
+fn bcos(x: f64) -> f64 {
+    x.cos()
+}
+fn bsin(x: f64) -> f64 {
+    x.sin()
+}
+fn babs((r, i): (f64, f64)) -> f64 {
+    (r * r + i * i).sqrt()
+}
+fn barg((r, i): (f64, f64)) -> f64 {
+    i.atan2(r)
 }
 
 #[cfg(test)]
