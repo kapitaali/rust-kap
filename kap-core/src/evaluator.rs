@@ -1212,6 +1212,9 @@ mod tests {
         assert_eq!(eval("(1 2 (3 4 5))"), "(1 2 (3 4 5))");
         // Deeper nesting.
         assert_eq!(eval("(1 (2 (3 (4 5))))"), "(1 (2 (3 (4 5))))");
+        // A parenthesised group within a strand stays a single element — NOT flattened.
+        assert_eq!(eval("((1 2 3) 4 5)"), "((1 2 3) 4 5)");
+        assert_eq!(eval("(1 2 3) 4 5"), "((1 2 3) 4 5)");
         // A nested vector element can still be used as data (catenate strands it in).
         assert_eq!(eval("1 2 , (3 4)"), "(1 2 3 4)");
     }

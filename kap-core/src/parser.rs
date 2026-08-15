@@ -402,6 +402,13 @@ impl<'a> Parser<'a> {
         // e.g. `1 2 3` -> [1 2 3]. Collect into `left` so a following dyadic operator
         // (e.g. `1 2 3 + 10`) sees the strand as its left argument. A `( OP )` parenthesised
         // operator is NOT an operand here (it is a derived function, e.g. `(+)`).
+        //
+        // NOTE: a parenthesised group like `(1 2 3)` already parses to an `Instr::Array`.
+        // That array must remain a SINGLE element of the strand (`((1 2 3) 4 5)` ->
+        // vector of 3 elements: the nested array `(1 2 3)`, `4`, `5`), NOT be flattened
+        // into it. So we accumulate strand elements in a Vec and only build the result
+        // `Instr::Array` once at the end — never pushing *into* an existing array element.
+        let mut strand: Option<Vec<Instr>> = None;
         let mut left = first;
         loop {
             // Stop at a statement boundary: newlines separate statements at the top
@@ -418,15 +425,19 @@ impl<'a> Parser<'a> {
             match self.peek() {
                 Some(t) if Self::is_strand_operand(&t.token) && !paren_op => {
                     let operand = self.parse_primary()?;
-                    // Build a strand incrementally: if `left` is already an Array strand,
-                    // push; otherwise start one.
-                    if let Instr::Array { elements } = &mut left {
-                        elements.push(operand);
-                    } else {
-                        left = Instr::Array { elements: vec![left, operand] };
+                    match strand {
+                        None => strand = Some(vec![left.clone(), operand]),
+                        Some(ref mut elems) => elems.push(operand),
                     }
                 }
                 _ => break,
+            }
+        }
+        // If we accumulated >=2 strand elements, the result is a vector; the original
+        // `left` becomes element 0. A single operand (no strand) returns unchanged.
+        if let Some(elems) = strand {
+            if elems.len() >= 2 {
+                left = Instr::Array { elements: elems };
             }
         }
         // Dyadic form: a f b (f c ...). `left` may be a value or a strand. The operator may
