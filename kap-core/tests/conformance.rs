@@ -178,12 +178,12 @@ fn curated_kap_parity() {
         // Monadic arithmetic
         ("-(1 + 2)", "¯3"),
         ("+(1 + 2)", "3"),
-        ("-(3 1 4)", "[¯3 ¯1 ¯4]"),
+        ("-(3 1 4)", "(¯3 ¯1 ¯4)"),
         ("2 (+) 3", "5"),
         ("3 (×) 4", "12"),
         // Iota (1-based, just fixed)
-        ("⍳5", "[0 1 2 3 4]"),
-        ("⍳0", "[]"),
+        ("⍳5", "(0 1 2 3 4)"),
+        ("⍳0", "()"),
         // Control flow (Phase 8)
         ("if (1 < 2) { 42 }", "42"),
         ("if (1 > 2) { 42 } else { 7 }", "7"),
@@ -194,14 +194,14 @@ fn curated_kap_parity() {
         // Adverbs (Phase 7)
         ("+/ 1 2 3 4", "10"),
         ("×/ 1 2 3 4", "24"),
-        ("+\\ 1 2 3 4", "[1 3 6 10]"),
+        ("+\\ 1 2 3 4", "(1 3 6 10)"),
         ("⌈/ 3 9 2 7", "9"),
         ("⌊/ 3 9 2 7", "2"),
-        ("⌈¨ 1.2 2.8 3.5", "[2.0 3.0 4.0]"),
-        ("2 ×¨ 3 4 5", "[6 8 10]"),
-        ("1 2 3 ×¨ 4 5 6", "[4 10 18]"),
+        ("⌈¨ 1.2 2.8 3.5", "(2.0 3.0 4.0)"),
+        ("2 ×¨ 3 4 5", "(6 8 10)"),
+        ("1 2 3 ×¨ 4 5 6", "(4 10 18)"),
         ("3 ⌈ 5", "5"),
-        ("~¨ 1 0 3", "[0 1 0]"),
+        ("~¨ 1 0 3", "(0 1 0)"),
         // Builtins (ambivalent max/min, arithmetic) — Phase 6
         ("⌈ 3.2", "4.0"),
         ("⌊ 3.8", "3.0"),
@@ -211,9 +211,9 @@ fn curated_kap_parity() {
         ("1 ∨ 0", "1"),
         ("~ 1", "0"),
         ("~ 0", "1"),
-        ("1 2 3 ∊ 1 2 3 4", "[1 1 1]"),  // membership is element-wise (returns vector)
-        ("5 ∊ 1 2 3 4", "[0]"),
-        ("⍋ 3 1 4 2", "[1 3 0 2]"), // grade-up (monadic): 0-based indices ascending
+        ("1 2 3 ∊ 1 2 3 4", "(1 1 1)"),  // membership is element-wise (returns vector)
+        ("5 ∊ 1 2 3 4", "(0)"),
+        ("⍋ 3 1 4 2", "(1 3 0 2)"), // grade-up (monadic): 0-based indices ascending
         // Trains (Phase 9): verified cases are added after the broad run confirms behavior.
     ];
 

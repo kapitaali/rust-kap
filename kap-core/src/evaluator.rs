@@ -1192,18 +1192,18 @@ mod tests {
         assert_eq!(eval("2 × (3 + 4)"), "14");
         assert_eq!(eval("(1 + 2) × (3 + 4)"), "21");
         assert_eq!(eval("((1 + 2))"), "3");
-        assert_eq!(eval("(⍳3) + 10"), "[10 11 12]");
+        assert_eq!(eval("(⍳3) + 10"), "(10 11 12)");
         assert_eq!(eval("1 + (2 × 3)"), "7");
         assert_eq!(eval("(x ← 5) + 1"), "6");
         assert_eq!(eval("f ← λ(x) x × 2 ⋄ (f 5) + 1"), "11");
-        assert_eq!(eval("(1 2 3) + 10"), "[11 12 13]");
+        assert_eq!(eval("(1 2 3) + 10"), "(11 12 13)");
         assert_eq!(eval("f ← λ(x) x × 2 ⋄ f (3 + 4)"), "14");
     }
 
     #[test]
     fn eval_juxtaposed_groups_strand() {
         // A parenthesised group of values strands into a vector.
-        assert_eq!(eval("(1 2 3)"), "[1 2 3]");
+        assert_eq!(eval("(1 2 3)"), "(1 2 3)");
     }
 
     #[test]
@@ -1211,7 +1211,7 @@ mod tests {
         // `+` and `-` are ambivalent: monadic `- x` = negate, `+ x` = identity.
         assert_eq!(eval("-(1 + 2)"), "¯3");
         assert_eq!(eval("+(1 + 2)"), "3");
-        assert_eq!(eval("-(3 1 4)"), "[¯3 ¯1 ¯4]");
+        assert_eq!(eval("-(3 1 4)"), "(¯3 ¯1 ¯4)");
     }
 
     #[test]
@@ -1231,7 +1231,7 @@ mod tests {
 
     #[test]
     fn eval_iota() {
-        assert_eq!(eval("⍳5"), "[0 1 2 3 4]");
+        assert_eq!(eval("⍳5"), "(0 1 2 3 4)");
     }
 
     #[test]
@@ -1246,7 +1246,7 @@ mod tests {
 
     #[test]
     fn eval_array_literal() {
-        assert_eq!(eval("[10; 20; 30]"), "[10 20 30]");
+        assert_eq!(eval("[10; 20; 30]"), "(10 20 30)");
     }
 
     #[test]
@@ -1280,19 +1280,19 @@ mod tests {
 
     #[test]
     fn eval_catenate() {
-        assert_eq!(eval("1 , 2 , 3"), "[1 2 3]");
-        assert_eq!(eval("[1; 2] , [3; 4]"), "[1 2 3 4]");
+        assert_eq!(eval("1 , 2 , 3"), "(1 2 3)");
+        assert_eq!(eval("[1; 2] , [3; 4]"), "(1 2 3 4)");
     }
 
     #[test]
     fn eval_reverse() {
-        assert_eq!(eval("⌽ ⍳5"), "[4 3 2 1 0]");
+        assert_eq!(eval("⌽ ⍳5"), "(4 3 2 1 0)");
     }
 
     #[test]
     fn eval_take_drop() {
-        assert_eq!(eval("3 ↑ ⍳10"), "[0 1 2]");
-        assert_eq!(eval("3 ↓ ⍳10"), "[3 4 5 6 7 8 9]");
+        assert_eq!(eval("3 ↑ ⍳10"), "(0 1 2)");
+        assert_eq!(eval("3 ↓ ⍳10"), "(3 4 5 6 7 8 9)");
     }
 
     #[test]
@@ -1308,7 +1308,7 @@ mod tests {
 
     #[test]
     fn eval_strand() {
-        assert_eq!(eval("1 2 3 + 10"), "[11 12 13]");
+        assert_eq!(eval("1 2 3 + 10"), "(11 12 13)");
     }
 
     // --- Phase 6: more builtins ---
@@ -1318,7 +1318,7 @@ mod tests {
         assert_eq!(eval("⌈ 3.2"), "4.0");
         assert_eq!(eval("⌊ 3.8"), "3.0");
         assert_eq!(eval("⌈ 5"), "5");
-        assert_eq!(eval("⌈ 1.5 2.5 3.5"), "[2.0 3.0 4.0]");
+        assert_eq!(eval("⌈ 1.5 2.5 3.5"), "(2.0 3.0 4.0)");
     }
 
     #[test]
@@ -1352,28 +1352,28 @@ mod tests {
     fn eval_not() {
         assert_eq!(eval("~ 0"), "1");
         assert_eq!(eval("~ 5"), "0");
-        assert_eq!(eval("~ 1 0 3"), "[0 1 0]");
+        assert_eq!(eval("~ 1 0 3"), "(0 1 0)");
     }
 
     #[test]
     fn eval_membership() {
-        assert_eq!(eval("2 9 4 ∊ 1 2 3 4"), "[1 0 1]");
+        assert_eq!(eval("2 9 4 ∊ 1 2 3 4"), "(1 0 1)");
     }
 
     #[test]
     fn eval_grade_up() {
         // 0-based indices (Kap is 0-based): ⍋ 3 1 4 1 5 -> positions ascending by value
-        assert_eq!(eval("⍋ 3 1 4 1 5"), "[1 3 0 2 4]");
+        assert_eq!(eval("⍋ 3 1 4 1 5"), "(1 3 0 2 4)");
     }
 
     #[test]
     fn eval_encode_decode() {
         // 2 2 2 ⊤ 5  -> binary-ish mixed radix of 5 = [1 0 1]
-        assert_eq!(eval("2 2 2 ⊤ 5"), "[1 0 1]");
+        assert_eq!(eval("2 2 2 ⊤ 5"), "(1 0 1)");
         // inverse: 2 2 2 ⊥ 1 0 1 -> 1*4 + 0*2 + 1 = 5
         assert_eq!(eval("2 2 2 ⊥ 1 0 1"), "5");
         // 24 60 ⊤ 90 -> 1 hour 30 min
-        assert_eq!(eval("24 60 ⊤ 90"), "[1 30]");
+        assert_eq!(eval("24 60 ⊤ 90"), "(1 30)");
     }
 
     // --- Phase 7: adverbs (/ reduce, \ scan, ¨ each) ---
@@ -1388,24 +1388,24 @@ mod tests {
 
     #[test]
     fn eval_scan() {
-        assert_eq!(eval("+\\ 1 2 3 4"), "[1 3 6 10]");
-        assert_eq!(eval("×\\ 1 2 3 4"), "[1 2 6 24]");
+        assert_eq!(eval("+\\ 1 2 3 4"), "(1 3 6 10)");
+        assert_eq!(eval("×\\ 1 2 3 4"), "(1 2 6 24)");
     }
 
     #[test]
     fn eval_each_monadic() {
-        assert_eq!(eval("⌈¨ 1.2 2.8 3.5"), "[2.0 3.0 4.0]");
-        assert_eq!(eval("~¨ 1 0 3"), "[0 1 0]");
+        assert_eq!(eval("⌈¨ 1.2 2.8 3.5"), "(2.0 3.0 4.0)");
+        assert_eq!(eval("~¨ 1 0 3"), "(0 1 0)");
     }
 
     #[test]
     fn eval_each_dyadic() {
         // element-wise: 2 ×¨ 3 4 5  -> [6 8 10]
-        assert_eq!(eval("2 ×¨ 3 4 5"), "[6 8 10]");
+        assert_eq!(eval("2 ×¨ 3 4 5"), "(6 8 10)");
         // scalar-extended left, vector right
-        assert_eq!(eval("1 2 3 +¨ 4 5 6"), "[5 7 9]");
+        assert_eq!(eval("1 2 3 +¨ 4 5 6"), "(5 7 9)");
         // vector × vector each
-        assert_eq!(eval("1 2 3 ×¨ 4 5 6"), "[4 10 18]");
+        assert_eq!(eval("1 2 3 ×¨ 4 5 6"), "(4 10 18)");
     }
 
     // --- Phase 8: control flow (if / while / when / block) ---
@@ -1461,15 +1461,15 @@ mod tests {
     #[test]
     fn eval_train_compose() {
         // x (f ∘ g) y = f(y, g(y))  (compose is dyadic: f(y, g(y)))
-        assert_eq!(eval("¯2 3 4 (×∘-) 1000"), "[2000 ¯3000 ¯4000]");
+        assert_eq!(eval("¯2 3 4 (×∘-) 1000"), "(2000 ¯3000 ¯4000)");
         // monadic compose with reciprocal: (×∘÷) y = y × (1/y) = y, exactly 1 for all y≠0.
-        assert_eq!(eval("(×∘÷) ¯1 2 3"), "[1 1r1 1r1]");
+        assert_eq!(eval("(×∘÷) ¯1 2 3"), "(1 1r1 1r1)");
     }
 
     #[test]
     fn eval_train_atop() {
         // x (f g) y = f(x g y)  (atop: g dyadic between x and y)
         assert_eq!(eval("2 (-*) 5"), "¯32"); // -(2*5)
-        assert_eq!(eval("10 (-,) 20"), "[¯10 ¯20]"); // -(10,20) = (-10,-20)
+        assert_eq!(eval("10 (-,) 20"), "(¯10 ¯20)"); // -(10,20) = (-10,-20)
     }
 }

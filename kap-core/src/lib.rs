@@ -71,9 +71,11 @@ impl APLValue {
             APLValue::Str(s) => s.clone(),
             APLValue::Null => "null".to_string(),
             APLValue::Array(a) => {
-                // simple 1-D vector render
+                // Kap vectors render with parentheses, not brackets (brackets are
+                // reserved for array indexing). Simple 1-D vector render; nested
+                // arrays recurse and each level also uses parentheses.
                 let parts: Vec<String> = a.elements().iter().map(|e| e.format_value()).collect();
-                format!("[{}]", parts.join(" "))
+                format!("({})", parts.join(" "))
             }
             APLValue::Deferred { .. } => "<deferred>".to_string(),
             APLValue::UserFn { .. } => "<function>".to_string(),
