@@ -51,6 +51,8 @@ pub enum Token {
     WhenToken,
     LeftForkToken,  // «
     RightForkToken, // »
+    ComposeToken,   // ∘  (atop / compose: f ∘ g)
+    ReverseComposeToken, // ⍛  (reverse compose: f ⍛ g)
     DynassignToken, // ⇐
     AndToken,    // and
     OrToken,     // or

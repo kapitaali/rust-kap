@@ -156,6 +156,8 @@ fn single_char_token(c: char) -> Option<Token> {
         '⇐' => Token::DynassignToken,
         '«' => Token::LeftForkToken,
         '»' => Token::RightForkToken,
+        '∘' => Token::ComposeToken,
+        '⍛' => Token::ReverseComposeToken,
         '.' => Token::MemberDereferenceToken,
         _ => return None,
     })

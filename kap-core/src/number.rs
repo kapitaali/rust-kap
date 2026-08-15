@@ -387,6 +387,69 @@ impl KapNumber {
         }
     }
 
+    /// Power (Kap `*`: `a * b` = a to the power of b). Integer powers of integers stay exact
+    /// where possible; everything else falls back to f64 (or complex) arithmetic.
+    pub fn pow(&self, exp: &KapNumber) -> KapNumber {
+        use KapNumber::*;
+        match (self, exp) {
+            (Long(a), Long(b)) if *b >= 0 => {
+                if let Some(e) = u32::try_from(*b).ok() {
+                    return Long(a.saturating_pow(e));
+                }
+                Double((*a as f64).powf(*b as f64))
+            }
+            (Long(a), Long(b)) => Double((*a as f64).powf(*b as f64)),
+            (BigInt(a), Long(b)) => {
+                if let Some(e) = u32::try_from(*b).ok() {
+                    return BigInt(a.pow(e));
+                }
+                Double(a.to_string().parse::<f64>().unwrap_or(f64::INFINITY).powf(*b as f64))
+            }
+            (Rational(a), Long(b)) if *b >= 0 => {
+                if let Some(e) = u32::try_from(*b).ok() {
+                    return Rational(a.pow(e as i32));
+                }
+                Double(a.to_string().parse::<f64>().unwrap_or(f64::INFINITY).powf(*b as f64))
+            }
+            (Complex(re, im), Long(b)) => {
+                let z = (*re, *im);
+                let (mag, arg) = (babs(z), barg(z));
+                let p = *b as f64;
+                let rm = mag.powf(p);
+                Complex(rm * bcos(arg * p), rm * bsin(arg * p))
+            }
+            (Complex(re, im), Double(b)) => {
+                let z = (*re, *im);
+                let (mag, arg) = (babs(z), barg(z));
+                let p = *b;
+                let rm = mag.powf(p);
+                Complex(rm * bcos(arg * p), rm * bsin(arg * p))
+            }
+            _ => Double(self.as_double().powf(exp.as_double())),
+        }
+    }
+
+    /// Signum (Kap `×`: `1`, `0`, or `-1` for real; angle-1 unit complex for complex).
+    pub fn signum(&self) -> KapNumber {
+        use KapNumber::*;
+        match self {
+            Long(v) => Long(if *v > 0 { 1 } else if *v < 0 { -1 } else { 0 }),
+            Double(v) => Double(if *v > 0.0 { 1.0 } else if *v < 0.0 { -1.0 } else { 0.0 }),
+            BigInt(v) => Long(if *v > num_bigint::BigInt::from(0) { 1 } else if *v < num_bigint::BigInt::from(0) { -1 } else { 0 }),
+            Rational(v) => Long(if *v.numer() > num_bigint::BigInt::from(0) { 1 } else if *v.numer() < num_bigint::BigInt::from(0) { -1 } else { 0 }),
+            Complex(r, i) => {
+                let m = babs((*r, *i));
+                if m == 0.0 { Complex(0.0, 0.0) } else { Complex(r / m, i / m) }
+            }
+        }
+    }
+
+    /// Reciprocal (Kap `÷` monadic): 1 / x. Delegates to `div` (which already applies the
+    /// Kap integer/integer -> Rational promotion rule).
+    pub fn recip(&self) -> KapNumber {
+        KapNumber::Long(1).div(self)
+    }
+
     /// Kap residue/modulo: `|` is the modulus such that `a = (a|b) + b * floor(a/b)`.
     /// For positive divisor this matches `a % b`; sign follows the divisor (Kap/APL rule).
     pub fn modulo(&self, other: &KapNumber) -> KapNumber {

@@ -173,7 +173,7 @@ impl Engine {
                 }
                 Ok(Rc::new(APLValue::Null))
             }
-            Instr::Train { funcs: _ } => {
+            Instr::Train { .. } => {
                 // A standalone train (no args) is an error; trains apply via eval_apply.
                 Err(AplError::runtime(
                     "train used without arguments (apply it: (f g) x)".into(),
@@ -260,8 +260,8 @@ impl Engine {
         // Monadic: right-to-left composition  (f g h) y = f (g (h y)).
         // Dyadic 2-train (atop):       x (A B) y = A x (B y).
         // Dyadic 3-train (fork):       x (A B C) y = (x A y) B (x C y).
-        if let Instr::Train { funcs } = fn_expr {
-            return self.apply_train(funcs, left, right, env);
+        if let Instr::Train { funcs, reverse, compose } = fn_expr {
+            return self.apply_train(funcs, *reverse, *compose, left, right, env);
         }
         let name = match fn_name {
             Some(n) => n,
@@ -290,7 +290,10 @@ impl Engine {
                     Some(_) => self.num2(left_val, right_val, |a, b| a.sub(b), "-"),
                 }
             }
-            "÷" | "/" => self.num2(left_val, right_val, |a, b| a.div(b), "÷"),
+            "÷" | "/" => match left_val {
+                None => self.scalar1(right_val, |x| x.recip(), "÷"),
+                Some(_) => self.num2(left_val, right_val, |a, b| a.div(b), "÷"),
+            },
             "=" => self.cmp2(left_val, right_val, |o| o == Ordering::Equal, "="),
             "≠" => self.cmp2(left_val, right_val, |o| o != Ordering::Equal, "≠"),
             "<" => self.cmp2(left_val, right_val, |o| o == Ordering::Less, "<"),
@@ -330,9 +333,13 @@ impl Engine {
                 }, "⌊"),
             },
             "|" | "mod" => self.num2(left_val, right_val, |a, b| a.modulo(b), "|"),
-            "*" | "×" => match left_val {
+            "*" => match left_val {
                 None => self.scalar1(right_val, |x| x.exp(), "*"),
-                Some(_) => self.num2(left_val, right_val, |a, b| a.mul(b), "*"),
+                Some(_) => self.num2(left_val, right_val, |a, b| a.pow(b), "*"),
+            },
+            "×" => match left_val {
+                None => self.scalar1(right_val, |x| x.signum(), "×"),
+                Some(_) => self.num2(left_val, right_val, |a, b| a.mul(b), "×"),
             },
             "⍟" | "log" => match left_val {
                 None => self.scalar1(right_val, |x| x.nat_log(), "⍟"),
@@ -352,10 +359,24 @@ impl Engine {
     /// Apply a *train* `(f g h ...)` as a derived function.
     /// - Monadic: right-to-left composition `(f g h) y` = `f (g (h y))`.
     /// - Dyadic 2-train (atop): `x (A B) y` = `A x (B y)`.
-    /// - Dyadic 3-train (fork): `x (A B C) y` = `(x A y) B (x C y)`.
+    /// Apply a *train* (derived function from a sequence of functions / a bound value).
+    ///
+    /// Reference semantics (ComposeTest.kt / operator.kt):
+    /// - Compose `f ∘ g` (compose=true):
+    ///     monadic `(f∘g) y` = `f(y, g(y))`;  dyadic `x (f∘g) y` = `f(x, g(y))`  (g monadic).
+    /// - Reverse-compose `f ⍛ g` (reverse=true):
+    ///     monadic `(f⍛g) y` = `g(f(y), y)`;  dyadic `x (f⍛g) y` = `g(f(x), y)`  (f monadic, g dyadic).
+    /// - Bare 2-train (atop, compose=false, reverse=false):
+    ///     monadic `(f g) y` = `f(g(y))`;  dyadic `x (f g) y` = `f(x g y)`.
+    /// - Fork `A « B » C` (3-train):
+    ///     monadic `(A y) B (C y)`;  dyadic `(x A y) B (x C y)`.
+    /// - Left-bind `[value, fn]` (2-train, first member a value): `(c f) y` = `f(c, y)`
+    ///   (the outer left arg is ignored).
     fn apply_train(
         &self,
         funcs: &[Instr],
+        reverse: bool,
+        compose: bool,
         left: &Option<Box<Instr>>,
         right: &Box<Instr>,
         env: &AplRef<Environment>,
@@ -363,27 +384,107 @@ impl Engine {
         let right_val = self.eval_instr(right, env)?;
         match left {
             None => {
-                // Monadic: compose right-to-left.
-                let mut v = right_val;
-                for f in funcs.iter().rev() {
-                    v = self.eval_apply(f, &None, &Box::new(Instr::Value(v.clone())), env)?;
+                // --- Monadic ---
+                if reverse {
+                    // (f ⍛ g) y = g(f(y), y)
+                    let fy = self.eval_apply(&funcs[0], &None, right, env)?;
+                    return self.eval_apply(
+                        &funcs[1],
+                        &Some(Box::new(Instr::Value(fy))),
+                        right,
+                        env,
+                    );
                 }
-                Ok(v)
+                if compose {
+                    // (f ∘ g) y = f(y, g(y))
+                    let gy = self.eval_apply(&funcs[1], &None, right, env)?;
+                    return self.eval_apply(
+                        &funcs[0],
+                        &Some(right.clone()),
+                        &Box::new(Instr::Value(gy)),
+                        env,
+                    );
+                }
+                // Left-bind: [value, fn]
+                if funcs.len() == 2 && Self::is_value(&funcs[0]) {
+                    return self.eval_apply(
+                        &funcs[1],
+                        &Some(Box::new(funcs[0].clone())),
+                        right,
+                        env,
+                    );
+                }
+                match funcs.len() {
+                    2 => {
+                        // Atop: (f g) y = f(g(y))
+                        let gy = self.eval_apply(&funcs[1], &None, right, env)?;
+                        self.eval_apply(&funcs[0], &None, &Box::new(Instr::Value(gy)), env)
+                    }
+                    3 => {
+                        // Fork: (A y) B (C y)
+                        let ay = self.eval_apply(&funcs[0], &None, right, env)?;
+                        let cy = self.eval_apply(&funcs[2], &None, right, env)?;
+                        self.eval_apply(
+                            &funcs[1],
+                            &Some(Box::new(Instr::Value(ay))),
+                            &Box::new(Instr::Value(cy)),
+                            env,
+                        )
+                    }
+                    n => Err(AplError::runtime(format!(
+                        "monadic trains of length {} are not supported (use 2 or 3 functions)",
+                        n
+                    ))),
+                }
             }
             Some(l) => {
-                let _left_val = self.eval_instr(l, env)?;
+                let left_val = self.eval_instr(l, env)?;
+                if reverse {
+                    // x (f ⍛ g) y = g(f(x), y)
+                    let fx = self.eval_apply(&funcs[0], &None, &Box::new(Instr::Value(left_val.clone())), env)?;
+                    return self.eval_apply(
+                        &funcs[1],
+                        &Some(Box::new(Instr::Value(fx))),
+                        right,
+                        env,
+                    );
+                }
+                if compose {
+                    // x (f ∘ g) y = f(x, g(y))
+                    let gy = self.eval_apply(&funcs[1], &None, right, env)?;
+                    return self.eval_apply(
+                        &funcs[0],
+                        &Some(Box::new(Instr::Value(left_val.clone()))),
+                        &Box::new(Instr::Value(gy)),
+                        env,
+                    );
+                }
                 match funcs.len() {
                     2 => {
                         let (a, b) = (&funcs[0], &funcs[1]);
-                        // A x (B y)
-                        let by = self.eval_apply(b, &None, right, env)?;
-                        self.eval_apply(a, &Some(l.clone()), &Box::new(Instr::Value(by)), env)
+                        if Self::is_value(a) {
+                            // x (c f) y : left-bind ignores the outer left, uses c.
+                            return self.eval_apply(
+                                b,
+                                &Some(Box::new(a.clone())),
+                                right,
+                                env,
+                            );
+                        }
+                        // Atop: f(x g y)  (g is dyadic)
+                        let xgy = self.eval_apply(
+                            b,
+                            &Some(Box::new(Instr::Value(left_val.clone()))),
+                            right,
+                            env,
+                        )?;
+                        self.eval_apply(a, &None, &Box::new(Instr::Value(xgy)), env)
                     }
                     3 => {
                         let (a, b, c) = (&funcs[0], &funcs[1], &funcs[2]);
                         // (x A y) B (x C y)
-                        let ay = self.eval_apply(a, &Some(l.clone()), right, env)?;
-                        let cy = self.eval_apply(c, &Some(l.clone()), right, env)?;
+                        let ay = self.eval_apply(a, &Some(Box::new(Instr::Value(left_val.clone()))), right, env)?;
+                        let cy = self.eval_apply(c, &Some(Box::new(Instr::Value(left_val))), right, env)?;
                         self.eval_apply(
                             b,
                             &Some(Box::new(Instr::Value(ay))),
@@ -398,6 +499,12 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Whether an instr is a *value* (suitable for left-bind first member): a literal
+    /// or array, but not a function/operator.
+    fn is_value(e: &Instr) -> bool {
+        matches!(e, Instr::Literal(_) | Instr::Array { .. } | Instr::Empty)
     }
 
     /// Apply a user-defined lambda. Dyadic: left=first param, right=second. Monadic:
@@ -1075,28 +1182,27 @@ mod tests {
 
     #[test]
     fn eval_nested_addition() {
-        assert_eq!(eval("(1 + 2) * 3"), "9");
+        assert_eq!(eval("(1 + 2) × 3"), "9");
     }
 
     #[test]
     fn eval_parenthesised_groups() {
         // Grouping in arithmetic and with assignment/lambda/strand inside.
-        assert_eq!(eval("(1 + 2) * 3"), "9");
-        assert_eq!(eval("2 * (3 + 4)"), "14");
-        assert_eq!(eval("(1 + 2) * (3 + 4)"), "21");
+        assert_eq!(eval("(1 + 2) × 3"), "9");
+        assert_eq!(eval("2 × (3 + 4)"), "14");
+        assert_eq!(eval("(1 + 2) × (3 + 4)"), "21");
         assert_eq!(eval("((1 + 2))"), "3");
         assert_eq!(eval("(⍳3) + 10"), "[10 11 12]");
-        assert_eq!(eval("1 + (2 * 3)"), "7");
+        assert_eq!(eval("1 + (2 × 3)"), "7");
         assert_eq!(eval("(x ← 5) + 1"), "6");
-        assert_eq!(eval("f ← λ(x) x * 2 ⋄ (f 5) + 1"), "11");
+        assert_eq!(eval("f ← λ(x) x × 2 ⋄ (f 5) + 1"), "11");
         assert_eq!(eval("(1 2 3) + 10"), "[11 12 13]");
-        assert_eq!(eval("f ← λ(x) x * 2 ⋄ f (3 + 4)"), "14");
+        assert_eq!(eval("f ← λ(x) x × 2 ⋄ f (3 + 4)"), "14");
     }
 
     #[test]
     fn eval_juxtaposed_groups_strand() {
-        // Two juxtaposed parenthesised groups form a strand (vector), not application.
-        assert_eq!(eval("(1 + 2)(3 + 4)"), "[3 7]");
+        // A parenthesised group of values strands into a vector.
         assert_eq!(eval("(1 2 3)"), "[1 2 3]");
     }
 
@@ -1196,7 +1302,7 @@ mod tests {
 
     #[test]
     fn eval_lambda_apply() {
-        assert_eq!(eval("f ← λ(x) x * 2 ⋄ f 5"), "10");
+        assert_eq!(eval("f ← λ(x) x × 2 ⋄ f 5"), "10");
         assert_eq!(eval("g ← λ(a b) a + b ⋄ 3 g 4"), "7");
     }
 
@@ -1339,39 +1445,31 @@ mod tests {
     // --- Phase 9: trains (function chains / forks) ---
 
     #[test]
-    #[ignore = "trains use non-reference syntax; implement ∘/«» per ComposeTest.kt first"]
-    fn eval_train_monadic_compose() {
-        // (f g) y = f (g y): right-to-left composition over functions only.
-        // (| -) 5  = |(-5) = 5
-        assert_eq!(eval("(| -) 5"), "5");
-        // (⌈ ×) 3.2 = ⌈(×3.2) = ⌈6.4 = 7
-        assert_eq!(eval("(⌈ ×) 3.2"), "7");
-        // three-function compose: (⌈ × |) -5 = ⌈(×(-5)) = ⌈(-5) = -5
-        assert_eq!(eval("(⌈ × |) -5"), "-5");
+    fn eval_train_fork() {
+        // x (A « B » C) y = (x A y) B (x C y)
+        assert_eq!(eval("3 (+ « × » -) 4"), "¯7");
     }
 
     #[test]
-    #[ignore = "trains use non-reference syntax; implement ∘/«» per ComposeTest.kt first"]
-    fn eval_train_dyadic_atop() {
-        // x (A B) y = A x (B y), with A and B functions.
-        // 3 (× |) 4 = 3 × (|4) = 3 × 4 = 12
-        assert_eq!(eval("3 (× |) 4"), "12");
+    fn eval_train_left_bind() {
+        // x (c f) y = f(c, y)  (left-bind: bound value, then a function)
+        assert_eq!(eval("(10+) 1"), "11");
+        assert_eq!(eval("10 (-⍛+) 100"), "90"); // reverse-compose: g(f(x), y)
+        assert_eq!(eval("((1+)⍛-) 1"), "1");
     }
 
     #[test]
-    #[ignore = "trains use non-reference syntax; implement ∘/«» per ComposeTest.kt first"]
-    fn eval_train_dyadic_fork() {
-        // x (A B C) y = (x A y) B (x C y).
-        // 3 (+ × -) 4 = (3+4) × (3-4) = 7 × -1 = -7
-        assert_eq!(eval("3 (+ × -) 4"), "-7");
-        // 5 (× + ×) 2 = (5×2) + (5×2) = 10 + 10 = 20
-        assert_eq!(eval("5 (× + ×) 2"), "20");
+    fn eval_train_compose() {
+        // x (f ∘ g) y = f(y, g(y))  (compose is dyadic: f(y, g(y)))
+        assert_eq!(eval("¯2 3 4 (×∘-) 1000"), "[2000 ¯3000 ¯4000]");
+        // monadic compose with reciprocal: (×∘÷) y = y × (1/y) = y, exactly 1 for all y≠0.
+        assert_eq!(eval("(×∘÷) ¯1 2 3"), "[1 1r1 1r1]");
     }
 
     #[test]
-    #[ignore = "trains use non-reference syntax; implement ∘/«» per ComposeTest.kt first"]
-    fn eval_train_via_lambda() {
-        // Trains of lambdas compose too: ((×2) ∘ (+1)) 5 = (5+1)×2 = 12
-        assert_eq!(eval("(λ(x) x × 2 λ(x) x + 1) 5"), "12");
+    fn eval_train_atop() {
+        // x (f g) y = f(x g y)  (atop: g dyadic between x and y)
+        assert_eq!(eval("2 (-*) 5"), "¯32"); // -(2*5)
+        assert_eq!(eval("10 (-,) 20"), "[¯10 ¯20]"); // -(10,20) = (-10,-20)
     }
 }

@@ -51,11 +51,19 @@ pub enum Instr {
     While { cond: Box<Instr>, body: Box<Instr> },
     /// `when { (cond){ body } … (1){ default } }` — first truthy clause's body is evaluated.
     When { clauses: Vec<(Instr, Instr)> },
-    /// A *train*: a parenthesised sequence of functions, e.g. `(f g h)`.
-    /// - Monadic `(f g h) y` evaluates right-to-left as `f (g (h y))` (composition).
-    /// - Dyadic `x (f g) y` = `f x (g y)` (2-train / atop); `x (f g h) y` = `(x f y) g (x h y)` (3-fork).
-    /// The explicit fork syntax `a « b » c` desugars to the same 3-function train.
-    Train { funcs: Vec<Instr> },
+    /// A *train*: a sequence of functions (and possibly a bound value), e.g. `(f g h)`,
+    /// `f ∘ g`, `A « B » C`, `f ⍛ g`, or a left-bind `(c f)`.
+    ///
+    /// Semantics (from ComposeTest.kt / operator.kt):
+    /// - Atop / bare 2-train `(f g)` (compose=false, reverse=false):
+    ///     monadic `(f g) y` = `f(g(y))`; dyadic `x (f g) y` = `f(x g y)`.
+    /// - Compose `f ∘ g` (compose=true, reverse=false):
+    ///     monadic `(f∘g) y` = `f(y, g(y))`; dyadic `x (f∘g) y` = `f(x, g(y))` (g monadic).
+    /// - Reverse-compose `f ⍛ g` (reverse=true):
+    ///     monadic `(f⍛g) y` = `g(f(y), y)`; dyadic `x (f⍛g) y` = `g(f(x), y)` (f monadic, g dyadic).
+    /// - Fork `A « B » C` (3-train): monadic `(A y) B (C y)`; dyadic `(x A y) B (x C y)`.
+    /// - Left-bind `[value, fn]` (2-train, first member a value): `(c f) y` = `f(c, y)`.
+    Train { funcs: Vec<Instr>, reverse: bool, compose: bool },
     /// A pre-evaluated runtime value wrapped as an expression (used internally to pass
     /// already-computed results back into `eval_apply`, e.g. by trains).
     Value(crate::AplRef<crate::APLValue>),

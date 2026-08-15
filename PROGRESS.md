@@ -1,5 +1,12 @@
 # PROGRESS.md — Kap text-client rewrite in Rust
 
+> **Documentation strategy (decided 2026-08-15):** PROGRESS is now **one file per day**,
+> `PROGRESS-YYYYMMDD.md` (e.g. `PROGRESS-20260815.md`). This `PROGRESS.md` is the **archive**
+> of prior days (through 2026-08-14) only. Each new working day: create `PROGRESS-YYYYMMDD.md`
+> and put that day's entries there. Move a day's entries out of here when the day ends.
+> Entry format (unchanged): `## [YYYY-MM-DD] PHASE/STEP — status`, then what was done,
+> decisions, next action. Append-only; record mistakes, don't erase.
+
 > Meticulous diary of the Rust rewrite of Kap's **text client only** (no GUI/web/optional
 > modules). Companion docs at repo root: `RUST_REWRITE_STRATEGY.md` (plan + locked
 > decisions) and the generated `<module>/<module>.md` Kotlin→Rust doc set.

@@ -72,7 +72,7 @@ mod tests {
         s.eval("y ← 10").unwrap();
         assert_eq!(s.eval("x + y").unwrap().format_value(), "15");
         // assignment that reads a prior variable
-        assert_eq!(s.eval("z ← x * y").unwrap().format_value(), "50");
+        assert_eq!(s.eval("z ← x × y").unwrap().format_value(), "50");
         // z is now visible in the next call
         assert_eq!(s.eval("z + 1").unwrap().format_value(), "51");
     }
@@ -80,7 +80,7 @@ mod tests {
     #[test]
     fn session_persists_lambda_and_sees_globals() {
         let s = Session::new();
-        s.eval("double ← λ(x) x * 2").unwrap();
+        s.eval("double ← λ(x) x × 2").unwrap();
         assert_eq!(s.eval("double 21").unwrap().format_value(), "42");
         s.eval("k ← 3").unwrap();
         s.eval("addk ← λ(x) x + k").unwrap();
