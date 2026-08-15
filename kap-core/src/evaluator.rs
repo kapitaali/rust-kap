@@ -1207,6 +1207,16 @@ mod tests {
     }
 
     #[test]
+    fn eval_nested_arrays() {
+        // Nested arrays (depth > 1) parse as a vector containing a nested vector.
+        assert_eq!(eval("(1 2 (3 4 5))"), "(1 2 (3 4 5))");
+        // Deeper nesting.
+        assert_eq!(eval("(1 (2 (3 (4 5))))"), "(1 (2 (3 (4 5))))");
+        // A nested vector element can still be used as data (catenate strands it in).
+        assert_eq!(eval("1 2 , (3 4)"), "(1 2 3 4)");
+    }
+
+    #[test]
     fn eval_monadic_arithmetic() {
         // `+` and `-` are ambivalent: monadic `- x` = negate, `+ x` = identity.
         assert_eq!(eval("-(1 + 2)"), "¯3");

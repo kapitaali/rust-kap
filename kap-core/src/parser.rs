@@ -521,14 +521,29 @@ impl<'a> Parser<'a> {
             }
             self.pos += 1;
             self.skip_newlines();
-            // Scan function atoms / value-then-function. Stop at ')' = valid paren operator.
+            // Classify each member as a *function* atom or a *value* atom. A paren group is a
+            // dyadic operator only if its content is a function train — a single function, a
+            // fork/train of >=2 functions, or a 2-member left-bind [value fn]. A naked value
+            // strand like `(3 4 5)` or a single value `(10)` is NOT a function, so it must be
+            // treated as a plain data group (a strand element), never as an operator.
+            #[derive(PartialEq, Clone, Copy)]
+            enum Kind {
+                Func,
+                Value,
+            }
+            let mut kinds: Vec<Kind> = Vec::new();
+            let mut valid = true;
             loop {
                 match self.peek().map(|t| &t.token) {
-                    Some(Token::CloseParen) => {
-                        ok = true;
-                        break;
+                    Some(Token::CloseParen) => break,
+                    Some(Token::Literal(LiteralValue::Number(_)))
+                    | Some(Token::Literal(LiteralValue::Char(_)))
+                    | Some(Token::Literal(LiteralValue::Str(_))) => {
+                        kinds.push(Kind::Value);
+                        self.advance();
+                        self.skip_newlines();
                     }
-                    Some(Token::Literal(_))
+                    Some(Token::Literal(LiteralValue::Symbol { .. }))
                     | Some(Token::LambdaToken)
                     | Some(Token::ComposeToken)
                     | Some(Token::ReverseComposeToken)
@@ -536,14 +551,22 @@ impl<'a> Parser<'a> {
                     | Some(Token::RightForkToken)
                     | Some(Token::Comma)
                     | Some(Token::OpenParen) => {
+                        kinds.push(Kind::Func);
                         self.advance();
                         self.skip_newlines();
                     }
                     _ => {
-                        ok = false;
+                        valid = false;
                         break;
                     }
                 }
+            }
+            if valid {
+                let n = kinds.len();
+                let all_func = kinds.iter().all(|k| *k == Kind::Func);
+                let single_func = n == 1 && kinds[0] == Kind::Func;
+                let left_bind = n == 2 && kinds[0] == Kind::Value && kinds[1] == Kind::Func;
+                ok = single_func || (n >= 2 && all_func) || left_bind;
             }
         }
         self.pos = saved;
