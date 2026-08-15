@@ -9,7 +9,6 @@
 
 use num_bigint::BigInt;
 use num_rational::BigRational;
-use num_traits::ToPrimitive;
 use std::cmp::Ordering;
 
 /// A Kap scalar number. Distinct variants are preserved on purpose.

@@ -15,7 +15,6 @@ use crate::parser;
 use crate::token::LiteralValue;
 use std::cmp::Ordering;
 use crate::{APLValue, AplError, AplRef, Engine, Environment};
-use std::collections::HashMap;
 use std::rc::Rc;
 
 impl Environment {
@@ -228,7 +227,7 @@ impl Engine {
             Instr::Lambda { params, body } => Some((params.clone(), Rc::new((**body).clone()))),
             Instr::Symbol { name, namespace } => match env.lookup(name, namespace) {
                 Some(v) if matches!(v.as_ref(), APLValue::UserFn { .. }) => {
-                    if let APLValue::UserFn { params, body, env: fenv } = v.as_ref() {
+                    if let APLValue::UserFn { params, body, env: _fenv } = v.as_ref() {
                         Some((params.clone(), Rc::new((**body).clone())))
                     } else {
                         None
@@ -372,7 +371,7 @@ impl Engine {
                 Ok(v)
             }
             Some(l) => {
-                let left_val = self.eval_instr(l, env)?;
+                let _left_val = self.eval_instr(l, env)?;
                 match funcs.len() {
                     2 => {
                         let (a, b) = (&funcs[0], &funcs[1]);

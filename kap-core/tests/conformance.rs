@@ -92,6 +92,13 @@ fn run_kotlin_conformance() {
     assert!(!cases.is_empty(), "no extracted test cases found");
     let engine = Engine::new();
 
+    // Silence per-case panic output. Some reference cases trigger engine panics
+    // (e.g. arithmetic overflow, division-by-zero); `classify` catches them via
+    // `catch_unwind` and records them as `Unsupported`. The default panic hook
+    // would otherwise flood stderr with backtraces for every such case.
+    let _ = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+
     let mut by_outcome: BTreeMap<Outcome, usize> = BTreeMap::new();
     let mut by_file: BTreeMap<String, (usize, usize)> = BTreeMap::new(); // file -> (ok, total)
     let mut unsupported_examples: Vec<&Case> = Vec::new();

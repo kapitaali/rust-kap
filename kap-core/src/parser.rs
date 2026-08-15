@@ -19,7 +19,6 @@
 //!                 an `Array` (APL stranding) — e.g. `1 2 3` -> Array[1,2,3].
 
 use crate::ast::Instr;
-use crate::lexer::tokenise;
 use crate::token::{LiteralValue, SpannedToken, Token};
 use crate::AplError;
 
@@ -565,11 +564,6 @@ impl<'a> Parser<'a> {
         matches!(name, "/" | "reduce" | "\\" | "scan" | "¨" | "each")
     }
 
-    /// term := primary  (stranding handled inside parse_primary's caller via runs)
-    fn parse_term(&mut self) -> Result<Instr, AplError> {
-        self.parse_primary()
-    }
-
     /// Try to parse a *train*: a parenthesised sequence of >=2 function expressions,
     /// e.g. `(f g h)`. Returns `Some(Train{funcs})` on success, `None` (without side effects
     /// other than `self.pos`, which the caller restores) otherwise.
@@ -627,33 +621,6 @@ impl<'a> Parser<'a> {
                 }
                 self.pos = save;
                 Err(self.err("expected a function in train"))
-            }
-            // Derived operators (e.g. `+/`) are function atoms.
-            Token::Literal(LiteralValue::Symbol { name: sym_name, .. }) => {
-                let sym = sym_name.clone();
-                self.advance();
-                if let Some(Token::Literal(LiteralValue::Symbol { name: adv_name, .. })) =
-                    self.peek().map(|x| x.token.clone())
-                {
-                    if Self::is_adverb(&adv_name) {
-                        let adv = adv_name.clone();
-                        self.advance();
-                        Ok(Instr::Derived {
-                            func: Box::new(Instr::Symbol {
-                                name: sym,
-                                namespace: None,
-                            }),
-                            op: Box::new(Instr::Symbol {
-                                name: adv,
-                                namespace: None,
-                            }),
-                        })
-                    } else {
-                        Err(self.err("expected an adverb after function in train"))
-                    }
-                } else {
-                    Err(self.err("expected an adverb after function in train"))
-                }
             }
             _ => Err(self.err("expected a function in train")),
         }

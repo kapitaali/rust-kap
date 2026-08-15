@@ -2,9 +2,6 @@
 
 use crate::lex_helpers::*;
 use crate::token::{LiteralValue, SpannedToken, Token};
-use num_bigint::BigInt;
-use num_rational::BigRational;
-
 /// Tokenise `src` into a flat list. Errors are emitted as `Token::Error` so the
 /// parser can report them with position (strategy §4.7).
 pub fn tokenise(src: &str) -> Vec<SpannedToken> {
@@ -148,7 +145,6 @@ fn single_char_token(c: char) -> Option<Token> {
         '}' => Token::CloseBrace,
         '[' => Token::OpenBracket,
         ']' => Token::CloseBracket,
-        '}' => Token::CloseFnDef,
         '⋄' => Token::StatementSeparator,
         '←' => Token::LeftArrow,
         '⍬' => Token::APLNullSym,

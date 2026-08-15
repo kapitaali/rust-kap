@@ -29,7 +29,6 @@ pub enum Token {
     OpenBrace,    // {
     CloseBrace,   // }
     OpenFnDef,    // ∇
-    CloseFnDef,   // }
     OpenBracket,  // [
     CloseBracket, // ]
     StatementSeparator, // ⋄
