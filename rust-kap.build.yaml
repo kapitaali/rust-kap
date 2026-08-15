@@ -1,0 +1,73 @@
+# rust-kap.build.yaml — main build configuration for the Rust Kap interpreter.
+#
+# This file is the single source of truth for how the repo is compiled and how
+# the `kap` executable is produced. It is consumed by `tools/build.py`, which
+# translates these switches into cargo invocations:
+#
+#     tools/build.py                 # build (kap-cli -> `kap`)
+#     tools/build.py test           # unit + conformance
+#     tools/build.py run -- "expr"  # evaluate an expression (piped to the REPL)
+#     tools/build.py check          # cargo check only
+#     tools/build.py clean
+#
+# Cargo itself does not read YAML, so the authoritative wiring (features,
+# profile) still lives in the Cargo.toml files; this file documents intent and
+# is the place to flip switches (e.g. enable `features.network` for http:post).
+#
+# Conventions:
+#   - `true`/`false` toggles are feature gates (map to Cargo `[features]`).
+#   - Paths are repo-relative unless noted.
+
+project:
+  name: kap
+  version: 0.0.0          # mirrors workspace.package.version
+  edition: "2021"
+  binary: kap             # produced by kap-cli/src/main.rs
+
+# Which workspace crates participate. Mirrors the `[workspace] members` list in
+# the root Cargo.toml; kept here so a build script can select a subset.
+workspace:
+  members:
+    - kap-core            # engine: lexer, parser, evaluator, builtins
+    - kap-stdlib          # the .kap standard library (reused as-is from the Kotlin repo)
+    - kap-cli             # REPL + main -> binary `kap`
+  default-member: kap-cli
+
+# Build profile + the memory constraints we have actually hit on this machine.
+# The dev profile in Cargo.toml already forces codegen-units=1 / incremental=false
+# because parallel codegen OOM-killed the linker past ~16 GB. These knobs let a
+# build script reproduce the working configuration without hand-setting ulimit.
+build:
+  profile: dev            # dev | release
+  jobs: 1                 # --jobs; serial codegen keeps link memory small
+  codegen-units: 1        # single codegen unit (memory cap)
+  incremental: false
+  target: native          # "native" = host triple, or set an explicit target triple
+  # If the linker OOMs, cap the address space (bytes). Our working harness uses
+  # ~4 GB: `ulimit -v 4000000`. Leave commented when not needed.
+  # memory-limit-vbytes: 4000000000
+  deny-warnings: true     # keep the tree warning-clean (explicit user requirement)
+
+# Optional capabilities, gated behind Cargo features. `http:post` and friends
+# (web requests, sockets, etc.) belong under `network`; flip it on when the
+# engine implements them. The other switches are placeholders for the optional
+# engine modules the Kotlin text-client had, so we don't lose track of them.
+features:
+  network: false          # http:post / http:get / sockets — NOT YET IMPLEMENTED
+  crypto: false           # future: hashing / signing modules
+  audio: false            # future: sound output modules
+
+# Standard-library handling.
+stdlib:
+  source: kap-stdlib      # crate that ships the .kap files
+  bundle: true            # embed the stdlib into the `kap` binary
+
+# Test / conformance harness.
+tests:
+  unit: true              # `cargo test --lib` (the 74 in-kernel engine tests)
+  conformance: true       # run_kotlin_conformance (Kotlin reference suite)
+  conformance-summary: conformance_summary.txt   # repo-relative output path
+  # run_kotlin_conformance panics on purpose to surface its summary through
+  # cargo's captured-output (a passing test's output is swallowed). That failure
+  # is expected and must NOT be treated as a build break.
+  treat-conformance-failure-as-error: false
