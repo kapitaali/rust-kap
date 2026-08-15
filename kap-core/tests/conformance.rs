@@ -189,18 +189,23 @@ fn run_kotlin_conformance() {
         }
     }
 
-    // Always persist to a file (cargo swallows test stdout/stderr on success).
-    let _ = std::fs::write("/tmp/conform_summary.txt", &s);
+    // Always persist to a file in the repo directory (cargo swallows test
+    // stdout/stderr on success). CARGO_MANIFEST_DIR is `kap-core`, so `..` is
+    // the repo root — the summary lands at `<repo>/conformance_summary.txt`.
+    let summary_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("conformance_summary.txt");
+    let _ = std::fs::write(&summary_path, &s);
     // Also emit to stderr (visible with `-- --nocapture` or when a test fails).
     eprint!("{s}");
 
     // We do NOT assert a pass rate here (it grows over time). Instead we FAIL this
     // test on purpose so cargo prints the captured summary above — a passing test's
-    // output is suppressed by `cargo test`. Run `conformance_probe`'s result is the
-    // summary. The real per-feature pass/fail gate is `curated_kap_parity`.
+    // output is suppressed by `cargo test`. The real per-feature pass/fail gate is
+    // `curated_kap_parity`.
     panic!(
-        "conformance summary (run with `cargo test ... -- --test-threads=1` or rely on this \
-         failure's output):\n{s}\n\n(remove the final panic in run_kotlin_conformance to stop the intentional failure)"
+        "conformance summary (written to {}):\n{s}\n\n(remove the final panic in run_kotlin_conformance to stop the intentional failure)",
+        summary_path.display()
     );
 }
 
