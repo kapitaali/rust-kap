@@ -835,29 +835,17 @@ impl Engine {
         left_val: Option<AplRef<APLValue>>,
         right_val: AplRef<APLValue>,
     ) -> Result<AplRef<APLValue>, AplError> {
-        let left_val = left_val.ok_or_else(|| AplError::runtime("↑ needs two args".into()))?;
-        let n = match left_val.as_ref() {
-            APLValue::Number(KapNumber::Long(v)) => *v,
-            _ => {
-                return Err(AplError::runtime("↑ count must be an integer".into()))
-            }
+        // Dyadic `↑`: `counts ↑ array`. Counts is a scalar or vector; each axis
+        // count may be negative (take from the end). If `counts` is shorter than
+        // the array rank the remaining axes are taken in full; if longer, it is an
+        // error. A scalar right argument is reshaped to `|counts|` (padded with 0).
+        // Monadic `↑` (no left) takes 1 along the leading axis.
+        // Reference: TakeTest.kt.
+        let counts = match left_val {
+            None => vec![1i64],
+            Some(l) => self.count_vector(l)?,
         };
-        match right_val.as_ref() {
-            APLValue::Array(a) => {
-                let elems = a.elements();
-                let take = n.unsigned_abs() as usize;
-                let sliced: Vec<AplRef<APLValue>> = if n >= 0 {
-                    elems.iter().take(take).cloned().collect()
-                } else {
-                    elems.iter().rev().take(take).rev().cloned().collect()
-                };
-                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                    vec![sliced.len()],
-                    ArrayData::Nested(sliced),
-                )))))
-            }
-            _ => Ok(right_val),
-        }
+        self.take_or_drop(true, &counts, right_val)
     }
 
     fn drop(
@@ -865,30 +853,173 @@ impl Engine {
         left_val: Option<AplRef<APLValue>>,
         right_val: AplRef<APLValue>,
     ) -> Result<AplRef<APLValue>, AplError> {
-        let left_val = left_val.ok_or_else(|| AplError::runtime("↓ needs two args".into()))?;
-        let n = match left_val.as_ref() {
-            APLValue::Number(KapNumber::Long(v)) => *v,
-            _ => {
-                return Err(AplError::runtime("↓ count must be an integer".into()))
-            }
+        // Dyadic `↓`: `counts ↓ array`. Mirror of `take` but removes elements.
+        // Monadic `↓` drops 1 along the leading axis. Reference: TakeTest.kt.
+        let counts = match left_val {
+            None => vec![1i64],
+            Some(l) => self.count_vector(l)?,
         };
-        match right_val.as_ref() {
+        self.take_or_drop(false, &counts, right_val)
+    }
+
+    /// Parse the left argument of `↑`/`↓` into a vector of (signed) axis counts.
+    fn count_vector(&self, v: AplRef<APLValue>) -> Result<Vec<i64>, AplError> {
+        match v.as_ref() {
+            APLValue::Number(KapNumber::Long(n)) => Ok(vec![*n]),
             APLValue::Array(a) => {
-                let elems = a.elements();
-                let drop = n.unsigned_abs() as usize;
-                let sliced: Vec<AplRef<APLValue>> = if n >= 0 {
-                    elems.iter().skip(drop).cloned().collect()
-                } else {
-                    let keep = elems.len().saturating_sub(drop);
-                    elems.iter().take(keep).cloned().collect()
-                };
-                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                    vec![sliced.len()],
-                    ArrayData::Nested(sliced),
-                )))))
+                let mut out = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    match e.as_ref() {
+                        APLValue::Number(KapNumber::Long(n)) => out.push(*n),
+                        _ => return Err(AplError::runtime("↑/↓ counts must be integers".into())),
+                    }
+                }
+                Ok(out)
             }
-            _ => Ok(right_val),
+            _ => Err(AplError::runtime("↑/↓ counts must be integers".into())),
         }
+    }
+
+    /// Core multi-dimensional take/drop. `take`=true means keep-from-edge
+    /// (with padding for oversized positive counts); `take`=false means drop.
+    fn take_or_drop(
+        &self,
+        take: bool,
+        counts: &[i64],
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let right = right_val.force(self)?;
+        match right.as_ref() {
+            APLValue::Null => {
+                // `↑⍬` -> 0 (scalar fill); `↓⍬` -> ⍬ (null).
+                if take {
+                    Ok(Rc::new(APLValue::Number(KapNumber::Long(0))))
+                } else {
+                    Ok(Rc::new(APLValue::Null))
+                }
+            }
+            APLValue::Number(_) => {
+                // Scalar right argument.
+                // Take: build an array of shape `|counts|` filled with the scalar,
+                // padding with 0; an all-zero count yields the empty value (null).
+                // Drop: dropping from a scalar removes it entirely — any non-zero
+                // count empties it (null); a zero count keeps `(right)`.
+                let all_zero = counts.iter().all(|c| *c == 0);
+                if !take && !all_zero {
+                    return Ok(Rc::new(APLValue::Null));
+                }
+                if !take && all_zero {
+                    // Drop 0 of a scalar: keep it as a 1-element vector `(right)`.
+                    return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        vec![1],
+                        ArrayData::Nested(vec![right.clone()]),
+                    )))));
+                }
+                let dims: Vec<usize> = counts.iter().map(|c| c.unsigned_abs() as usize).collect();
+                let total: usize = dims.iter().product();
+                if take && total == 0 {
+                    return Ok(Rc::new(APLValue::Null));
+                }
+                if total > 100_000_000 {
+                    return Err(AplError::runtime("take/drop result too large".into()));
+                }
+                let content = right.clone();
+                let fill = Rc::new(APLValue::Number(KapNumber::Long(0)));
+                let mut out = Vec::with_capacity(total);
+                for i in 0..total {
+                    out.push(if i == 0 { content.clone() } else { fill.clone() });
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(dims, ArrayData::Nested(out))))))
+            }
+            APLValue::Array(a) => {
+                let mut dims = a.dimensions.clone();
+                let rank = dims.len();
+                if counts.len() > rank && rank > 0 {
+                    return Err(AplError::runtime(
+                        "↑/↓ count has more elements than the array rank".into(),
+                    ));
+                }
+                let mut flat = a.elements();
+                for axis in 0..rank {
+                    let spec = counts.get(axis).copied();
+                    let (new_flat, new_dims) = self.slice_axis(&flat, &dims, axis, take, spec)?;
+                    flat = new_flat;
+                    dims = new_dims;
+                }
+                let total: usize = dims.iter().product();
+                if total > 100_000_000 {
+                    return Err(AplError::runtime("take/drop result too large".into()));
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(dims, ArrayData::Nested(flat))))))
+            }
+            other => Err(AplError::runtime(
+                "↑/↓ not implemented for this value type".into(),
+            )),
+        }
+    }
+
+    /// Slice one axis of a flat (row-major) element list.
+    /// `take`=true: keep `|spec|` blocks starting from the edge (0 for positive,
+    /// from the end for negative), padding with the 0-fill for oversized counts.
+    /// `take`=false: drop `|spec|` blocks from the edge, no padding.
+    /// `spec`=None means "take all" (axis left unspecified by the count vector).
+    fn slice_axis(
+        &self,
+        flat: &[AplRef<APLValue>],
+        dims: &[usize],
+        axis: usize,
+        take: bool,
+        spec: Option<i64>,
+    ) -> Result<(Vec<AplRef<APLValue>>, Vec<usize>), AplError> {
+        let n = dims[axis];
+        let stride: usize = dims[axis + 1..].iter().product();
+        let outer: usize = dims[..axis].iter().product();
+        let fill = Rc::new(APLValue::Number(KapNumber::Long(0)));
+
+        // Determine [start, keep, pad_before, pad_after] in units of `stride` blocks.
+        let (start, keep, pad_before, pad_after, target): (usize, usize, usize, usize, usize) =
+            match spec {
+                None => (0, n, 0, 0, n),
+                Some(c) if take => {
+                    let abs = c.unsigned_abs() as usize;
+                    if c >= 0 {
+                        (0, n.min(abs), 0, abs.saturating_sub(n), abs)
+                    } else {
+                        let keep = n.min(abs);
+                        (n - keep, keep, abs.saturating_sub(n), 0, abs)
+                    }
+                }
+                Some(c) => {
+                    let abs = c.unsigned_abs() as usize;
+                    let d = n.min(abs);
+                    (if c >= 0 { d } else { 0 }, n - d, 0, 0, n - d)
+                }
+            };
+
+        let mut out = Vec::with_capacity(outer * target * stride);
+        for g in 0..outer {
+            let base = g * n * stride;
+            for _ in 0..pad_before {
+                for _ in 0..stride {
+                    out.push(fill.clone());
+                }
+            }
+            for k in 0..keep {
+                let b = start + k;
+                let off = base + b * stride;
+                for i in 0..stride {
+                    out.push(flat[off + i].clone());
+                }
+            }
+            for _ in 0..pad_after {
+                for _ in 0..stride {
+                    out.push(fill.clone());
+                }
+            }
+        }
+        let mut new_dims = dims.to_vec();
+        new_dims[axis] = target;
+        Ok((out, new_dims))
     }
 
     fn enclose(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {

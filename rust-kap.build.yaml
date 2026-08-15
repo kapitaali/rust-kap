@@ -50,10 +50,13 @@ build:
 
 # Optional capabilities, gated behind Cargo features. `http:post` and friends
 # (web requests, sockets, etc.) belong under `network`; flip it on when the
-# engine implements them. The other switches are placeholders for the optional
-# engine modules the Kotlin text-client had, so we don't lose track of them.
+# engine implements them. `sql` and `raylib` cover the database and graphics
+# engine modules from the Kotlin text-client. The other switches are
+# placeholders for optional engine modules so we don't lose track of them.
 features:
   network: false          # http:post / http:get / sockets — NOT YET IMPLEMENTED
+  sql: false              # database / query engine module — NOT YET IMPLEMENTED
+  raylib: false           # graphics / rendering module — NOT YET IMPLEMENTED
   crypto: false           # future: hashing / signing modules
   audio: false            # future: sound output modules
 
