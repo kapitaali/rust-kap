@@ -1,1 +1,4 @@
+⍝ assert: assertDimension(dimensionsOfSize(2, 4), result)
+⍝ assert: assertArrayContent(arrayOf(1, 2, 3, 4, 3, 4, 0, 0), result)
+⍝ assert: assertEquals(ArrayMemberType.LONG, result.specialisedType)
 ⊃ (1 2 3 4) (3 4)

@@ -1,1 +1,8 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    InnerDouble(Double.POSITIVE_INFINITY),
+                    InnerDouble(Double.POSITIVE_INFINITY),
+                    InnerDouble(0.0),
+                    InnerDouble(Double.POSITIVE_INFINITY)),
+                result)
 1.2 3.0 0.0 2.9 ÷ 0.0 0.0 0.0 0.0

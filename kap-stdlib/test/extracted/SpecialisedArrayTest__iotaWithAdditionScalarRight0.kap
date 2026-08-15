@@ -1,1 +1,4 @@
+⍝ assert: assertDimension(dimensionsOfSize(3), result)
+⍝ assert: assertArrayContent(arrayOf(1000, 1001, 1002), result)
+⍝ assert: assertEquals(ArrayMemberType.LONG, result.specialisedType)
 (⍳3)+1000

@@ -1,1 +1,3 @@
+⍝ assert: assertString("aaaaaaa", result)
+⍝ assert: assertEquals(ArrayMemberType.CHAR, result.specialisedType)
 7 ⍴ @a

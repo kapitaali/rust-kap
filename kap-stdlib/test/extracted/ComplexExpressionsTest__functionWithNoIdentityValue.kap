@@ -1,1 +1,2 @@
+⍝ assert: assertEquals("Function does not have an identity value", e.message)
 math:sin/⍬

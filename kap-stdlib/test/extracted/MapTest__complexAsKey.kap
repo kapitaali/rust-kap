@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(1, result)
 a ← map:with 7j6 1 8j6 2 ⋄ a[7j6]

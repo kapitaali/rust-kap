@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(0, 1), result)
 1 (int:asBigint 20) ∊ 20 30

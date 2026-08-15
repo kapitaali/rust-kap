@@ -1,1 +1,4 @@
+⍝ assert: assertDimension(dimensionsOfSize(4, 2), result)
+⍝ assert: assertArrayContent(arrayOf(0, 1, 2, 3, 100, 101, 102, 103), result)
+⍝ assert: assertNull(labels)
 ("a" "b" labels[1] 2 2 ⍴ ⍳4) ,[0] ("aa" "bb" labels[1] 2 2 ⍴ 100+⍳4)

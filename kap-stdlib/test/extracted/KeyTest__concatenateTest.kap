@@ -1,1 +1,3 @@
+⍝ assert: assertDimension(dimensionsOfSize(3, 2), result)
+⍝ assert: assertArrayContent(arrayOf(2, InnerString("foo"), 1, InnerString("barabcdef"), 3, InnerString("xyz")), result)
 2 1 3 1 ,/⌸ "foo" "bar" "xyz" "abcdef"

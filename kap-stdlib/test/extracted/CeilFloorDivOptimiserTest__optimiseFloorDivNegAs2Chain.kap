@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(-3, result)
 ¯5(⌊÷)2

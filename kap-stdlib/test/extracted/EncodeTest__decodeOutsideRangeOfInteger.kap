@@ -1,1 +1,7 @@
+⍝ assert: assertDimension(dimensionsOfSize(40), result)
+⍝ assert: assertArrayContent(
+                arrayOf(
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2),
+                result)
 (40⍴10) ⊤ 12

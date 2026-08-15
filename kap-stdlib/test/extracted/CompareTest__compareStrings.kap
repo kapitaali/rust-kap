@@ -1,1 +1,6 @@
+⍝ assert: assertSimpleNumber(-1, parseAPLExpression("\"abc\" cmp \"bcd\""))
+⍝ assert: assertSimpleNumber(-1, parseAPLExpression("\"ABC\" cmp \"abc\""))
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("⍬ cmp ⍬"))
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("\"a\" cmp \"a\""))
+⍝ assert: assertSimpleNumber(-1, parseAPLExpression("\"abc\" cmp \"abcc\""))
 "abc" cmp "bcd"

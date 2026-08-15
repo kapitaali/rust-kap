@@ -1,0 +1,2 @@
+assertString("a", parseAPLExpression("⍕@a"))
+assertString("⍬", parseAPLExpression("⍕@⍬"))

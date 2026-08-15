@@ -1,0 +1,2 @@
+assert1DArray(arrayOf(5, 10, 20, InnerAPLNil()), result)
+assert1DArray(arrayOf(InnerAPLNil(), 20, 10, 5), result)

@@ -1,0 +1,2 @@
+assertDimension(dimensionsOfSize(4, 3), result)
+assertString(expected[i], result.valueAt(i))

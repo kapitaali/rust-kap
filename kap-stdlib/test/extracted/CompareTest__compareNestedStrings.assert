@@ -1,0 +1,2 @@
+assertSimpleNumber(1, parseAPLExpression("\"abc\" \"def\" cmp \"abc\" \"cde\""))
+assertSimpleNumber(-1, parseAPLExpression("\"abc\" \"def\" cmp \"abc\" \"ghi\""))

@@ -1,1 +1,7 @@
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("'foo ≠ 'foox"))
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("'foo ≠ 'foo"))
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("@b ≠ @b"))
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("@a ≠ @b"))
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("(1;2;3) ≠ (1;2;3)"))
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("(1;2;3) ≠ (1;2;3;4)"))
 'foo ≠ 'foox

@@ -1,1 +1,8 @@
+⍝ assert: assertDimension(dimensionsOfSize(4), result)
+⍝ assert: assertChar('c'.code, result.valueAt(0))
+⍝ assert: assertChar('d'.code, result.valueAt(1))
+⍝ assert: assertChar('e'.code, result.valueAt(2))
+⍝ assert: assertDimension(dimensionsOfSize(2), v)
+⍝ assert: assertChar('f'.code, v.valueAt(0))
+⍝ assert: assertChar('g'.code, v.valueAt(1))
 unicode:fromCodepoints 99 100 101 (102 103)

@@ -1,1 +1,2 @@
+⍝ assert: assertString("testabcfoo", result)
 unicode:toLower "teStabcfOO"

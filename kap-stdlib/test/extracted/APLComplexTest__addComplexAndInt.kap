@@ -1,1 +1,2 @@
+⍝ assert: assertEquals(Complex(9.0, 4.0), result.ensureNumber().asComplex())
 3J4+6

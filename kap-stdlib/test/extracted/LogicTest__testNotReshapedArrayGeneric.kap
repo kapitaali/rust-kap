@@ -1,1 +1,4 @@
+⍝ assert: assertDimension(dimensionsOfSize(2, 3), result)
+⍝ assert: assertArrayContent(arrayOf(0, 1, 1, 0, 0, 0), result)
+⍝ assert: assertTrue(result.isDepth0)
 ~ int:ensureGeneric 2 3 ⍴ 1 0 0 1 1 1

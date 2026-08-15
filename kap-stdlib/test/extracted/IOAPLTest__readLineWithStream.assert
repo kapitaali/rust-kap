@@ -1,0 +1,1 @@
+assert1DArray(arrayOf(InnerString("foo"), InnerString("bar test"), 1), result)

@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<RuntimeReturnFrameNotAvailableException>
 ⍞({λ→} 0) 0

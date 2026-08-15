@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(104, result)
 ((1+2+)«×»(5+20+)) 1

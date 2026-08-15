@@ -1,1 +1,5 @@
+⍝ assert: assertDimension(dimensionsOfSize(3), result)
+⍝ assert: assert1DArray(arrayOf(0, 1, 1), v)
+⍝ assert: assert1DArray(arrayOf(2, 2), v)
+⍝ assert: assert1DArray(arrayOf(3, 3, 4), v)
 ⌊(1 2 3) (4 5) (6 7 8) ÷ 2

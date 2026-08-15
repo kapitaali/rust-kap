@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<ParseException>
 λ(foo)

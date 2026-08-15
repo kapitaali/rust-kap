@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<IncompatibleTypeException>
 (123).(0)

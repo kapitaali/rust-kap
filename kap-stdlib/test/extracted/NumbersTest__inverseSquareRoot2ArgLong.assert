@@ -1,0 +1,5 @@
+assert1DArray(
+                arrayOf(
+                    10, 121, 1728, 28561, 537824, InnerRational(1, 15), 256, 4913, 104976, 2476099,
+                    InnerRational(1, 64000), InnerRational(Rational.make(-1, 64000)), -125000, 125000),
+                result)

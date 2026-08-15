@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(0, 0, 0, 0, 1, 0, 0, 0, 0, 0), result)
 math:isPrime 9223372036854775779+⍳10

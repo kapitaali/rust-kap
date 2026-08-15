@@ -1,1 +1,3 @@
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("3 ∊ 2 3J0"))
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("3 ∊ int:ensureGeneric 2 3J0"))
 3 ∊ 2 3J0

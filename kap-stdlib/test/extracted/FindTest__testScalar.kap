@@ -1,1 +1,4 @@
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("3 ⍷ 3"))
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("3 ⍷ 5"))
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("3 ⍷ @a"))
 3 ⍷ 3

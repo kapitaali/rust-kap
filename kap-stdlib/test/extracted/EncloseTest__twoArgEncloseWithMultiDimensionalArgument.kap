@@ -1,1 +1,11 @@
+⍝ assert: assertDimension(dimensionsOfSize(3, 3), result)
+⍝ assert: assertString("ab", result.valueAt(0))
+⍝ assert: assertString("fg", result.valueAt(1))
+⍝ assert: assertString("hi", result.valueAt(2))
+⍝ assert: assertString("jk", result.valueAt(3))
+⍝ assert: assertString("de", result.valueAt(4))
+⍝ assert: assertString("fg", result.valueAt(5))
+⍝ assert: assertString("hi", result.valueAt(6))
+⍝ assert: assertString("bc", result.valueAt(7))
+⍝ assert: assertString("de", result.valueAt(8))
 99 88 0 0 0 2 1 2 2 ⊂ 3 9 ⍴ "abcdefghijk"

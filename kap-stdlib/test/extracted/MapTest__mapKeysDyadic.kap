@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<Unimplemented2ArgException>
 1 map:keys (map:with 1 2 3 4)

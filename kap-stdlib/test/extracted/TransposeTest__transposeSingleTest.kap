@@ -1,1 +1,3 @@
+⍝ assert: assertDimension(emptyDimensions(), result)
+⍝ assert: assertEquals(3, result.ensureNumber().asLong())
 (0⍴7) ⍉3

@@ -1,1 +1,4 @@
+⍝ assert: assertDimension(dimensionsOfSize(2), result)
+⍝ assert: assertSimpleNumber(2, result.valueAt(0))
+⍝ assert: assertSimpleNumber(7, result.valueAt(1))
 ∇ foo (x) {1+x} ◊ (foo 1) (foo 6)

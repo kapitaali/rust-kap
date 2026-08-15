@@ -1,0 +1,1 @@
+assertRational(Rational.make(5, 2), result)

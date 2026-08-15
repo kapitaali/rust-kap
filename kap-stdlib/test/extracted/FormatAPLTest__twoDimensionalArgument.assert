@@ -1,0 +1,6 @@
+assert1DArray(
+                arrayOf(
+                    InnerString("a0foo1bar"),
+                    InnerString("a2foo3bar"),
+                    InnerString("a4foo5bar")),
+                result)

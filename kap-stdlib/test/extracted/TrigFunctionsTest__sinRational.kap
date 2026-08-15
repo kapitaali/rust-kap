@@ -1,1 +1,2 @@
+⍝ assert: assertNearDouble(NearDouble(0.9719379013633127), result)
 math:sin (4÷3)

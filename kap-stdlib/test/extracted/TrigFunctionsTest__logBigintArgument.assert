@@ -1,0 +1,1 @@
+assertNearDouble(NearDouble(2.302585092994046), result)

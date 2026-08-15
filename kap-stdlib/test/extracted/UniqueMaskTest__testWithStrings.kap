@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(1, 1, 1, 0, 0, 0, 1), result)
 ≠ "foo" "test" "abc" "abc" "test" "foo" "foo123"

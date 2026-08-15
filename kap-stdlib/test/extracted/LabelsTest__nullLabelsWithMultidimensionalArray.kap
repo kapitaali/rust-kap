@@ -1,1 +1,7 @@
+⍝ assert: assertDimension(dimensionsOfSize(3, 3), result)
+⍝ assert: assertLabels(
+                listOf(
+                    listOf("a", null, "test"),
+                    listOf(null, "abc", "def")),
+                result)
 "a" null "test" labels[0] null "abc" "def" labels[1] 3 3 ⍴ ⍳9

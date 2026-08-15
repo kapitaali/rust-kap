@@ -1,0 +1,1 @@
+assert1DArray(arrayOf(0, 1, 4, 9, 100, 152399025, 1, 4, 1000000, InnerBigIntOrLong("15241578780673483700809383936")), result)

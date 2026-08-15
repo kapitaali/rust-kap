@@ -1,1 +1,2 @@
+⍝ assert: assertSame(SystemClass.INTERNAL, result.kapClass)
 sql:connect "jdbc:sqlite::memory:"

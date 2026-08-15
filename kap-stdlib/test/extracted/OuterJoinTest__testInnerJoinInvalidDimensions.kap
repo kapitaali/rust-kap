@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<InvalidDimensionsException>
 100 200 300+∙×5 6 7 8

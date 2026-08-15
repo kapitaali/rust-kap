@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf("qwer", "t"), result)
 0 0 0 0 1 ⊆ "qwert"

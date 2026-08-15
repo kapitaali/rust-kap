@@ -1,1 +1,6 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    NearDouble(1.6777216e-8),
+                    NearDouble(4722366.482869646)),
+                result)
 a←×/24⍴2 ⋄ a (a×a×a) ÷ 1000000000000000

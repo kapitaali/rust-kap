@@ -1,0 +1,11 @@
+assert1DArray(
+                arrayOf(
+                    NearDouble(1.570796327),
+                    NearDouble(0.0),
+                    NearDouble(1.570796327),
+                    NearDouble(0.0),
+                    NearComplex(Complex(0.0, 2.063437069)),
+                    NearComplex(Complex(1.332478865, -2.122550124)),
+                    NearDouble(0.7227342478),
+                    NearComplex(Complex(0.0, 5.298292366))),
+                result)

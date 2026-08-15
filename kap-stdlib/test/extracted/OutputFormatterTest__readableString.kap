@@ -1,1 +1,5 @@
+⍝ assert: assertDimension(dimensionsOfSize(3), result)
+⍝ assert: assertEquals("\"a1\nb1\"", result.valueAt(0).formatted(FormatStyle.READABLE))
+⍝ assert: assertEquals("\"a2\\\"b2\"", result.valueAt(1).formatted(FormatStyle.READABLE))
+⍝ assert: assertEquals("\"a3\\\\b3\"", result.valueAt(2).formatted(FormatStyle.READABLE))
 "a1\nb1" "a2\"b2" "a3\\b3"

@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<RuntimeReturnFrameNotAvailableException>
 {S ⇐ → ⋄ {(S⍣(81=×⍨⍵)) ⍵}¨⍳10} 0

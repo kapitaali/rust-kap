@@ -1,1 +1,7 @@
+⍝ assert: assert1DArray(arrayOf(1, 1, 1, 1, 1), result)
+⍝ assert: assert1DArray(arrayOf(0, 0, 0, 0, 0), result)
+⍝ assert: assert1DArray(arrayOf(0, 0, 0, 0, 0), result)
+⍝ assert: assert1DArray(arrayOf(0, 0, 0, 0, 0), result)
+⍝ assert: assert1DArray(arrayOf(1, 1, 1, 1, 1), result)
+⍝ assert: assert1DArray(arrayOf(1, 1, 1, 1, 1), result)
 ¯0.0 0.0 ¯0.0 0.0 0 = 0.0 ¯0.0 ¯0.0 0.0 0

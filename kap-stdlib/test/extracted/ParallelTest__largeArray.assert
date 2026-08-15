@@ -1,0 +1,2 @@
+assertDimension(dimensionsOfSize(10000), result)
+assertSimpleNumber((i + 1).toLong(), result.valueAt(i))

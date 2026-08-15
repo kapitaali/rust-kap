@@ -1,1 +1,3 @@
+⍝ assert: assertTrue(result is JvmInstanceValue)
+⍝ assert: assertSame(String::class.java, result.instance)
 jvm:findClass "java.lang.String"

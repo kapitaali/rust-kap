@@ -1,1 +1,5 @@
+⍝ assert: assertIs(result)
+⍝ assert: assertEquals(2, result.listSize())
+⍝ assert: assertSimpleNumber(2, result.listElement(0))
+⍝ assert: assertSimpleNumber(11, result.listElement(1))
 1 and 2 ; 10 and 11

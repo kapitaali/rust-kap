@@ -1,0 +1,2 @@
+assertDimension(dimensionsOfSize(3, 3), result)
+assertBigIntOrLong("123456789012345678901234567890", result.valueAt(0))

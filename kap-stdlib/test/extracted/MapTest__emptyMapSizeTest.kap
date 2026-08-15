@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("map:size map:with ⍬"))
 map:size map:with ⍬

@@ -1,1 +1,5 @@
+⍝ assert: assertTrue(result is APLMap)
+⍝ assert: assertEquals(2, result.elementCount())
+⍝ assert: assertAPLValue(InnerDoubleOrLong(10.0), result.lookupValue(APLString.make("a").makeTypeQualifiedKey())!!)
+⍝ assert: assertString("c", result.lookupValue(APLString.make("b").makeTypeQualifiedKey())!!)
 json:readString "{\"a\":10,\"b\":\"c\"}"

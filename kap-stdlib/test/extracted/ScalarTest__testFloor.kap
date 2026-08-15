@@ -1,1 +1,13 @@
+⍝ assert: assertBigIntOrLong(5, parseAPLExpression("⌊5.9"))
+⍝ assert: assertBigIntOrLong(3, parseAPLExpression("⌊3.1"))
+⍝ assert: assertBigIntOrLong(-6, parseAPLExpression("⌊¯5.1"))
+⍝ assert: assertBigIntOrLong(-9, parseAPLExpression("⌊¯8.9"))
+⍝ assert: assertBigIntOrLong("8", parseAPLExpression("⌊50÷6"))
+⍝ assert: assertBigIntOrLong("-17", parseAPLExpression("⌊¯50÷3"))
+⍝ assert: assertSimpleNumber(3, parseAPLExpression("⌊3"))
+⍝ assert: assertSimpleNumber(-3, parseAPLExpression("⌊¯3"))
+⍝ assert: assertBigIntOrLong("3", parseAPLExpression("⌊ int:asBigint 3"))
+⍝ assert: assertBigIntOrLong("-3", parseAPLExpression("⌊ int:asBigint ¯3"))
+⍝ assert: assertBigIntOrLong("4503599627370494", parseAPLExpression("⌊4503599627370494.0"))
+⍝ assert: assertBigIntOrLong("15", parseAPLExpression("⌊31r2"))
 ⌊5.9

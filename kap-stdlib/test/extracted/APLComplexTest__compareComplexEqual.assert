@@ -1,0 +1,7 @@
+assertSimpleNumber(1, parseAPLExpression("3j4=3j4"))
+assertSimpleNumber(0, parseAPLExpression("3j4=6j7"))
+assertSimpleNumber(0, parseAPLExpression("1j2=1j3"))
+assertSimpleNumber(0, parseAPLExpression("1j2=3j2"))
+assertSimpleNumber(1, parseAPLExpression("0j0=0"))
+assertSimpleNumber(1, parseAPLExpression("3j0=3"))
+assertSimpleNumber(0, parseAPLExpression("3j4=3"))

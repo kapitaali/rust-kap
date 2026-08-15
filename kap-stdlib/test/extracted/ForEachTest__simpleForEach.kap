@@ -1,1 +1,6 @@
+⍝ assert: assertDimension(dimensionsOfSize(4), result)
+⍝ assert: assertEquals(1.0, result.valueAt(0).ensureNumber().asDouble())
+⍝ assert: assertEquals(0.25, result.valueAt(1).ensureNumber().asDouble())
+⍝ assert: assertEquals(0.5, result.valueAt(2).ensureNumber().asDouble())
+⍝ assert: assertEquals(0.0625, result.valueAt(3).ensureNumber().asDouble())
 ÷¨1 4 2 16

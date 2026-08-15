@@ -1,1 +1,4 @@
+⍝ assert: assertDimension(dimensionsOfSize(4), result)
+⍝ assert: assertArrayContentDouble(doubleArrayOf(1.1, 2.1, 3.1, 4.1), result)
+⍝ assert: assertEquals(ArrayMemberType.DOUBLE, result.specialisedType)
 1.1 2.1 3.1 4.1

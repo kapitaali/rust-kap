@@ -1,1 +1,2 @@
+⍝ assert: assertAPLValue(NearDouble(9.0, 4), parseAPLExpression("2 *˝512"))
 2 *˝512

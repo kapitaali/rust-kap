@@ -1,0 +1,1 @@
+assertSimpleNumber(4, parseAPLExpression("10 20 30 40 ⍳ 1"))

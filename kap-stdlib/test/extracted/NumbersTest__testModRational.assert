@@ -1,0 +1,3 @@
+assert1DArray(
+                arrayOf(InnerRational(17, 10), InnerBigIntOrLong(1), InnerBigIntOrLong(0)),
+                result)

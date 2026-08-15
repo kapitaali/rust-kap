@@ -1,1 +1,10 @@
+⍝ assert: assertDimension(dimensionsOfSize(5, 4), result)
+⍝ assert: assertArrayContent(
+            arrayOf(
+                "foo", "bar", 1234, InnerDouble(12.25),
+                11, "xyz", "a", "b",
+                "a", "", "b", "c",
+                "abc", "  def ", 11, InnerDouble(11.5),
+                InnerBigIntOrLong("123456789012345678901234567890"), -2, InnerDouble(-1.5), InnerBigIntOrLong("-1234567890123456789012345678900000")),
+            result)
 foo

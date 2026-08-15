@@ -1,0 +1,1 @@
+assertSimpleNumber(0, parseAPLExpression("3J1≢0⌷3J1 4J1"))

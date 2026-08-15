@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(107, result)
 ∇ (x foo y) a { 100 ⍞y 10 ⍞x a } ◊ -foo+ 3

@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(8, result)
 foo ← λ { 1 + ⍵ } ◊ bar ← λ { ⍵ } ◊ ⍞(⍞bar foo) 7

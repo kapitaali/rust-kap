@@ -1,0 +1,2 @@
+assertDimension(dimensionsOfSize(4), result)
+assertArrayContent(arrayOf(InnerDouble(1.0), InnerDouble(2.0), InnerDouble(3628800.0), InnerDouble(39916800.0)), result)

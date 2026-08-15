@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<InvalidDimensionsException>
 foo ← 3 5 ⍴ ⍳ 100 ⋄ foo[0 1 ; 2] ← 1000 1001 1002

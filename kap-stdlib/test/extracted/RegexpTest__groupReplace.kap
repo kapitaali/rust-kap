@@ -1,1 +1,2 @@
+⍝ assert: assertString("fooACBbarADBtest", result)
 "x([A-Z])" regex:replace ("fooxCbarxDtest";λ{"A",(⊃⍵[1]),"B"})

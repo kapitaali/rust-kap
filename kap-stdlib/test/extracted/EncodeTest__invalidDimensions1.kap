@@ -1,1 +1,4 @@
+⍝ assert: assertDimension(dimensionsOfSize(2,2), result)
+⍝ assert: assertArrayContent(arrayOf(0,3,0,3), result)
+⍝ assert: assertFailsWith<InvalidDimensionsException>
 (2 2 ⍴ 2) ⊥ 2 2 ⍴ 0 1 0 1

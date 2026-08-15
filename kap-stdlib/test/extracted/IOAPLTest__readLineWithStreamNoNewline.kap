@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(InnerString("foo"), InnerString("test"), 1), result)
 foo

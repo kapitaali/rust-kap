@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(1, 1, -1, -1), result)
 (int:ensureGeneric 2 2 ¯2 ¯2) | (int:ensureGeneric 123 ¯123 123 ¯123)

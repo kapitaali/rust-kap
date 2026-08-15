@@ -1,0 +1,2 @@
+assertIs(result)
+assertEquals("kap-array", result.value.name)

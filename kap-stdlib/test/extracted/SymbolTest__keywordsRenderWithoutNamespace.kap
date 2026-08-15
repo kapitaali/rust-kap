@@ -1,1 +1,2 @@
+⍝ assert: assertString(":abcdef", result)
 ⍕:abcdef

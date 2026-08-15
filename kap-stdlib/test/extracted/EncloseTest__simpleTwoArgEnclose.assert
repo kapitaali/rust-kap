@@ -1,0 +1,5 @@
+assertDimension(dimensionsOfSize(4), result)
+assertString("foo", result.valueAt(0))
+assertString("bar", result.valueAt(1))
+assertString("test", result.valueAt(2))
+assertString("abcd", result.valueAt(3))

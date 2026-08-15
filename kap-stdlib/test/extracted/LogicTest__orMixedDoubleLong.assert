@@ -1,0 +1,1 @@
+assert1DArray(arrayOf(3, 4, 5), parseAPLExpression("2 3 4 + 1.0 1.0 0∨1.0 0.0 1"))

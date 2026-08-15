@@ -1,1 +1,5 @@
+⍝ assert: assertDimension(dimensionsOfSize(3), result)
+⍝ assert: assertString("a1", result.valueAt(0))
+⍝ assert: assertString("b2", result.valueAt(1))
+⍝ assert: assertString("c1", result.valueAt(2))
 0 1 0 % ("a1" "b1" "c1") ("a2" "b2" "c2")

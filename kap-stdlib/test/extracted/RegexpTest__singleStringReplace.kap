@@ -1,1 +1,2 @@
+⍝ assert: assertString("fooqwebar", result)
 "x" regex:replace ("fooxbar";"qwe")

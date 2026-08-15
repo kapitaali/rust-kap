@@ -1,0 +1,4 @@
+assertDimension(emptyDimensions(), result)
+assertDimension(dimensionsOfSize(2), inner)
+assert1DArray(arrayOf(250, 280), inner.valueAt(0))
+assert1DArray(arrayOf(410, 440), inner.valueAt(1))

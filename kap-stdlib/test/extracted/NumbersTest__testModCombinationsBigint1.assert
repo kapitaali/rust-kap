@@ -1,0 +1,1 @@
+assert1DArray(arrayOf(InnerBigIntOrLong(5), InnerBigIntOrLong(9995), InnerBigIntOrLong(-9995), InnerBigIntOrLong(-5)), result)

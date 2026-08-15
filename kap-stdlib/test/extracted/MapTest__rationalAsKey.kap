@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(1, result)
 a ← map:with (4÷5) 1 (6÷7) 2 ⋄ a[4÷5]

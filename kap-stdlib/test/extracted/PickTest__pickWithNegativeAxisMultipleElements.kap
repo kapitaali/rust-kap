@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(40, 30), result)
 ¯1 2 ⊇ {GENERIC} 10 20 30 40

@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<APLEvalException>
 x ← 1 ◊ ⍞x 10

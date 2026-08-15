@@ -1,1 +1,5 @@
+⍝ assert: assertIs(result)
+⍝ assert: assert1DArray(arrayOf(0, 0, 0, 0), result)
+⍝ assert: assertIs(result)
+⍝ assert: assert1DArray(content, result)
 0 0 0 0

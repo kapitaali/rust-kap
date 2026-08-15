@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleDouble(2.0, parseAPLExpression("8 -⍛÷⍨˝ ¯0.25"))
 8 -⍛÷⍨˝ ¯0.25

@@ -1,0 +1,1 @@
+assertEquals(Complex(-2.0, -3.0), result.ensureNumber().asComplex())

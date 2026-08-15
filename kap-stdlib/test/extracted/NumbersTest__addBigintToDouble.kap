@@ -1,1 +1,2 @@
+⍝ assert: assertNearDouble(NearDouble(5.0), result)
 (int:asBigint 5) + 0.0

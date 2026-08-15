@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<APLIndexOutOfBoundsException>
 (3 3 ⍴ 10×⍳9).(2 ¯4)

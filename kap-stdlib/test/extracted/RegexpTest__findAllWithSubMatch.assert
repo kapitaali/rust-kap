@@ -1,0 +1,5 @@
+assert1DArray(
+                arrayOf(
+                    Inner1D(arrayOf("x123", "123")),
+                    Inner1D(arrayOf("x1", "1"))),
+                result)

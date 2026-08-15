@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<APLIndexOutOfBoundsException>
 (⊂ 11 100) ⌷ 100+⍳100

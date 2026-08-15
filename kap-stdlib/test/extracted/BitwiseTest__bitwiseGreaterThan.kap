@@ -1,1 +1,5 @@
+⍝ assert: assertSimpleNumber(2L, parseAPLExpression("0b0011 >∵ 0b1001"))
+⍝ assert: assertBigIntOrLong(
+            "19342813113834066795298818",
+            parseAPLExpression("0b1000000000000000000000000000000000000000000000000000000000000000000000000000000000011 >∵ 0b1001"))
 0b0011 >∵ 0b1001

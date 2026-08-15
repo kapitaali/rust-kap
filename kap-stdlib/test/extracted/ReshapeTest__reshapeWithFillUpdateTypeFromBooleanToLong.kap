@@ -1,1 +1,4 @@
+⍝ assert: assertDimension(dimensionsOfSize(2, 2), result)
+⍝ assert: assertArrayContent(arrayOf(1, 0, 1, 10), result)
+⍝ assert: assertEquals(ArrayMemberType.LONG, result.specialisedType)
 :fill 2 (⍴ int:proto 10) 1 0 1

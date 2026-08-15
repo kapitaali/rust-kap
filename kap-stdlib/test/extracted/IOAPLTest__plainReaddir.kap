@@ -1,1 +1,4 @@
+⍝ assert: assertDimension(dimensionsOfSize(2, 1), result)
+⍝ assert: assertString("a.txt", result.valueAt(0))
+⍝ assert: assertString("file2.txt", result.valueAt(1))
 x ← io:readdir "test-data/readdir-test/" ◊ x[⍋x;]

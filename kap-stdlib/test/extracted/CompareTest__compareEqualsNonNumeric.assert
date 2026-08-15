@@ -1,0 +1,4 @@
+assertSimpleNumber(1, parseAPLExpression("@a = @a"))
+assertSimpleNumber(0, parseAPLExpression("@a = @b"))
+assertSimpleNumber(1, parseAPLExpression("('foo) = 'foo"))
+assertSimpleNumber(0, parseAPLExpression("('foo) = 'bar"))

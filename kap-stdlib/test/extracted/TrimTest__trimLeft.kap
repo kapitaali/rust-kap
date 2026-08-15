@@ -1,1 +1,6 @@
+⍝ assert: assertString("foo      ", parseAPLExpression("s:trimLeft \"   foo      \"", withStandardLib = true))
+⍝ assert: assertString("foo  test    ", parseAPLExpression("s:trimLeft \"  foo  test    \"", withStandardLib = true))
+⍝ assert: assertString("foo", parseAPLExpression("s:trimLeft \"foo\"", withStandardLib = true))
+⍝ assert: assertString("", parseAPLExpression("s:trimLeft \"    \"", withStandardLib = true))
+⍝ assert: assertString("", parseAPLExpression("s:trimLeft \"\"", withStandardLib = true))
 s:trimLeft "   foo      "

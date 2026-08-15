@@ -1,0 +1,2 @@
+assertTrue(v is APLDouble, "expected APLDouble, actual type: ${v::class.simpleName}")
+assertSimpleDouble(3.0, v)

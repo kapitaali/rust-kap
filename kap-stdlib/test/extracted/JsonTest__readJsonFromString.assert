@@ -1,0 +1,4 @@
+assertTrue(result is APLMap)
+assertEquals(2, result.elementCount())
+assertAPLValue(InnerDoubleOrLong(10.0), result.lookupValue(APLString.make("a").makeTypeQualifiedKey())!!)
+assertString("c", result.lookupValue(APLString.make("b").makeTypeQualifiedKey())!!)

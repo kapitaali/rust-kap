@@ -1,1 +1,5 @@
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("3 cmp 1"))
+⍝ assert: assertSimpleNumber(-1, parseAPLExpression("10 cmp 110"))
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("1 cmp 1"))
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("¯3 cmp ¯3"))
 3 cmp 1

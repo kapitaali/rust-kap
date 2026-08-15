@@ -1,1 +1,7 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    Inner1D(arrayOf("x123yab", "123", "ab")),
+                    Inner1D(arrayOf("x56yqwer", "56", "qwer"))),
+                result
+            )
 x123yab

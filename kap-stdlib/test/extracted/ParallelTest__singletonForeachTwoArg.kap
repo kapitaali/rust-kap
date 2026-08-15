@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(21, result)
 11 {⍺+⍵}¨∥ 10

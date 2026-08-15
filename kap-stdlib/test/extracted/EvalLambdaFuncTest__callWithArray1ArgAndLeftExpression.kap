@@ -1,1 +1,2 @@
+⍝ assert: assertArrayContent(arrayOf(31, 41, 51, 61), result)
 foo ← λ{⍵+1} ◊ 20 + ⍞foo 10 20 30 40

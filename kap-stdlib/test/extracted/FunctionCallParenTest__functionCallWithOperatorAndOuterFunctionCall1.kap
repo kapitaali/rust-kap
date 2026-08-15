@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(310, result)
 200 + +/⟦1 2 3 4⟧ + 100

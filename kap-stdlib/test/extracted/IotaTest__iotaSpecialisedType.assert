@@ -1,0 +1,5 @@
+assertEquals(ArrayMemberType.ALL, parseAPLExpression("⍳0").specialisedType)
+assertEquals(ArrayMemberType.BOOLEAN, parseAPLExpression("⍳1").specialisedType)
+assertEquals(ArrayMemberType.BOOLEAN, parseAPLExpression("⍳2").specialisedType)
+assertEquals(ArrayMemberType.LONG, parseAPLExpression("⍳3").specialisedType)
+assertEquals(ArrayMemberType.LONG, parseAPLExpression("⍳100").specialisedType)

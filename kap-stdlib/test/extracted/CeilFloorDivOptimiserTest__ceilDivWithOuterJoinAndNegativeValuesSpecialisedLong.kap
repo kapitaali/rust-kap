@@ -1,1 +1,9 @@
+⍝ assert: assertDimension(dimensionsOfSize(4, 4), result)
+⍝ assert: assertArrayContent(
+                arrayOf(
+                    151, 51, -151, -50,
+                    401, 134, -401, -133,
+                    -151, -50, 151, 51,
+                    -401, -133, 401, 134),
+                result)
 ⌈ 151 401 ¯151 ¯401 ÷⌻ 1 3 ¯1 ¯3

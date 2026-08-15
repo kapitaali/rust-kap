@@ -1,1 +1,3 @@
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("null + null"))
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("null × null"))
 null + null

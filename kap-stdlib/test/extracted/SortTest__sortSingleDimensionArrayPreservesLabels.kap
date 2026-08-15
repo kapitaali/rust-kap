@@ -1,1 +1,7 @@
+⍝ assert: assert1DArray(arrayOf(0, 1, 2, 4), result)
+⍝ assert: assertNotNull(labels)
+⍝ assert: assertLabelList(listOf("a", "c", "b", "d"), labels.labels[0])
+⍝ assert: assert1DArray(arrayOf(4, 2, 1, 0), result)
+⍝ assert: assertNotNull(labels)
+⍝ assert: assertLabelList(listOf("d", "b", "c", "a"), labels.labels[0])
 ∧ "a" "b" "c" "d" labels 0 2 1 4

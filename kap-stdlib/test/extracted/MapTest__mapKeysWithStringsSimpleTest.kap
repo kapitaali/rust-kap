@@ -1,1 +1,3 @@
+⍝ assert: assertDimension(dimensionsOfSize(2), result)
+⍝ assert: assertEquals(expected, resultAsList.sorted())
 map:keys map:with "a" 1 "b" 2

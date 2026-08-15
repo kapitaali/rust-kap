@@ -1,1 +1,4 @@
+⍝ assert: assertTrue(result.isScalar())
+⍝ assert: assertDimension(dimensionsOfSize(3), v)
+⍝ assert: assertArrayContent(arrayOf(10011, 10022, 10033), v)
 (⊂10 20 30) {10000+⍵+⍺}¨ ⊂1 2 3

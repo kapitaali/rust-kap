@@ -1,0 +1,2 @@
+assertSimpleNumber(-1, parseAPLExpression("100000000000000000000000000 cmp @a"))
+assertSimpleNumber(1, parseAPLExpression("@a cmp 100000000000000000000000000"))

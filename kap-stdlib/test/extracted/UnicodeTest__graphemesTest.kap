@@ -1,1 +1,6 @@
+⍝ assert: assertDimension(dimensionsOfSize(4), result)
+⍝ assert: assertString("a", result.valueAt(0))
+⍝ assert: assertString("b", result.valueAt(1))
+⍝ assert: assertString("c", result.valueAt(2))
+⍝ assert: assertString("a⃞", result.valueAt(3))
 unicode:toGraphemes "abca⃞"

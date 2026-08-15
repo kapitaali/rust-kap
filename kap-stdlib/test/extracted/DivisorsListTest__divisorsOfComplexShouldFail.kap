@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<APLIllegalArgumentException>
 math:divisors 1j4

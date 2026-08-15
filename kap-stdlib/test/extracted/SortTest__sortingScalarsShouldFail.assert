@@ -1,0 +1,2 @@
+assertFailsWith<APLEvalException>
+assertFailsWith<APLEvalException>

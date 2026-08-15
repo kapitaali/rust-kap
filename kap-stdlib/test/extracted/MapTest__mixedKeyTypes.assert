@@ -1,0 +1,10 @@
+assertIs(result)
+assertEquals(3, result.elementCount())
+assertSimpleNumber(2, result.lookupValue(1.makeAPLNumber().makeTypeQualifiedKey())!!)
+assertSimpleNumber(3, result.lookupValue(APLChar('a'.code).makeTypeQualifiedKey())!!)
+assertSimpleNumber(
+                4,
+                result.lookupValue(
+                    APLArrayImpl(
+                        dimensionsOfSize(3, 2),
+                        arrayOf(1, 2, 3, 4, 5, 6).map { v -> v.makeAPLNumber() }.toTypedArray()).makeTypeQualifiedKey())!!)

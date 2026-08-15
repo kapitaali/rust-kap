@@ -1,1 +1,2 @@
+⍝ assert: assertNearDouble(NearDouble(1.892789261), result)
 3 ⍟ int:asBigint 8

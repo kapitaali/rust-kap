@@ -1,1 +1,4 @@
+⍝ assert: assertFailsWith<IllegalAxisException>
+⍝ assert: assertFailsWith<IllegalAxisException>
+⍝ assert: assertFailsWith<IllegalAxisException>
 ⊖[¯1] 1 2 3

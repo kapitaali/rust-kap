@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(5, 9, 9), result)
 0 1 1 % (5 6 7) 9

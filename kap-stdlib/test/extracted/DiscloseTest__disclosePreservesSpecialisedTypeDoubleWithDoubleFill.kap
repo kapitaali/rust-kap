@@ -1,1 +1,8 @@
+⍝ assert: assertDimension(dimensionsOfSize(2, 4), result)
+⍝ assert: assertArrayContent(
+                arrayOf(
+                    InnerDouble(1.5), InnerDouble(2.5), InnerDouble(3.0), InnerDouble(4.0),
+                    InnerDouble(5.0), InnerDouble(6.0), InnerDouble(5.5), InnerDouble(5.5)),
+                result)
+⍝ assert: assertEquals(ArrayMemberType.DOUBLE, result.specialisedType)
 (⊃ int:proto 5.5) (1.5 2.5 3.0 4.0) (5.0 6.0)

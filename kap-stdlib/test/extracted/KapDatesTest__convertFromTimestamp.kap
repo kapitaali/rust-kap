@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(1654321234599L, result)
 time:fromTimestamp time:toTimestamp 1654321234599

@@ -1,0 +1,7 @@
+assertDimension(dimensionsOfSize(2, 4), result)
+assertArrayContent(
+                arrayOf(
+                    NearDouble(11.0), NearDouble(12.2), NearDouble(13.3), NearDouble(14.4),
+                    NearDouble(11.1), NearDouble(12.3), NearDouble(13.399999999999999), NearDouble(14.5)),
+                result)
+assertTrue(result.specialisedType.isDouble)

@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<VariableNotAssigned>
 x ← io:readdir "test-data/readdir-test/" ◊ x[⍋x;]

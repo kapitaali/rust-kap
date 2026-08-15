@@ -1,0 +1,2 @@
+assertSimpleNumber(1, parseAPLExpression("1 2 3 4 5 6 cmp 4j7"))
+assertSimpleNumber(-1, parseAPLExpression("4j7 cmp 1 2 3 4 5 6"))

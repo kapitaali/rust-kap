@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<DestructuringAssignmentShapeMismatch>
 (a b c) ← 10 20

@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(InnerAPLNil(), InnerAPLNil()), result)
 (3 3 ⍴ ⍳9) ⍳ 100 200

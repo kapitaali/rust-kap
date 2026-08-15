@@ -1,1 +1,3 @@
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("1 ≡ (map:with :a 1 :b 10)"))
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("(map:with :a 1 :b 10) ≡ 1"))
 1 ≡ (map:with :a 1 :b 10)

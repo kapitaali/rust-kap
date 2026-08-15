@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(280, result)
 10 +∙× ⍳8

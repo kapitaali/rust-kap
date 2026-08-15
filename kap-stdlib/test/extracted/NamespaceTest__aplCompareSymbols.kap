@@ -1,1 +1,4 @@
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("'foo:bar ≡ 'aa:bar"))
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("'foo:bar ≡ 'foo:bar"))
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("'foo:bar ≡ 'foo:aa"))
 'foo:bar ≡ 'aa:bar

@@ -1,0 +1,8 @@
+assert1DArray(
+                arrayOf(
+                    InnerRational(Rational.make(3, 2)),
+                    InnerRational(Rational.make(1, 20)),
+                    14,
+                    InnerRational(18, 5),
+                    0),
+                result)

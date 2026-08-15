@@ -1,0 +1,4 @@
+assertSimpleNumber(1, parseAPLExpression("null≡null"))
+assertSimpleNumber(0, parseAPLExpression("1≡null"))
+assertSimpleNumber(0, parseAPLExpression("(0⍴0)≡null"))
+assertSimpleNumber(0, parseAPLExpression("(1 1)≡null"))

@@ -1,1 +1,2 @@
+⍝ assert: assertDimension(dimensionsOfSize(0), result)
 ⊃⍬

@@ -1,0 +1,2 @@
+assert1DArray(arrayOf(1, 2, 0, 3), parseAPLExpression("⍋ @a 1 2 @b"))
+assert1DArray(arrayOf(3, 0, 2, 1), parseAPLExpression("⍒ @a 1 2 @b"))

@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(5, result)
 a + 1 + a←2

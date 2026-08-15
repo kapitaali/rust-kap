@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(97, result)
 unicode:toCodepoints @a

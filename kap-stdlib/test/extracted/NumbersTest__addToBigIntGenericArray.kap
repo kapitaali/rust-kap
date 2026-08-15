@@ -1,1 +1,2 @@
+⍝ assert: assertBigIntOrLong("10000000000000000000", result)
 +/ int:ensureGeneric 10 ⍴ 1000000000000000000

@@ -1,1 +1,6 @@
+⍝ assert: assert1DArray(arrayOf(100, 200), result)
+⍝ assert: assertLabels(
+                listOf(
+                    listOf("foo", null)),
+                result)
 "foo" null labels 100 200

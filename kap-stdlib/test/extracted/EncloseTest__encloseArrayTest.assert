@@ -1,0 +1,5 @@
+assertTrue(result.isScalar())
+assertDimension(emptyDimensions(), result)
+assertEquals(1, result.size)
+assertDimension(dimensionsOfSize(4), v)
+assertArrayContent(arrayOf(1, 2, 3, 4), v)

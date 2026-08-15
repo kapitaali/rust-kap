@@ -1,1 +1,3 @@
+⍝ assert: assertString("a", parseAPLExpression("⍕@a"))
+⍝ assert: assertString("⍬", parseAPLExpression("⍕@⍬"))
 ⍕@a

@@ -1,1 +1,2 @@
+⍝ assert: assertString("cccccfghijklmn", result)
 {@a+2}⍢(5↑0↓) "abcdefghijklmn"

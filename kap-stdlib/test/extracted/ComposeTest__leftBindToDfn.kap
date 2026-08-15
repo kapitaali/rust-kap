@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(59, result)
 (5 {⍺+⍵+50}) 4

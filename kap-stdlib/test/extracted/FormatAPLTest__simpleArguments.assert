@@ -1,0 +1,1 @@
+assertString("a1foo2bar", result)

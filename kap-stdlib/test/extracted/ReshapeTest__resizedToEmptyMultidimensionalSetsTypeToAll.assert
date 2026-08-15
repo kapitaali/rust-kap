@@ -1,0 +1,2 @@
+assertDimension(dimensionsOfSize(2, 2, 0), result)
+assertEquals(ArrayMemberType.ALL, result.specialisedType)

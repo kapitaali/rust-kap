@@ -1,1 +1,6 @@
+⍝ assert: assertDimension(dimensionsOfSize(2, 2), result)
+⍝ assert: assertArrayContent(arrayOf(1, 0, 3, 2), result)
+⍝ assert: assertNotNull(labels)
+⍝ assert: assertLabelList(listOf("a", "b"), labels.labels[0])
+⍝ assert: assertNull(labels.labels[1])
 1 1 ⌽ "aa" "bb" labels[1] "a" "b" labels[0] 2 2 ⍴ ⍳4

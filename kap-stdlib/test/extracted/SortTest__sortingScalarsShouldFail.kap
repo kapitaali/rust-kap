@@ -1,1 +1,3 @@
+⍝ assert: assertFailsWith<APLEvalException>
+⍝ assert: assertFailsWith<APLEvalException>
 ⍋1

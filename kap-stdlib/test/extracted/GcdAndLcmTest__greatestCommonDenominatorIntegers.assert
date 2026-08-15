@@ -1,0 +1,4 @@
+assertSimpleNumber(1, parseAPLExpression("3 math:gcd 8"))
+assertSimpleNumber(4, parseAPLExpression("4 math:gcd 8"))
+assertSimpleNumber(4, parseAPLExpression("4 math:gcd 16"))
+assertSimpleNumber(2, parseAPLExpression("6 math:gcd 16"))

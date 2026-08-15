@@ -1,0 +1,1 @@
+assertSimpleNumber(433, parseAPLExpression("10 ⊥ 1 33 3", true))

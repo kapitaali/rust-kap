@@ -1,1 +1,4 @@
+⍝ assert: assertIs(result)
+⍝ assert: assertIs(result.instance)
+⍝ assert: assertEquals("foo", result.instance.childNodes.item(0).nodeName)
 foo

@@ -1,1 +1,5 @@
+⍝ assert: assertIs(result)
+⍝ assert: assertEquals(2, result.elementCount())
+⍝ assert: assertString("a", result.lookupValue(APLString.make("foo").makeTypeQualifiedKey())!!)
+⍝ assert: assertString("b", result.lookupValue(APLString.make("bar").makeTypeQualifiedKey())!!)
 map:with 2 2 ⍴ "foo" "a" "bar" "b"

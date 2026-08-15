@@ -1,0 +1,1 @@
+assertDoubleWithRange(Pair(51.4, 51.6), result)

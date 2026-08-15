@@ -1,0 +1,7 @@
+assertDimension(dimensionsOfSize(3, 2), result)
+assertSimpleNumber(1, result.valueAt(0))
+assert1DArray(arrayOf("a1"), result.valueAt(1))
+assertSimpleNumber(2, result.valueAt(2))
+assert1DArray(arrayOf("b2", "c3"), result.valueAt(3))
+assertSimpleNumber(5, result.valueAt(4))
+assert1DArray(arrayOf("d4"), result.valueAt(5))

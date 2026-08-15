@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<IllegalAxisException>
 5 ↓[2] 4 7 ⍴ ⍳100

@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(3011, result)
 foo ← λ{⍺+⍵+1} ◊ 10 ⍞foo 3000

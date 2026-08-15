@@ -1,0 +1,1 @@
+assertRational(Rational.make(1, 5), parseAPLExpression("10 ×⍨˝ 2"))

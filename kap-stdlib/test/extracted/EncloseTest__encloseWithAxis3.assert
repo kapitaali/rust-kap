@@ -1,0 +1,8 @@
+assertDimension(dimensionsOfSize(2, 2), result)
+assertValue(index: Int, vararg args: Int)
+assertDimension(dimensionsOfSize(v.size), v)
+assertArrayContent(args.toTypedArray(), v)
+assertValue(i++, 300, 302, 304)
+assertValue(i++, 301, 303, 305)
+assertValue(i++, 306, 308, 310)
+assertValue(i++, 307, 309, 311)

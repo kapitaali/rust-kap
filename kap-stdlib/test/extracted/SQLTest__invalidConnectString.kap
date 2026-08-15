@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<SQLAPLException>
 sql:connect "jdbc:foo::memory:"

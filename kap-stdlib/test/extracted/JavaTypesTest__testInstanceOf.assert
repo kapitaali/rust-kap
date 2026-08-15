@@ -1,0 +1,7 @@
+assertSimpleNumber(1, parseAPLExpression("jvm:instanceOf (jvm:toJvmString \"abc\" ; jvm:findClass \"java.lang.String\")"))
+assertSimpleNumber(
+            0,
+            parseAPLExpression("cl ← jvm:findClass \"com.dhsdevelopments.kap.jvmmod.SimpleExample\"\njvm:instanceOf (jvm:createInstance (jvm:findConstructor cl) ; jvm:findClass \"java.lang.String\")"))
+assertSimpleNumber(
+            1,
+            parseAPLExpression("cl ← jvm:findClass \"com.dhsdevelopments.kap.jvmmod.ChildExample\"\njvm:instanceOf (jvm:createInstance (jvm:findConstructor cl) ; jvm:findClass \"com.dhsdevelopments.kap.jvmmod.SuperExample\")"))

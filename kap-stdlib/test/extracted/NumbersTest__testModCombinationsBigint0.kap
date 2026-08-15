@@ -1,1 +1,4 @@
+⍝ assert: assert1DArray(
+                arrayOf(InnerBigIntOrLong(1), InnerBigIntOrLong(1), InnerBigIntOrLong(-1), InnerBigIntOrLong(-1), InnerBigIntOrLong(0)),
+                result)
 (int:asBigint¨ 2 2 ¯2 ¯2 2) | int:asBigint¨ 123 ¯123 123 ¯123 ¯2

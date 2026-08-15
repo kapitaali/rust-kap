@@ -1,1 +1,2 @@
+⍝ assert: assertString("test string\n", result)
 test string

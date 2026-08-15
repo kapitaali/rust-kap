@@ -1,1 +1,10 @@
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("1÷0"))
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("100÷0"))
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("¯100÷0"))
+⍝ assert: assertSimpleDouble(Double.POSITIVE_INFINITY, parseAPLExpression("12.2÷0"))
+⍝ assert: assertSimpleDouble(Double.POSITIVE_INFINITY, parseAPLExpression("2÷0.0"))
+⍝ assert: assertSimpleDouble(Double.POSITIVE_INFINITY, parseAPLExpression("2.0÷0.0"))
+⍝ assert: assertSimpleNumber(2, parseAPLExpression("4÷2"))
+⍝ assert: assertSimpleNumber(20, parseAPLExpression("40÷2"))
+⍝ assert: assertRational(Rational.make(10, 3), parseAPLExpression("10÷3"))
 1÷0

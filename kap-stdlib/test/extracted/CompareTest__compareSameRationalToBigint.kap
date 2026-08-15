@@ -1,1 +1,3 @@
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("(1÷2) ≡ 10⋆40"))
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("(1÷2) ≢ 10⋆40"))
 (1÷2) ≡ 10⋆40

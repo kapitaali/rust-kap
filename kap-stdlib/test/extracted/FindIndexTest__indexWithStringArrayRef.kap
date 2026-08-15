@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(2, result)
 foo ← "jkc" ⋄ "abc" ⍳ foo[2]

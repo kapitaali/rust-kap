@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<APLEvalException>
 {if(⍵=30) { io:print (1 2)[5] } ⋄ 1+⍵}¨∥ ⍳100

@@ -1,1 +1,8 @@
+⍝ assert: assertDimension(dimensionsOfSize(3, 3), result)
+⍝ assert: assertArrayContent(
+                arrayOf(
+                    Inner1Dn(0, 0), Inner1Dn(0, 1), Inner1Dn(0, 2),
+                    Inner1Dn(1, 0), Inner1Dn(1, 1), Inner1Dn(1, 2),
+                    Inner1Dn(2, 0), Inner1Dn(2, 1), Inner1Dn(2, 2),
+                ), result)
 (⍳3 3) ∪ (0 3 ⍴ ⍬)

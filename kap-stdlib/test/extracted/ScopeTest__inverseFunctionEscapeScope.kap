@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(-6, result)
 foo ⇐ { n←⍵ ⋄ λ((n-)˝) } ⋄ bar ← foo 5 ⋄ ⍞bar 11

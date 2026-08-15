@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(7), result)
 math:factor 7

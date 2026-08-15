@@ -1,0 +1,2 @@
+assertTrue(result.isStringValue())
+assertEquals(expected, resultString)

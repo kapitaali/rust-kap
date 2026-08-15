@@ -1,1 +1,3 @@
+⍝ assert: assertAPLNull(result)
+⍝ assert: assertEquals(ArrayMemberType.ALL, result.specialisedType)
 ∊⍬

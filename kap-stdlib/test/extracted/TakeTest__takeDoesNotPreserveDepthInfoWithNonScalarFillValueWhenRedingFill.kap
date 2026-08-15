@@ -1,1 +1,4 @@
+⍝ assert: assert1DArray(arrayOf(1, 2, Inner1D(arrayOf(1, 2, 3))), result)
+⍝ assert: assertEquals(ArrayMemberType.GENERIC, result.specialisedType)
+⍝ assert: assertFalse(result.isDepth0)
 3 (↑ int:proto 1 2 3) 1 2

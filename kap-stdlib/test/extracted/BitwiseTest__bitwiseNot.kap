@@ -1,1 +1,5 @@
+⍝ assert: assertSimpleNumber(-203, parseAPLExpression("~∵ 202"))
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("~∵ ¯1"))
+⍝ assert: assertSimpleNumber(-1, parseAPLExpression("~∵ 0"))
+⍝ assert: assertBigIntOrLong("-10000000000000000000000000000001", parseAPLExpression("~∵ 10000000000000000000000000000000"))
 ~∵ 202

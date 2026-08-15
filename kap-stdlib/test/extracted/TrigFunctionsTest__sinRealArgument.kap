@@ -1,1 +1,12 @@
+⍝ assert: assertDoubleWithRange(Pair(0.0, 0.0), result.valueAt(0))
+⍝ assert: assertDoubleWithRange(Pair(0.8414709847, 0.8414709849), result.valueAt(1))
+⍝ assert: assertDoubleWithRange(Pair(0.4794255385, 0.4794255387), result.valueAt(2))
+⍝ assert: assertDoubleWithRange(Pair(-0.4794255387, -0.4794255385), result.valueAt(3))
+⍝ assert: assertDoubleWithRange(Pair(0.1986693307, 0.1986693309), result.valueAt(4))
+⍝ assert: assertDoubleWithRange(Pair(-0.09983341666, -0.09983341664), result.valueAt(5))
+⍝ assert: assertDoubleWithRange(Pair(0.9092974267, 0.9092974269), result.valueAt(6))
+⍝ assert: assertDoubleWithRange(Pair(0.1411200080, 0.1411200082), result.valueAt(7))
+⍝ assert: assertDoubleWithRange(Pair(-0.7568024954, -0.7568024952), result.valueAt(8))
+⍝ assert: assertDoubleWithRange(Pair(-0.9589242748, -0.9589242746), result.valueAt(9))
+⍝ assert: assertDoubleWithRange(Pair(-0.8414709849, -0.8414709847), result.valueAt(10))
 math:sin 0 1 0.5 ¯0.5 0.2 ¯0.1 2 3 4 5 ¯1

@@ -1,0 +1,3 @@
+assertSimpleNumber(1, parseAPLExpression("2.1 cmp (int:asBigint 2)"))
+assertSimpleNumber(-1, parseAPLExpression("(int:asBigint 2) cmp 2.1"))
+assertSimpleNumber(1, parseAPLExpression("(int:asBigint 2) cmp 2.0"))

@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(1, 1, 1), result)
 toBoolean¨ (1÷2) (1÷100000000000000000000000000000000000000000000000) (10÷9)

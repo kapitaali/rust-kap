@@ -1,1 +1,3 @@
+⍝ assert: assert1DArray(arrayOf(0, 1), parseAPLExpression("⍋ 1J2 2J3"))
+⍝ assert: assert1DArray(arrayOf(1, 0), parseAPLExpression("⍒ 1J2 2J3"))
 ⍋ 1J2 2J3

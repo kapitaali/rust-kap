@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<APLEvalException>
 (map:with "foo" "a" "bar" "hello").qwer

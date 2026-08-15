@@ -1,1 +1,2 @@
+⍝ assert: assertString("be", result)
 "af" + 1 ¯1

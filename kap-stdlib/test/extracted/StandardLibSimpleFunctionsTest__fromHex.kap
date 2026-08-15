@@ -1,1 +1,7 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    0, 1, 511, 28036591,
+                    InnerBigIntOrLong("22007826609976624594380681"),
+                    InnerBigIntOrLong("356811923176489970264571492362373784095686656")),
+                result)
 22007826609976624594380681

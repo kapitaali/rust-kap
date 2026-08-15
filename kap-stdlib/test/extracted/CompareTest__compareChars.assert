@@ -1,0 +1,5 @@
+assertSimpleNumber(-1, parseAPLExpression("@a cmp @b"))
+assertSimpleNumber(1, parseAPLExpression("@b cmp @a"))
+assertSimpleNumber(0, parseAPLExpression("@b cmp @b"))
+assertSimpleNumber(1, parseAPLExpression("@a cmp @A"))
+assertSimpleNumber(0, parseAPLExpression("@a cmp @a"))

@@ -1,1 +1,5 @@
+⍝ assert: assertTrue(v is APLChar)
+⍝ assert: assertEquals('a'.code, v.value)
+⍝ assert: assertTrue(v is APLChar)
+⍝ assert: assertEquals('C'.code, v.value)
 @a⌊@b

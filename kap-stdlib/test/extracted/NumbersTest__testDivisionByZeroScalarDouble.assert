@@ -1,0 +1,1 @@
+assertSimpleDouble(Double.POSITIVE_INFINITY, result)

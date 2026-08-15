@@ -1,1 +1,3 @@
+⍝ assert: assertEquals(ArrayMemberType.LONG, result.specialisedType)
+⍝ assert: assert1DArray(arrayOf(11, 22, 33, 44), collapsed)
 10 20 30 40 +¨ 1 2 3 4

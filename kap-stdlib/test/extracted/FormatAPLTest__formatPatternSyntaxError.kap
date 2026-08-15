@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<APLEvalException>
 "fooabc$" ⍕ 1 2 3 4

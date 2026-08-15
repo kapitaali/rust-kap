@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(10090, 10091, 10092, 10093), result)
 (10000+⍳100)[90+⍳4]

@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(InnerDouble(12.1), InnerDouble(14.1)), result)
 10 + 2.1 4.1

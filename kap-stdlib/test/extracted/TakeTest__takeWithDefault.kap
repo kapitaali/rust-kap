@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(10, 9), result)
 2 (↑ int:proto 9) ,10

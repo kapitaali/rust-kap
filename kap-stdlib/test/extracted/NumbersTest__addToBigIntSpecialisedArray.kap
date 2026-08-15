@@ -1,1 +1,2 @@
+⍝ assert: assertBigIntOrLong("10000000000000000000", result)
 +/ 10 ⍴ 1000000000000000000

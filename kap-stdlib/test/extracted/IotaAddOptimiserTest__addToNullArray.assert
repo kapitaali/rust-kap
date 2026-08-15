@@ -1,0 +1,8 @@
+assertAPLNull(parseAPLExpression("0 + ⍳0"))
+assertAPLNull(parseAPLExpression("0.0 + ⍳0"))
+assertAPLNull(parseAPLExpression("3 + ⍳0"))
+assertAPLNull(parseAPLExpression("3.0 + ⍳0"))
+assertAPLNull(parseAPLExpression("¯1234 + ⍳0"))
+assertAPLNull(parseAPLExpression("¯1234.0 + ⍳0"))
+assertAPLNull(parseAPLExpression("1000000000000000000000000000000000 + ⍳0"))
+assertAPLNull(parseAPLExpression("¯10000000000000000000000000000000000000 + ⍳0"))

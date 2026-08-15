@@ -1,0 +1,7 @@
+assert1DArray(
+                    arrayOf(
+                        "LATIN SMALL LETTER A",
+                        "SPACE",
+                        "LATIN SMALL LETTER A WITH RING ABOVE",
+                        "SMILING CAT FACE WITH OPEN MOUTH"),
+                    result)

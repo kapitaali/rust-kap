@@ -1,0 +1,2 @@
+assert1DArray(arrayOf(0, 3, 6, 9), result)
+assert1DArray(arrayOf(1, 4, 7, 10), result)

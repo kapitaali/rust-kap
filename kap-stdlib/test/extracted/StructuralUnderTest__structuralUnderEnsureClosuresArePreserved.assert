@@ -1,0 +1,6 @@
+assert1DArray(
+                arrayOf(
+                    Inner1Dn(30, 60, 30, 40, 50, 60),
+                    Inner1Dn(300000, 600000, 300000, 400000, 500000, 600000)
+                ),
+                result)

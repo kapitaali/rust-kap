@@ -1,0 +1,6 @@
+assertDimension(dimensionsOfSize(3, 3), result)
+assertLabels(
+                listOf(
+                    listOf("a", null, "test"),
+                    listOf(null, "abc", "def")),
+                result)

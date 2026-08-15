@@ -1,0 +1,5 @@
+assertDimension(dimensionsOfSize(2), result)
+assertDimension(dimensionsOfSize(2, 2), v)
+assertArrayContent(arrayOf(0, 1, 2, 3), v)
+assertLabels(listOf(null, listOf("a", "b")), v)
+assertSimpleNumber(1, result.valueAt(1))

@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(InnerBigIntOrLong(2), InnerBigIntOrLong(300)), result)
 ⍸∵ 0x10000000000000000000000000000000000000000000000002 (¯1+2⋆300)

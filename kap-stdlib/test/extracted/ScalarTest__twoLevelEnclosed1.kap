@@ -1,1 +1,4 @@
+⍝ assert: assertTrue(result.isScalar())
+⍝ assert: assertDimension(dimensionsOfSize(2), v)
+⍝ assert: assertArrayContent(arrayOf(12, 13), v)
 1 + 1 + ⊂ int:ensureGeneric 10 11

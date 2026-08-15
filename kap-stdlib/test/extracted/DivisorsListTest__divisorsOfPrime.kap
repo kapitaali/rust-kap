@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(), result)
 math:divisors 179

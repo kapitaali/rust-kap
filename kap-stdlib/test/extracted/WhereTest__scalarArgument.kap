@@ -1,1 +1,7 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    Inner1Dn(InnerAPLNull()),
+                    InnerAPLNull(),
+                    Inner1Dn(InnerAPLNull(), InnerAPLNull(), InnerAPLNull(), InnerAPLNull(), InnerAPLNull())),
+                result)
 (⍸ 1) (⍸ 0) (⍸ 5)

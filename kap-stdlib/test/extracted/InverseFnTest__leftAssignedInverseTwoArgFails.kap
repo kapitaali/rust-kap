@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<LeftAssigned2ArgException>
 7 ((1+)˝) 8

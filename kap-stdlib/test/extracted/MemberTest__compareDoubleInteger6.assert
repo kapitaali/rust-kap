@@ -1,0 +1,2 @@
+assertSimpleNumber(0, parseAPLExpression("3 ∊ 2 3.1"))
+assertSimpleNumber(0, parseAPLExpression("3 ∊ int:ensureGeneric 2 3.1"))

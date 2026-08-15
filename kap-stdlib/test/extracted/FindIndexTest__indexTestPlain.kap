@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("10 20 30 40 50 ⍳ 20"))
 10 20 30 40 50 ⍳ 20

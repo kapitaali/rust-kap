@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleComplex(Complex(4.0, 6.0), result)
 2J6 + (int:asBigint 2)

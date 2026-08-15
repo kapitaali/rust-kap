@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<ParseException>
 ∇ (a0;a1) (z x foo y) b { 100 ⍞y a0 ⍞x a1 ⍞x b } ◊ (10;11) -foo+ 4

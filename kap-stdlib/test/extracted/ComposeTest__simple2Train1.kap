@@ -1,1 +1,2 @@
+⍝ assert: assertAPLValue(InnerBigIntOrLong(-32), result)
 2 (-*) 5

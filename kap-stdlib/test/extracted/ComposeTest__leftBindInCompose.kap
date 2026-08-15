@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(19, result)
 1 (+∘(3×)) 6

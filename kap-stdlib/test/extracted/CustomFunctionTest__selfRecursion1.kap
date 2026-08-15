@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(11, result)
 { if(⍵≡0) {10} else {1+⍓ 0} } 1

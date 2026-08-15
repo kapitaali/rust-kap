@@ -1,0 +1,6 @@
+assertDimension(dimensionsOfSize(4), result)
+assertArrayContent(arrayOf(0, 0, 0, 0), result)
+assertTrue(result.isDepth0)
+assertDimension(dimensionsOfSize(4), result)
+assertArrayContent(arrayOf(1, 0, 0, 1), result)
+assertTrue(result.isDepth0)

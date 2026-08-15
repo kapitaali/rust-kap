@@ -1,1 +1,2 @@
+⍝ assert: assertDimension(dimensionsOfSize(0, 2), result)
 (1 2 ⍴ (100 200) (300 400)) ~ ⊂(100 200) (300 400)

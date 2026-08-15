@@ -1,0 +1,5 @@
+assert1DArray(arrayOf(100, 200), result)
+assertLabels(
+                listOf(
+                    listOf("foo", null)),
+                result)

@@ -1,1 +1,3 @@
+⍝ assert: assertAPLNull(parseAPLExpression("∧⍬"))
+⍝ assert: assertAPLNull(parseAPLExpression("∨⍬"))
 ∧⍬

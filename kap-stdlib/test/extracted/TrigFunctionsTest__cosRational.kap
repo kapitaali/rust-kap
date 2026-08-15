@@ -1,1 +1,2 @@
+⍝ assert: assertNearDouble(NearDouble(-0.09572354801437566), result)
 math:cos (5÷3)

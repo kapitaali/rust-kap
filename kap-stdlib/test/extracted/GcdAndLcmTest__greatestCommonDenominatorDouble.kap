@@ -1,1 +1,3 @@
+⍝ assert: assertNearDouble(NearDouble(0.2), parseAPLExpression("10.4 math:gcd 4.2"))
+⍝ assert: assertNearDouble(NearDouble(0.2), parseAPLExpression("6.2 math:gcd 3.2"))
 10.4 math:gcd 4.2

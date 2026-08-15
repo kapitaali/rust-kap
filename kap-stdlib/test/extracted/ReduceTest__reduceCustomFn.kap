@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(65, result)
 {⍺+⍵+10}/⍳6

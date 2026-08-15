@@ -1,0 +1,1 @@
+assert1DArray(arrayOf(NearDouble(-12.2), InnerBigIntOrLong("9223372036854775808")), result)

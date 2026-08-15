@@ -1,1 +1,3 @@
+⍝ assert: assertEquals(12.0, n.value)
+⍝ assert: assertEquals(12L, n.value)
 json:readString "12"

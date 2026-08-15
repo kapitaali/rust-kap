@@ -1,1 +1,4 @@
+⍝ assert: assert1DArray(arrayOf(InnerBigIntOrLong(1), InnerBigIntOrLong(0)), result)
+⍝ assert: assertEquals(ArrayMemberType.BOOLEAN, result.specialisedType)
+⍝ assert: assertTrue(result.isDepth0)
 (int:asBigint 1) (int:asBigint 0) ∨ (int:asBigint 0) (int:asBigint 0)

@@ -1,1 +1,4 @@
+⍝ assert: assert1DArray(arrayOf(0, 1, 0, 0), result)
+⍝ assert: assertEquals(ArrayMemberType.BOOLEAN, result.specialisedType)
+⍝ assert: assertTrue(result.isDepth0)
 2 ↓ 1 0 0 1 0 0

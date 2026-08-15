@@ -1,1 +1,4 @@
+⍝ assert: assertDimension(dimensionsOfSize(2), result)
+⍝ assert: assert1DArray(arrayOf(150, 180), result.valueAt(0))
+⍝ assert: assert1DArray(arrayOf(210, 240), result.valueAt(1))
 +/ ((10 20) (30 40)) ((50 60) (70 80)) ((90 100) (110 120))

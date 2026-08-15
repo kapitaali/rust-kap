@@ -1,1 +1,4 @@
+⍝ assert: assertDimension(dimensionsOfSize(2), result)
+⍝ assert: assertArrayContent(arrayOf(0, 1), result)
+⍝ assert: assertTrue(result.isDepth0)
 (⍳3) ~ 2

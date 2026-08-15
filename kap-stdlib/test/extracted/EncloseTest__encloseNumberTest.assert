@@ -1,0 +1,4 @@
+assertTrue(result.isScalar())
+assertDimension(emptyDimensions(), result)
+assertEquals(1, result.size)
+assertEquals(6L, number)

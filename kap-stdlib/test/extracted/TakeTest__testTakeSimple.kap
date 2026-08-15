@@ -1,1 +1,3 @@
+⍝ assert: assertTrue(result.isScalar())
+⍝ assert: assertEquals(1L, result.ensureNumber().asLong())
 ↑1 2 3 4

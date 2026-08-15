@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<ColumnNotFoundException>
 ("a" "b" "c" labels 4 3 ⍴ ⍳12).d

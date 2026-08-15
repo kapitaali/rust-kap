@@ -1,1 +1,3 @@
+⍝ assert: assertNearDouble(NearDouble(22.8), parseAPLExpression("1.2 math:lcm 3.8"))
+⍝ assert: assertNearDouble(NearDouble(2.0), parseAPLExpression("1 math:lcm 2.0÷3"))
 1.2 math:lcm 3.8

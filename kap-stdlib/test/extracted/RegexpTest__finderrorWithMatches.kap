@@ -1,1 +1,4 @@
+⍝ assert: assertDimension(dimensionsOfSize(2), result)
+⍝ assert: assertString("xf12345y", result.valueAt(0))
+⍝ assert: assertString("f12345", result.valueAt(1))
 "x(f[0-9]+)y" regex:finderror "fooxf12345ybar"

@@ -1,1 +1,9 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    InnerBigIntOrLong("2"),
+                    InnerBigIntOrLong("1"),
+                    InnerBigIntOrLong("2"),
+                    InnerBigIntOrLong("2"),
+                    InnerBigIntOrLong("3")),
+                result)
 4 | (int:asBigint 2) (int:asBigint 5) (int:asBigint 6) (int:asBigint ¯2) 123456789012345678901234567891

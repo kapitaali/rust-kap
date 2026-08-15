@@ -1,0 +1,9 @@
+assertDimension(dimensionsOfSize(2, 2), result)
+assertArrayContent(
+                arrayOf(
+                    InnerDouble(1.1),
+                    InnerDouble(2.1),
+                    InnerDouble(3.1),
+                    0),
+                result)
+assertEquals(ArrayMemberType.ATOM, result.specialisedType)

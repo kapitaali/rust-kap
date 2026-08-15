@@ -1,1 +1,7 @@
+⍝ assert: assertDimension(dimensionsOfSize(2, 2, 3), result)
+⍝ assert: assertArrayContent(arrayOf(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11), result)
+⍝ assert: assertNull(result.metadata.labels)
+⍝ assert: assertDimension(dimensionsOfSize(2, 2, 3), result)
+⍝ assert: assertArrayContent(arrayOf(11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0), result)
+⍝ assert: assertNull(result.metadata.labels)
 ∧[2] "f" "g" labels[0] "d" "e" labels[1] "a" "b" "c" labels[2] 2 2 3 ⍴ 7 5 4 9 10 8 3 6 2 11 0 1

@@ -1,1 +1,2 @@
+⍝ assert: assertString("0000000123AB", result)
 12 io:toHex 74667

@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(InnerChar('a'), Inner1Dn(1, 2)), result)
 @a ⍮⍰ 1 2

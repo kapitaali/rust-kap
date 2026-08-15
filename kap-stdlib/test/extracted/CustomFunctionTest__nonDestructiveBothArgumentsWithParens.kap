@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(Inner1D(arrayOf(1, 2)), Inner1D(arrayOf(3, 4))), result)
 ∇ (x) foo (y) { (⌷x) (⌷y) } ⋄ (1;2) foo (3;4)

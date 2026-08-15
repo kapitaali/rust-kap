@@ -1,1 +1,3 @@
+⍝ assert: assertDimension(dimensionsOfSize(n), result)
+⍝ assert: assertBigIntOrLong(expected, result.valueAt(i), "index ${i}")
 x ← encoder:encode 2 ⋆ ⍳ ${n} ⋄ encoder:decode x

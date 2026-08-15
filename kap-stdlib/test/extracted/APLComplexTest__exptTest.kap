@@ -1,1 +1,3 @@
+⍝ assert: assertComplexWithRange(Pair(-1.131205, -1.131204), Pair(2.471725, 2.471727), result)
+⍝ assert: assertComplexWithRange(Pair(-0.329323, -0.329321), Pair(-1.790930, -1.790928), result)
 ⋆1J2

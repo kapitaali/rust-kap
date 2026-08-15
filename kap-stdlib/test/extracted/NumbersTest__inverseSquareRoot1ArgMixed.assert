@@ -1,0 +1,8 @@
+assert1DArray(
+                arrayOf(
+                    InnerDouble(0.0),
+                    InnerDouble(1.0),
+                    InnerDouble(4.41),
+                    0, 1, 1, 4, 152399025,
+                    InnerDouble(5.76)),
+                result)

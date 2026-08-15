@@ -1,1 +1,6 @@
+⍝ assert: assertDimension(dimensionsOfSize(4, 2), result)
+⍝ assert: assertRow(i: Int)
+⍝ assert: assertString("foo", col0, "Column 1 row ${i}: Expected foo got: ${col0}")
+⍝ assert: assertSimpleNumber((i + 10).toLong(), col1, "Column 0 row ${i}: Expected ${i + 1}. Got: ${col1}")
+⍝ assert: assertRow(i)
 (⊂"foo") ,[0.5] 10 11 12 13

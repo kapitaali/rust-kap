@@ -1,1 +1,6 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    NearDouble(0.6285203136088378),
+                    NearComplex(Complex(-0.6030608246816601, 0.17707463497979534))),
+                result)
 (11÷10) √ (3÷5) (¯3÷5)

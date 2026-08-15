@@ -1,1 +1,2 @@
+⍝ assert: assertString("ie", result)
 8 ¯1 + "af"

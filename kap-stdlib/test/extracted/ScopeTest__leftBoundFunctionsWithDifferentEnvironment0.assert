@@ -1,0 +1,7 @@
+assertDimension(dimensionsOfSize(3), result)
+assertDimension(dimensionsOfSize(1, 1), v)
+assertString("1", v.valueAt(0))
+assertDimension(dimensionsOfSize(1, 1), v)
+assertString("2", v.valueAt(0))
+assertDimension(dimensionsOfSize(1, 1), v)
+assertString("3", v.valueAt(0))

@@ -1,1 +1,3 @@
+⍝ assert: assertFailsWith<ParseException>
+⍝ assert: assertFailsWith<ParseException>
 ∇ (E;1) foo (A;B;C;D) { A+B+C+D+E+1 }

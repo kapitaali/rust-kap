@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(InnerDouble(0.0), InnerDouble(1.0), InnerDouble(2.0), InnerDouble(3.0), InnerDouble(0.0)), result)
 5 ⍴ 2 2 ⍴ int:ensureDouble ⍳100

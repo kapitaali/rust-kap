@@ -1,0 +1,5 @@
+assertDimension(dimensionsOfSize(2), result)
+assertDimension(dimensionsOfSize(3), v)
+assertArrayContent(arrayOf(102, 111, 111), v)
+assertDimension(dimensionsOfSize(5), v)
+assertArrayContent(arrayOf(122, 120, 99, 118, 98), v)

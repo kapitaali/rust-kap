@@ -1,0 +1,4 @@
+assert1DArray(arrayOf(3, 4, 5), result)
+assertNotNull(labels)
+assertEquals(1, labelList.size)
+assertLabelList(listOf("c", "d", "e"), labelList[0])

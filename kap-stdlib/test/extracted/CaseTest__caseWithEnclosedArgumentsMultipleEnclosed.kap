@@ -1,1 +1,5 @@
+⍝ assert: assertDimension(dimensionsOfSize(3), result)
+⍝ assert: assert1DArray(arrayOf(1, 2, 3, 4, 5), v)
+⍝ assert: assert1DArray(arrayOf(10, 11, 12, 13, 14), v)
+⍝ assert: assert1DArray(arrayOf(1, 2, 3, 4, 5), v)
 0 1 0 % (⊂1 2 3 4 5) (⊂10 11 12 13 14)

@@ -1,1 +1,6 @@
+⍝ assert: assertTrue(result.isScalar())
+⍝ assert: assertDimension(emptyDimensions(), result)
+⍝ assert: assertEquals(1, result.size)
+⍝ assert: assertDimension(dimensionsOfSize(4), v)
+⍝ assert: assertArrayContent(arrayOf(1, 2, 3, 4), v)
 ⊂1 2 3 4

@@ -1,1 +1,4 @@
+⍝ assert: assert1DArray(arrayOf(3, 4, 5), result)
+⍝ assert: assertEquals(ArrayMemberType.LONG, result.specialisedType)
+⍝ assert: assertTrue(result.isDepth0)
 2 ↓ 1 2 3 4 5

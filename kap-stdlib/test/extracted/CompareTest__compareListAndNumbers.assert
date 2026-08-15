@@ -1,0 +1,2 @@
+assertSimpleNumber(1, parseAPLExpression("(1;2;3;4) cmp 1"))
+assertSimpleNumber(-1, parseAPLExpression("1 cmp (1;2;3;4)"))

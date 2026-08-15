@@ -1,1 +1,8 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    InnerBigIntOrLong("-1180591620717411303424"),
+                    InnerBigIntOrLong("-1180591620717411303423"),
+                    InnerBigIntOrLong("-1180591620717411303422"),
+                    InnerBigIntOrLong("-1180591620717411303421")),
+                result)
 ¯1180591620717411303424 + ⍳4

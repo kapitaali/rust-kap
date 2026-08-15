@@ -1,0 +1,5 @@
+assertSimpleNumber(-1, parseAPLExpression("\"abc\" cmp \"bcd\""))
+assertSimpleNumber(-1, parseAPLExpression("\"ABC\" cmp \"abc\""))
+assertSimpleNumber(0, parseAPLExpression("⍬ cmp ⍬"))
+assertSimpleNumber(0, parseAPLExpression("\"a\" cmp \"a\""))
+assertSimpleNumber(-1, parseAPLExpression("\"abc\" cmp \"abcc\""))

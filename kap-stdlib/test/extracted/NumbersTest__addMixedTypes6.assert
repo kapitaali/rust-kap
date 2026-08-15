@@ -1,0 +1,1 @@
+assert1DArray(arrayOf(InnerDouble(903.2), InnerDouble(16140901064495858000.0)), result)

@@ -1,1 +1,8 @@
+⍝ assert: assertDimension(dimensionsOfSize(3, 2), result)
+⍝ assert: assertSimpleNumber(1, result.valueAt(0))
+⍝ assert: assert1DArray(arrayOf("a1"), result.valueAt(1))
+⍝ assert: assertSimpleNumber(2, result.valueAt(2))
+⍝ assert: assert1DArray(arrayOf("b2", "c3"), result.valueAt(3))
+⍝ assert: assertSimpleNumber(5, result.valueAt(4))
+⍝ assert: assert1DArray(arrayOf("d4"), result.valueAt(5))
 1 2 2 5 ⊢⌸ "a1" "b2" "c3" "d4"

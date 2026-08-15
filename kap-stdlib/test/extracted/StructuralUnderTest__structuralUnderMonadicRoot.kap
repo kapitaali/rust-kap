@@ -1,1 +1,2 @@
+⍝ assert: assertNearDouble(NearDouble(225.0), parseAPLExpression("(12+)⍢√ 9"))
 (12+)⍢√ 9

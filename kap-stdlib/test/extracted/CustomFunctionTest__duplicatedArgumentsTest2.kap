@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<ParseException>
 ∇ (A;B;C;D;E;F;G;H;J;D;K;L;M) { A }

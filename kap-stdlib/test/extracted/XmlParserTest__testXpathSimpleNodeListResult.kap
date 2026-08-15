@@ -1,1 +1,10 @@
+⍝ assert: assertDimension(dimensionsOfSize(2), result)
+⍝ assert: assertIs(v)
+⍝ assert: assertIs(v.instance)
+⍝ assert: assertEquals("ghi", v.instance.nodeName)
+⍝ assert: assertEquals("test0", v.instance.attributes.getNamedItem("a").nodeValue)
+⍝ assert: assertIs(v)
+⍝ assert: assertIs(v.instance)
+⍝ assert: assertEquals("ghi", v.instance.nodeName)
+⍝ assert: assertEquals("test1", v.instance.attributes.getNamedItem("a").nodeValue)
 ghi

@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(12, result)
 ∇ a (x foo) b { a ⍞x b } ◊ 10 +foo 2

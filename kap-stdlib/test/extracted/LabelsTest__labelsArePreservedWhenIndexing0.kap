@@ -1,1 +1,4 @@
+⍝ assert: assertDimension(dimensionsOfSize(4), result)
+⍝ assert: assertArrayContent(arrayOf(3, 7, 11, 15), result)
+⍝ assert: assertLabels(listOf(listOf("a", "b", "c", "d")), result)
 a

@@ -1,1 +1,9 @@
+⍝ assert: assertAPLNull(parseAPLExpression("0 + ⍳0"))
+⍝ assert: assertAPLNull(parseAPLExpression("0.0 + ⍳0"))
+⍝ assert: assertAPLNull(parseAPLExpression("3 + ⍳0"))
+⍝ assert: assertAPLNull(parseAPLExpression("3.0 + ⍳0"))
+⍝ assert: assertAPLNull(parseAPLExpression("¯1234 + ⍳0"))
+⍝ assert: assertAPLNull(parseAPLExpression("¯1234.0 + ⍳0"))
+⍝ assert: assertAPLNull(parseAPLExpression("1000000000000000000000000000000000 + ⍳0"))
+⍝ assert: assertAPLNull(parseAPLExpression("¯10000000000000000000000000000000000000 + ⍳0"))
 0 + ⍳0

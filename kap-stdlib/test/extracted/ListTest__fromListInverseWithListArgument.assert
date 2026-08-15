@@ -1,0 +1,2 @@
+assertIs(result)
+assertListContent(listOf(1, 2, 3), result.listElement(0))

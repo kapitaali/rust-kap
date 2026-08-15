@@ -1,0 +1,3 @@
+assertSimpleNumber(1, parseAPLExpression("3 ⍷ 3"))
+assertSimpleNumber(0, parseAPLExpression("3 ⍷ 5"))
+assertSimpleNumber(0, parseAPLExpression("3 ⍷ @a"))

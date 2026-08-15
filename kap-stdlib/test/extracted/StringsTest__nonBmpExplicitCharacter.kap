@@ -1,1 +1,3 @@
+⍝ assert: assertTrue(v is APLChar)
+⍝ assert: assertEquals("\uD835\uDC9F", v.asString())
 @\uD835\uDC9F

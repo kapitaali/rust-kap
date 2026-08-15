@@ -1,1 +1,2 @@
+⍝ assert: assertAPLNil(result)
 ⊂[0]⍰ null

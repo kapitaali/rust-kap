@@ -1,1 +1,2 @@
+⍝ assert: assertNearDouble(NearDouble(3.0), parseAPLExpression("8⋆⍨˝6561"))
 8⋆⍨˝6561

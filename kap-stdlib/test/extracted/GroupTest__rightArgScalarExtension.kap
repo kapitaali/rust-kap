@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(Inner1Dn(10)), result)
 (,0) ⫇ 10

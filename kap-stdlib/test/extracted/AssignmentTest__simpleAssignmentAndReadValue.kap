@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(4, result)
 a←3 ◊ a+1

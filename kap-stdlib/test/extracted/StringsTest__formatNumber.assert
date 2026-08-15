@@ -1,0 +1,3 @@
+assertString("8", parseAPLExpression("⍕8"))
+assertString("100", parseAPLExpression("⍕100"))
+assertString("-100", parseAPLExpression("⍕¯100"))

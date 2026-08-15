@@ -1,1 +1,5 @@
+⍝ assert: assertDimension(emptyDimensions(), result)
+⍝ assert: assertDimension(dimensionsOfSize(2), inner)
+⍝ assert: assert1DArray(arrayOf(250, 280), inner.valueAt(0))
+⍝ assert: assert1DArray(arrayOf(410, 440), inner.valueAt(1))
 +⌿ ((10 20) (30 40)) (100 200) ((50 60) (70 80)) ((90 100) (110 120))

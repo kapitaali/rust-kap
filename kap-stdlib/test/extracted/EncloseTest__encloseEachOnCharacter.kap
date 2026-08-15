@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(Inner1Dn("a"), Inner1Dn("b"), Inner1Dn("c"), Inner1Dn("d")), result)
 (@\s≠)⍛⊂¨ "abcd"

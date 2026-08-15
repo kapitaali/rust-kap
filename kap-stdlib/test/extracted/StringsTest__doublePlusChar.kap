@@ -1,1 +1,2 @@
+⍝ assert: assertString("amd", result)
 0.2 11.9 1.1 + "abc"

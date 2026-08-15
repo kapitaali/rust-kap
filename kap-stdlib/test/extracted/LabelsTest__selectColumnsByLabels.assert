@@ -1,0 +1,6 @@
+assertDimension(dimensionsOfSize(2, 2), result)
+assertArrayContent(arrayOf(1, 2, 5, 6), result)
+assertNotNull(labels)
+assertEquals(2, labels.labels.size)
+assertNull(labels.labels[0])
+assertLabelList(listOf("b", "c"), axis1Labels)

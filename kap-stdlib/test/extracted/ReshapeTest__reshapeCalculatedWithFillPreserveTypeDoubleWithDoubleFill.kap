@@ -1,1 +1,10 @@
+⍝ assert: assertDimension(dimensionsOfSize(2, 2), result)
+⍝ assert: assertArrayContent(
+                arrayOf(
+                    InnerDouble(1.1),
+                    InnerDouble(2.1),
+                    InnerDouble(3.1),
+                    InnerDouble(2.2)),
+                result)
+⍝ assert: assertEquals(ArrayMemberType.DOUBLE, result.specialisedType)
 :fill 2 (⍴ int:proto 2.2) 1.1 2.1 3.1

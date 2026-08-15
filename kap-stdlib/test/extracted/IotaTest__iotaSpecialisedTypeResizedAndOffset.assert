@@ -1,0 +1,5 @@
+assertEquals(ArrayMemberType.BOOLEAN, parseAPLExpression("5 5 ⍴ 10+⍳0").specialisedType)
+assertEquals(ArrayMemberType.LONG, parseAPLExpression("5 5 ⍴ 10+⍳1").specialisedType)
+assertEquals(ArrayMemberType.LONG, parseAPLExpression("5 5 ⍴ 10+⍳2").specialisedType)
+assertEquals(ArrayMemberType.LONG, parseAPLExpression("5 5 ⍴ 10+⍳3").specialisedType)
+assertEquals(ArrayMemberType.LONG, parseAPLExpression("5 5 ⍴ 10+⍳100").specialisedType)

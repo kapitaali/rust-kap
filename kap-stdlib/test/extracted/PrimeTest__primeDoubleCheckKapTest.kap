@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(expected.toTypedArray(), result)
 math:isPrime 0.0+⍳100

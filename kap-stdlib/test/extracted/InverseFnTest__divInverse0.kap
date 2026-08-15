@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(32, parseAPLExpression("128 ÷˝ 4"))
 128 ÷˝ 4

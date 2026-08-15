@@ -1,0 +1,1 @@
+assertChar('x'.code, result)

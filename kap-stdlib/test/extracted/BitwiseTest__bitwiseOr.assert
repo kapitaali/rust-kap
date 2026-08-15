@@ -1,0 +1,2 @@
+assertSimpleNumber(103, parseAPLExpression("99 ∨∵ 70"))
+assertBigIntOrLong(103, parseAPLExpression("(int:asBigint 99) ∨∵ (int:asBigint 70)"))

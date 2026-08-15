@@ -1,1 +1,9 @@
+⍝ assert: assertFailsWith<APLEvalException>
+⍝ assert: assertFailsWith<APLEvalException>
+⍝ assert: assertFailsWith<APLEvalException>
+⍝ assert: assertFailsWith<APLEvalException>
+⍝ assert: assertFailsWith<APLEvalException>
+⍝ assert: assertFailsWith<APLEvalException>
+⍝ assert: assertFailsWith<APLEvalException>
+⍝ assert: assertFailsWith<APLEvalException>
 ⍎"illegal"

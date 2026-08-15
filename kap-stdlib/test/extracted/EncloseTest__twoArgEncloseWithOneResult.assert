@@ -1,0 +1,2 @@
+assertDimension(dimensionsOfSize(1), result)
+assertString("abcd", result.valueAt(0))

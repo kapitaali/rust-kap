@@ -1,1 +1,2 @@
+⍝ assert: assertAPLNull(result)
 ⍬ ⊇ {GENERIC} 1 2 3 4 5

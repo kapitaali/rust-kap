@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<VariableNotAssigned>
 {10+⍺+⍵}∘{1+⍺+⍵} 1

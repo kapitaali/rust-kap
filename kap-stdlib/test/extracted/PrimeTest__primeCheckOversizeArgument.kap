@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("math:isPrime 2⋆67"))
 math:isPrime 2⋆67

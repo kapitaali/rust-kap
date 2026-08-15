@@ -1,1 +1,4 @@
+⍝ assert: assertDimension(dimensionsOfSize(2), result)
+⍝ assert: assertString("a", result.valueAt(0))
+⍝ assert: assertString("bcd", result.valueAt(1))
 1 3 2 1 ⊂ "abcd"

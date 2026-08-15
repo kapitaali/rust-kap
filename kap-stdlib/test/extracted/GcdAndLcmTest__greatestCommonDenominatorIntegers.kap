@@ -1,1 +1,5 @@
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("3 math:gcd 8"))
+⍝ assert: assertSimpleNumber(4, parseAPLExpression("4 math:gcd 8"))
+⍝ assert: assertSimpleNumber(4, parseAPLExpression("4 math:gcd 16"))
+⍝ assert: assertSimpleNumber(2, parseAPLExpression("6 math:gcd 16"))
 3 math:gcd 8

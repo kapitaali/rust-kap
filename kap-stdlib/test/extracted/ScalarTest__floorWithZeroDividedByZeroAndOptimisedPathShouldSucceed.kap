@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(0, result)
 ⌊0.0÷0.0

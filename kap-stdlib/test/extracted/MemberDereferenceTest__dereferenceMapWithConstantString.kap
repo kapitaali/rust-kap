@@ -1,1 +1,2 @@
+⍝ assert: assertString("a", result)
 (map:with "foo" "a" "bar" "hello").foo

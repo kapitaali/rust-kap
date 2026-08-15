@@ -1,1 +1,2 @@
+⍝ assert: assertString("a1foo", result)
 "a$sfoo" ⍕ ⍮1

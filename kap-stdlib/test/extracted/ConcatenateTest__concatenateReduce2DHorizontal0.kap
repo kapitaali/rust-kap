@@ -1,1 +1,6 @@
+⍝ assert: assertDimension(dimensionsOfSize(2), result)
+⍝ assert: assertDimension(dimensionsOfSize(2, 12), v)
+⍝ assert: assertArrayContent(arrayOf(0, 1, 2, 1000, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 5, 1000, 5, 6, 7, 8, 9, 3, 4, 5), v)
+⍝ assert: assertDimension(dimensionsOfSize(2, 10), v)
+⍝ assert: assertArrayContent(arrayOf(1000, 0, 1, 2, 3, 4, 0, 1, 2, 1000, 1000, 5, 6, 7, 8, 9, 3, 4, 5, 1000), v)
 ,/ 2 4 ⍴ (2 3 ⍴ ⍳6) 1000 (2 5 ⍴ ⍳100)

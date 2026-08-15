@@ -1,1 +1,11 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    InnerDouble(2.0),
+                    InnerDouble(2.261732424639163),
+                    InnerDouble(12.050240825798763),
+                    InnerDouble(65.80297321051508),
+                    NearComplex(Complex(-1.0371439188114915e-14, -4.233391541113342)),
+                    NearComplex(Complex(-0.005718004584067737, 0.0041543735056548126)),
+                    NearComplex(Complex(0.33334228975470825, -0.4588063009468432))),
+                result)
 1.0 1.1 2.2 3.2 5.5 ¯3.2 ¯4.3 √˝ 2.0 2.1 3.1 3.7 ¯1.3 ¯4.7 ¯1.141

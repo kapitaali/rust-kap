@@ -1,1 +1,6 @@
+⍝ assert: assertDimension(dimensionsOfSize(4), result)
+⍝ assert: assertChar('f'.code, result.valueAt(0))
+⍝ assert: assertChar('o'.code, result.valueAt(1))
+⍝ assert: assertChar('o'.code, result.valueAt(2))
+⍝ assert: assertString("as", result.valueAt(3))
 "foo" , (⊂"as")

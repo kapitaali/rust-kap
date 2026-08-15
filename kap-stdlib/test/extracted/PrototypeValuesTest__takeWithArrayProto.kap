@@ -1,1 +1,10 @@
+⍝ assert: assertDimension(dimensionsOfSize(5), result)
+⍝ assert: assertArrayContent(
+                arrayOf(
+                    1,
+                    2,
+                    InnerArray(dimensionsOfSize(3, 2), arrayOf(10, 11, 12, 13, 14, 15)),
+                    InnerArray(dimensionsOfSize(3, 2), arrayOf(10, 11, 12, 13, 14, 15)),
+                    InnerArray(dimensionsOfSize(3, 2), arrayOf(10, 11, 12, 13, 14, 15))),
+                result)
 5 (↑ int:proto 3 2 ⍴ 10+⍳6) 1 2

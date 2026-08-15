@@ -1,1 +1,3 @@
+⍝ assert: assertDimension(emptyDimensions(), result)
+⍝ assert: assert1DArray(arrayOf(4, 6), result.valueAt(0))
 +⌿ (1 2) (3 4)

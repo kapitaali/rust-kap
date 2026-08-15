@@ -1,1 +1,3 @@
+⍝ assert: assertDimension(emptyDimensions(), result)
+⍝ assert: assertAPLNull(inner)
 ,⌿⍬

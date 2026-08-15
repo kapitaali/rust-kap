@@ -1,0 +1,9 @@
+assertDimension(dimensionsOfSize(4, 2), result)
+assertArrayContent(
+                arrayOf(
+                    "1", "2",
+                    "q", "w",
+                    "100", "aa",
+                    "1.5", "2.5"),
+                result)
+assertLabels(listOf(listOf("b", "c", "d", "e"), listOf("foo", "abc")), result)

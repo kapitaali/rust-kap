@@ -1,1 +1,7 @@
+⍝ assert: assertIs(result)
+⍝ assert: assertEquals(4, result.elementCount())
+⍝ assert: assert1DArray(arrayOf("foo", "test"), result.lookupValue(1.makeAPLNumber().makeTypeQualifiedKey()))
+⍝ assert: assert1DArray(arrayOf("bar"), result.lookupValue(2.makeAPLNumber().makeTypeQualifiedKey()))
+⍝ assert: assert1DArray(arrayOf(1, 2, 3, 4, 10), result.lookupValue(3.makeAPLNumber().makeTypeQualifiedKey()))
+⍝ assert: assert1DArray(arrayOf(11), result.lookupValue(5.makeAPLNumber().makeTypeQualifiedKey()))
 foo

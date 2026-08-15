@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(26, parseAPLExpression("2 4 5 ⊥ 1 1 1", true))
 2 4 5 ⊥ 1 1 1

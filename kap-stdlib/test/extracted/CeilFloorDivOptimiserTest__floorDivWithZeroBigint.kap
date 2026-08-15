@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(0, result)
 ⌊12345678901234567890123456789012345÷0

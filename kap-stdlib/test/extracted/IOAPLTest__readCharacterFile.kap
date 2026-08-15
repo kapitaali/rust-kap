@@ -1,1 +1,4 @@
+⍝ assert: assertEquals(1, result.dimensions.size)
+⍝ assert: assertEquals(expected.size, result.dimensions[0])
+⍝ assert: assertEquals(expected[i], result.valueAt(i).toStringValue())
 io:read "test-data/multi.txt"

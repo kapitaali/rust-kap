@@ -1,1 +1,3 @@
+⍝ assert: assertIs(result)
+⍝ assert: assertEquals(1643846404000, result.time.toEpochMilliseconds())
 time:parse "2022-02-03T00:00:04Z"

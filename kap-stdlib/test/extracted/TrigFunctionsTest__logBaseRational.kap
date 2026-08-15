@@ -1,1 +1,2 @@
+⍝ assert: assertNearDouble(NearDouble(-2.411368151), result)
 9⍟(1÷200)

@@ -1,1 +1,3 @@
+⍝ assert: assertFailsWith<InvalidRegexp>
+⍝ assert: assertFailsWith<InvalidRegexp>
 regex:compile "a[z"

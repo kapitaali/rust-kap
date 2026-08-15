@@ -1,0 +1,2 @@
+assertDimension(dimensionsOfSize(expected.size), result)
+assertArrayContent(expected, result)

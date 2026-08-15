@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(30, result)
 (10 20 30 40)[2]

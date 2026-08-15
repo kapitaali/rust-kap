@@ -1,1 +1,10 @@
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("≡1 2 3"))
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("≡1"))
+⍝ assert: assertSimpleNumber(2, parseAPLExpression("≡(1 2 3) (4 5 6)"))
+⍝ assert: assertSimpleNumber(2, parseAPLExpression("≡(1 2 3) (10 11)"))
+⍝ assert: assertSimpleNumber(2, parseAPLExpression("≡(1 2 3) (4 5 6) (100 200) (3000 4000)"))
+⍝ assert: assertSimpleNumber(3, parseAPLExpression("≡(1 2 3) (4 5 6 (10 11))"))
+⍝ assert: assertSimpleNumber(3, parseAPLExpression("≡((1 2) (3 4)) ((10 20) (30 40))"))
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("≡\"foo\""))
+⍝ assert: assertSimpleNumber(2, parseAPLExpression("≡(1 2 ⍬)"))
 ≡1 2 3

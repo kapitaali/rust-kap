@@ -1,2 +1,4 @@
+⍝ assert: assertSimpleNumber(10, result)
+⍝ assert: assertSimpleNumber(20, result)
 a ← map:with 'map 10 'math:sin 20
 a.default:map

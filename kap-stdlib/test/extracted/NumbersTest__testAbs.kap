@@ -1,1 +1,9 @@
+⍝ assert: assertSimpleNumber(2, parseAPLExpression("|2"))
+⍝ assert: assertSimpleNumber(10, parseAPLExpression("|¯10"))
+⍝ assert: assertDoubleWithRange(Pair(10.79999, 10.80001), parseAPLExpression("|10.8"))
+⍝ assert: assertDoubleWithRange(Pair(4.89999, 4.90001), parseAPLExpression("|¯4.9"))
+⍝ assert: assertDoubleWithRange(Pair(9.219543, 9.219545), parseAPLExpression("|6J7"))
+⍝ assert: assertDoubleWithRange(Pair(4.472134, 4.472136), parseAPLExpression("|¯4J2"))
+⍝ assert: assertDoubleWithRange(Pair(4.472134, 4.472136), parseAPLExpression("|4J¯2"))
+⍝ assert: assertDoubleWithRange(Pair(342.285, 342.287), parseAPLExpression("|¯194J¯282"))
 |2

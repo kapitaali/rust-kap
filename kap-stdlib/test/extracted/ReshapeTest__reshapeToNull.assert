@@ -1,0 +1,2 @@
+assertEquals(0, result.dimensions.size)
+assert1DArray(arrayOf(1, 2, 3), v)

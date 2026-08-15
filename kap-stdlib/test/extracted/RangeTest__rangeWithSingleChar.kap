@@ -1,1 +1,2 @@
+⍝ assert: assertString("z", parseAPLExpression("@z … @z"))
 @z … @z

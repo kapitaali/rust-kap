@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<UnexpectedToken>
 ∇ foo (a 1) { 1 }

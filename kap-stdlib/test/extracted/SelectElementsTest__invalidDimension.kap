@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<APLEvalException>
 4 1 / ⍳100

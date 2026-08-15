@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(3800, result)
 100 200 300+∙×5 6 7

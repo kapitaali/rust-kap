@@ -1,0 +1,1 @@
+assertSimpleNumber(7, parseAPLExpression("1 +˝ 8"))

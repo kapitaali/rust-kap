@@ -1,0 +1,2 @@
+assertDimension(dimensionsOfSize(2), result)
+assertArrayContent(arrayOf(NearDouble(-0.1428571429, 4), NearDouble(-0.25, 4)), result)

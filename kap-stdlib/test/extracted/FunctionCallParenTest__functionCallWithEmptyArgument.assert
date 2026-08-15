@@ -1,0 +1,2 @@
+assertIs(result)
+assertEquals(0, result.listSize())

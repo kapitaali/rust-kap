@@ -1,1 +1,6 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    Inner1D(arrayOf(101, 102)),
+                    Inner1D(arrayOf(201, 202))),
+                result)
 (⊂1 2) +⌻ 100 200

@@ -1,1 +1,2 @@
+⍝ assert: assertString("dGVzdHN0cmluZzEyMzQ=", result)
 io:base64Encode io:encodeUtf8 "teststring1234"

@@ -1,0 +1,4 @@
+assertDimension(dimensionsOfSize(9, 3), result)
+assert1DArray(arrayOf(v, 0), result.valueAt(i * 3), "i=${i}, v=${v}, position=0")
+assert1DArray(arrayOf(v, 1), result.valueAt(i * 3 + 1), "i=${i}, v=${v}, position=1")
+assert1DArray(arrayOf(v, 2), result.valueAt(i * 3 + 2), "i=${i}, v=${v}, position=2")

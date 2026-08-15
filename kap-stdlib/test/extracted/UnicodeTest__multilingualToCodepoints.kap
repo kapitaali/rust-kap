@@ -1,1 +1,3 @@
+⍝ assert: assertDimension(dimensionsOfSize(4), result)
+⍝ assert: assertArrayContent(arrayOf(246, 228, 950, 12383), result)
 unicode:toCodepoints "öäζた"

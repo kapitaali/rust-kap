@@ -1,1 +1,8 @@
+⍝ assert: assertDimension(dimensionsOfSize(3, 3), result)
+⍝ assert: assertArrayContent(
+                arrayOf(
+                    NearDouble(1.53), NearDouble(-0.36), NearDouble(0.13),
+                    NearDouble(-0.76), NearDouble(0.12), NearDouble(0.04),
+                    NearDouble(0.33), NearDouble(0.04), NearDouble(-0.07)),
+                result)
 ⌹3 3⍴1 2 3 4 15 16 7 18 9

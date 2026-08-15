@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(1, result)
 json:readString "true"

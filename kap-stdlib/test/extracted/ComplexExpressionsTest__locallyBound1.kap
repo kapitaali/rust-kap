@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(0, result)
 a ⊢ (a←2) ⊢ isLocallyBound('a) 

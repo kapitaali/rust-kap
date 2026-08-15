@@ -1,1 +1,8 @@
+⍝ assert: assertDimension(dimensionsOfSize(6), result)
+⍝ assert: assertChar('a'.code, result.valueAt(0))
+⍝ assert: assertChar(955, result.valueAt(1))
+⍝ assert: assertChar(12493, result.valueAt(2))
+⍝ assert: assertChar(119979, result.valueAt(3))
+⍝ assert: assertChar(119990, result.valueAt(4))
+⍝ assert: assertChar(8833, result.valueAt(5))
 unicode:fromCodepoints 97 955 12493 119979 119990 8833

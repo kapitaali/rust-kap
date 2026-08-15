@@ -1,1 +1,5 @@
+⍝ assert: assertFailsWith<APLArgumentComplexOrderingException>
+⍝ assert: assertFailsWith<APLArgumentComplexOrderingException>
+⍝ assert: assertFailsWith<APLArgumentComplexOrderingException>
+⍝ assert: assertFailsWith<APLArgumentComplexOrderingException>
 2 ${name} 4j8

@@ -1,0 +1,3 @@
+assertDimension(dimensionsOfSize(2), result)
+assert1DArray(arrayOf("LATIN SMALL LETTER A", "LATIN SMALL LETTER B"), result.valueAt(0))
+assert1DArray(arrayOf("LATIN SMALL LETTER A WITH DIAERESIS", "GREEK SMALL LETTER ZETA"), result.valueAt(1))

@@ -1,1 +1,13 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    Inner1D(arrayOf()),
+                    Inner1D(arrayOf(1)),
+                    Inner1D(arrayOf(2)),
+                    Inner1D(arrayOf(3)),
+                    Inner1D(arrayOf(2, 2)),
+                    Inner1D(arrayOf(5)),
+                    Inner1D(arrayOf(2, 3)),
+                    Inner1D(arrayOf(7)),
+                    Inner1D(arrayOf(2, 2, 2))),
+                result)
 math:factor 0 1 2 3 4 5 6 7 8

@@ -1,0 +1,2 @@
+assertDimension(dimensionsOfSize(2), result)
+assertEquals(expected, resultAsList.sorted())

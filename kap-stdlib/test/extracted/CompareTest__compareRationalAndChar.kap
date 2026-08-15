@@ -1,1 +1,3 @@
+⍝ assert: assertSimpleNumber(-1, parseAPLExpression("(500000000000000000000000000÷3) cmp @c"))
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("@c cmp (500000000000000000000000000÷3)"))
 (500000000000000000000000000÷3) cmp @c

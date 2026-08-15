@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(15, parseAPLExpression("a←λ- ⋄ 8 ⍞a⍨˝ 7"))
 a←λ- ⋄ 8 ⍞a⍨˝ 7

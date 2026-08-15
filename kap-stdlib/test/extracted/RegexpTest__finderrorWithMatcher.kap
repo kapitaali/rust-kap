@@ -1,1 +1,5 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    Inner1Dn("n98765,0", "98765", "0"),
+                    Inner1Dn("n4,11", "4", "11")), result)
 n98765,0

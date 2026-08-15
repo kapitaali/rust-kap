@@ -1,0 +1,2 @@
+assertDimension(dimensionsOfSize(3, 3), result)
+assertRational(Rational.make(BigInt.of(1), BigInt.of("123456789012345678901234567890")), result.valueAt(0))

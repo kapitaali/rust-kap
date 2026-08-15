@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("(,⊂2 3⍴⍳6)≡(⊂⍤2 9 9) 1 2 3⍴⍳6"))
 (,⊂2 3⍴⍳6)≡(⊂⍤2 9 9) 1 2 3⍴⍳6

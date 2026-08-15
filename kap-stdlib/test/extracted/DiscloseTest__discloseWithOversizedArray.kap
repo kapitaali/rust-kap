@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<ArraySizeException>
 ⊃ 200000 ⍴ (⊂1000000 ⍴ 1)

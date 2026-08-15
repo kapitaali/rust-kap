@@ -1,1 +1,5 @@
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("0∧0"))
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("0∧1"))
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("1∧0"))
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("1∧1"))
 0∧0

@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(-29, parseAPLExpression("a←λ+ ⋄ 30 ⍞a˝ 1"))
 a←λ+ ⋄ 30 ⍞a˝ 1

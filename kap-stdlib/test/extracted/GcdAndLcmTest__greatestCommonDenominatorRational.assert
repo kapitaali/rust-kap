@@ -1,0 +1,1 @@
+assertRational(Rational.make(1, 30), parseAPLExpression("(31÷10) math:gcd (10÷6)"))

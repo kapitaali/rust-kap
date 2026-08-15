@@ -1,1 +1,2 @@
+⍝ assert: assertNearDouble(NearDouble(3.14159265358979323846, 15), result)
 math:pi

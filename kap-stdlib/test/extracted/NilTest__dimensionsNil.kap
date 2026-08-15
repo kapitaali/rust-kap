@@ -1,1 +1,2 @@
+⍝ assert: assertDimension(emptyListDimensions(), result)
 ⍴ null

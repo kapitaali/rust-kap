@@ -1,1 +1,2 @@
+⍝ assert: assertString("abc", result)
 (map:with 'foo (10 (30;40;"abc") 20) 'bar 10).default:foo.(1).(2)

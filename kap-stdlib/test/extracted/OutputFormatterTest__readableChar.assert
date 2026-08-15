@@ -1,0 +1,6 @@
+assertDimension(dimensionsOfSize(5), result)
+assertEquals("@a", result.valueAt(0).formatted(FormatStyle.READABLE))
+assertEquals("@b", result.valueAt(1).formatted(FormatStyle.READABLE))
+assertEquals("@\\uA", result.valueAt(2).formatted(FormatStyle.READABLE))
+assertEquals("@\\u2262", result.valueAt(3).formatted(FormatStyle.READABLE))
+assertEquals("@\\u1D49F", result.valueAt(4).formatted(FormatStyle.READABLE))

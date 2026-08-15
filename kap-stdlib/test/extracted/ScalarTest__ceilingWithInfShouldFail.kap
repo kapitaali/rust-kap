@@ -1,1 +1,4 @@
+⍝ assert: assertFailsWith<APLIllegalArgumentException>
+⍝ assert: assertFailsWith<APLIllegalArgumentException>
+⍝ assert: assertFailsWith<APLIllegalArgumentException>
 ⌈math:inf

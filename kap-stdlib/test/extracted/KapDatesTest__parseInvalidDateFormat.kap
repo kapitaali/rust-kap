@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<APLIllegalArgumentException>
 time:parse "qwert"

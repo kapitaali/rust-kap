@@ -1,1 +1,2 @@
+⍝ assert: assertRational(Rational.make(25, 2), result)
 10 + 2.5r

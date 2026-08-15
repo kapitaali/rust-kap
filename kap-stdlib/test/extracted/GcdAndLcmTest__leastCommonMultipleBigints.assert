@@ -1,0 +1,7 @@
+assertBigIntOrLong(0, parseAPLExpression("(int:asBigint 0) math:lcm (int:asBigint 0)"))
+assertBigIntOrLong(6, parseAPLExpression("(int:asBigint 2) math:lcm (int:asBigint 3)"))
+assertBigIntOrLong(6, parseAPLExpression("(int:asBigint 2) math:lcm (int:asBigint 3)"))
+assertBigIntOrLong(12, parseAPLExpression("(int:asBigint 4) math:lcm (int:asBigint 6)"))
+assertBigIntOrLong(-6, parseAPLExpression("(int:asBigint 2) math:lcm (int:asBigint ¯3)"))
+assertBigIntOrLong(-6, parseAPLExpression("(int:asBigint ¯2) math:lcm (int:asBigint 3)"))
+assertBigIntOrLong(6, parseAPLExpression("(int:asBigint ¯2) math:lcm (int:asBigint ¯3)"))

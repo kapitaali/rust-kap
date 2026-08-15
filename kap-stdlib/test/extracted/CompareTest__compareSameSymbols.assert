@@ -1,0 +1,4 @@
+assertSimpleNumber(1, parseAPLExpression(":a ≡ :a"))
+assertSimpleNumber(0, parseAPLExpression(":a ≢ :a"))
+assertSimpleNumber(0, parseAPLExpression(":b ≡ :a"))
+assertSimpleNumber(1, parseAPLExpression(":b ≢ :a"))

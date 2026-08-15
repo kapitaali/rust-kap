@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("@a≢0⌷@a @b"))
 @a≢0⌷@a @b

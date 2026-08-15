@@ -1,1 +1,2 @@
+⍝ assert: assertString("dcba", parseAPLExpression("@d … @a"))
 @d … @a

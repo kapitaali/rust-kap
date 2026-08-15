@@ -1,1 +1,9 @@
+⍝ assert: assertDimension(dimensionsOfSize(2, 3), result)
+⍝ assert: assertEquals(ArrayMemberType.LONG, result.specialisedType)
+⍝ assert: assertEquals(10L, result.valueAtLong(0))
+⍝ assert: assertEquals(11L, result.valueAtLong(1))
+⍝ assert: assertEquals(12L, result.valueAtLong(2))
+⍝ assert: assertEquals(13L, result.valueAtLong(3))
+⍝ assert: assertEquals(10L, result.valueAtLong(4))
+⍝ assert: assertEquals(11L, result.valueAtLong(5))
 2 3 ⍴ 10 11 12 13

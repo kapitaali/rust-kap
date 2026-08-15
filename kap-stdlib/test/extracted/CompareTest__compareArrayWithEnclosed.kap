@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("2 3 cmp (⊂1 2)"))
 2 3 cmp (⊂1 2)

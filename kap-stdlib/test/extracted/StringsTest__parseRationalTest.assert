@@ -1,0 +1,9 @@
+assertRational(Rational.make(1, 2), parseAPLExpression("⍎\"1/2\""))
+assertRational(Rational.make(1, 2), parseAPLExpression("⍎\"5/10\""))
+assertBigIntOrLong(3, parseAPLExpression("⍎\"12/4\""))
+assertRational(Rational.make(-2, 5), parseAPLExpression("⍎\"-2/5\""))
+assertRational(Rational.make(-2, 5), parseAPLExpression("⍎\"2/-5\""))
+assertRational(Rational.make(2, 5), parseAPLExpression("⍎\"-2/-5\""))
+assertRational(
+            Rational.make("1", "100000000000000000000000000000000000000000"),
+            parseAPLExpression("⍎\"1/100000000000000000000000000000000000000000\""))

@@ -1,0 +1,2 @@
+assertDimension(dimensionsOfSize(2, 2), result)
+assertArrayContent(arrayOf(0, InnerRational(1, 10), InnerRational(1, 10), InnerRational(1, 15)), result)

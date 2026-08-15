@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf("a"), result)
 1 ⊆ @a

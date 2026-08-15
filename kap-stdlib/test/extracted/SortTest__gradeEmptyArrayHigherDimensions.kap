@@ -1,1 +1,3 @@
+⍝ assert: assertAPLNull(result)
+⍝ assert: assertAPLNull(result)
 ⍋ 0 2 3 ⍴ 1 2 3

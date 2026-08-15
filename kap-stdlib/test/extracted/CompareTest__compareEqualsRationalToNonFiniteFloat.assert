@@ -1,0 +1,4 @@
+assertSimpleNumber(0, parseAPLExpression("(1÷2)≡(1.0÷0.0)"))
+assertSimpleNumber(0, parseAPLExpression("(1.0÷0.0)≡(1÷2)"))
+assertSimpleNumber(1, parseAPLExpression("(1÷2)≢(1.0÷0.0)"))
+assertSimpleNumber(1, parseAPLExpression("(1.0÷0.0)≢(1÷2)"))

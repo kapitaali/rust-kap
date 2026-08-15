@@ -1,0 +1,7 @@
+assertComplexWithRange(Pair(-0.6421481248, -0.6421481246), Pair(-1.068607422, -1.068607420), result.valueAt(0))
+assertDoubleWithRange(Pair(1.543080634, 1.543080636), result.valueAt(1))
+assertDoubleWithRange(Pair(0.5403023058, 0.5403023060), result.valueAt(2))
+assertComplexWithRange(Pair(-68281.45586, -68281.45584), Pair(44271.02120, 44271.02122), result.valueAt(3))
+assertComplexWithRange(Pair(1.588999750, 1.588999752), Pair(0.7236743232, 0.7236743234), result.valueAt(4))
+assertComplexWithRange(Pair(-0.5073724394, -0.5073724392), Pair(0.08646487683, 0.08646487685), result.valueAt(5))
+assertComplexWithRange(Pair(0.4558659925, 0.4558659927), Pair(-0.08926934486, -0.08926934482), result.valueAt(6))

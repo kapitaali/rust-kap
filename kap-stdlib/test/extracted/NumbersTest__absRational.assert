@@ -1,0 +1,7 @@
+assert1DArray(
+                arrayOf(
+                    InnerRational(1, 9),
+                    InnerRational(3, 2),
+                    InnerRational(Rational.make("100000000000000000000000000000000000", "3")),
+                    InnerRational(Rational.make("1000000000000000000000000000000000000", "3"))),
+                result)

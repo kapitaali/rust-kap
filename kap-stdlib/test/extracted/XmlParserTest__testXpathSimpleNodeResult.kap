@@ -1,1 +1,5 @@
+⍝ assert: assertIs(result)
+⍝ assert: assertIs(result.instance)
+⍝ assert: assertEquals("ghi", result.instance.nodeName)
+⍝ assert: assertEquals("test0", result.instance.attributes.getNamedItem("a").nodeValue)
 ghi

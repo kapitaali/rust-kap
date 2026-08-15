@@ -1,0 +1,2 @@
+assertTrue(result is JvmInstanceValue)
+assertEquals(expected, result.instance)

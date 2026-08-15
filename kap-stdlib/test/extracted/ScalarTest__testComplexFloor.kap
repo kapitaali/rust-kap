@@ -1,1 +1,11 @@
+⍝ assert: assertSimpleDouble(5.0, parseAPLExpression("math:floorc 5.9"))
+⍝ assert: assertSimpleDouble(-6.0, parseAPLExpression("math:floorc ¯5.1"))
+⍝ assert: assertBigIntOrLong("8", parseAPLExpression("math:floorc 50÷6"))
+⍝ assert: assertBigIntOrLong("-17", parseAPLExpression("math:floorc ¯50÷3"))
+⍝ assert: assertSimpleNumber(3, parseAPLExpression("math:floorc 3"))
+⍝ assert: assertSimpleComplex(Complex(1.0, 4.0), parseAPLExpression("math:floorc 1.1J3.9"))
+⍝ assert: assertSimpleComplex(Complex(2.0, 3.0), parseAPLExpression("math:floorc 1.9J3.9"))
+⍝ assert: assertSimpleComplex(Complex(-2.0, -7.0), parseAPLExpression("math:floorc ¯1.3J¯7.0"))
+⍝ assert: assertSimpleComplex(Complex(-4.0, -6.0), parseAPLExpression("math:floorc -4.1J5.2"))
+⍝ assert: assertSimpleComplex(Complex(1.0, 9.0), parseAPLExpression("math:floorc 1.01J9.9"))
 math:floorc 5.9

@@ -1,1 +1,5 @@
+⍝ assert: assertDimension(dimensionsOfSize(2), result)
+⍝ assert: assertArrayContent(arrayOf(1, 0), result)
+⍝ assert: assertEquals(ArrayMemberType.BOOLEAN, result.specialisedType)
+⍝ assert: assertTrue(result.isDepth0)
 ~0 1

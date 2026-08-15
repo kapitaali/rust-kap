@@ -1,0 +1,8 @@
+assert1DArray(
+                arrayOf(
+                    InnerBigIntOrLong("2"),
+                    InnerBigIntOrLong("1"),
+                    InnerBigIntOrLong("2"),
+                    InnerBigIntOrLong("2"),
+                    InnerBigIntOrLong("3")),
+                result)

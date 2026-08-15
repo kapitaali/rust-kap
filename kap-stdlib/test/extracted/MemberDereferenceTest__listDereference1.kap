@@ -1,1 +1,2 @@
+⍝ assert: assertString("foo", result)
 (10;"foo";30).(1)

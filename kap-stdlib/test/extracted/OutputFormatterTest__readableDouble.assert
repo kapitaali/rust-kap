@@ -1,0 +1,7 @@
+assertDimension(dimensionsOfSize(6), result)
+assertEquals("5.0", result.valueAt(0).formatted(FormatStyle.READABLE))
+assertEquals("¯5.0", result.valueAt(1).formatted(FormatStyle.READABLE))
+assertEquals("0.0", result.valueAt(2).formatted(FormatStyle.READABLE))
+assertEquals("¯0.0", result.valueAt(3).formatted(FormatStyle.READABLE))
+assertEquals("1.5", result.valueAt(4).formatted(FormatStyle.READABLE))
+assertEquals("¯2.5", result.valueAt(5).formatted(FormatStyle.READABLE))

@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(5, parseAPLExpression("2 ×˝ 10"))
 2 ×˝ 10

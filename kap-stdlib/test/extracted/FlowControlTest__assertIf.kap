@@ -1,1 +1,3 @@
+⍝ assert: assertSimpleNumber(10, parseAPLExpression("if (1) { 10 }", true))
+⍝ assert: assertDimension(dimensionsOfSize(0), result)
 if (1) { 10 }

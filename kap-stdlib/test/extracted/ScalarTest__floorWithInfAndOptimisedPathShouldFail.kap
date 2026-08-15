@@ -1,1 +1,3 @@
+⍝ assert: assertFailsWith<APLIllegalArgumentException>
+⍝ assert: assertFailsWith<APLIllegalArgumentException>
 ⌊3.0÷0.0

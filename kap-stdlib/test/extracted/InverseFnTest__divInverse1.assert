@@ -1,0 +1,1 @@
+assertSimpleNumber(8192, parseAPLExpression("4 ÷⍨˝ 2048"))

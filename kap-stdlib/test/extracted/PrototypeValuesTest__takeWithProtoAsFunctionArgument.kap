@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(1, 2, 9), result)
 ∇ foo (x) { 3 (↑ int:proto 9) x } ⋄ foo 1 2

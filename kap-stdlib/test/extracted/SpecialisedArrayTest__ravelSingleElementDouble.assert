@@ -1,0 +1,2 @@
+assert1DArray(arrayOf(InnerDouble(5.5)), result)
+assertEquals(ArrayMemberType.DOUBLE, result.specialisedType)

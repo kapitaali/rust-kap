@@ -1,1 +1,3 @@
+⍝ assert: assert1DArray(arrayOf(InnerDouble(5.5)), result)
+⍝ assert: assertEquals(ArrayMemberType.DOUBLE, result.specialisedType)
 ,5.5

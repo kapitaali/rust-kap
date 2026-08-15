@@ -1,0 +1,2 @@
+assertBigIntOrLong("5000000000000000000000000000000", result)
+assertNearDouble(NearDouble(6.172839450617284e+28, -24), result)

@@ -1,1 +1,2 @@
+⍝ assert: assertNearDouble(NearDouble(-0.4161468365471424), result)
 math:cos int:asBigint 2

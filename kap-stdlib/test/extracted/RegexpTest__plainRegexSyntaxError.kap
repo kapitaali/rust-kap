@@ -1,1 +1,3 @@
+⍝ assert: assertFailsWith<InvalidRegexp>
+⍝ assert: assertFailsWith<InvalidRegexp>
 "a[z" regex:match "foo"

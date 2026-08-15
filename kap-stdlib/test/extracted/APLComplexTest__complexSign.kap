@@ -1,1 +1,8 @@
+⍝ assert: assert1DArray(
+            arrayOf(
+                NearComplex(Complex(0, 1)),
+                NearComplex(Complex(-0.316227766, 0.9486832981)),
+                NearComplex(Complex(0.316227766, -0.9486832981)),
+                NearComplex(Complex(-0.316227766, -0.9486832981))),
+            result)
 × 0j1 ¯2j6 2j¯6 ¯2j¯6

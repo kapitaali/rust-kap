@@ -1,1 +1,11 @@
+⍝ assert: assertDimension(dimensionsOfSize(7), result)
+⍝ assert: assertArrayContent(
+                arrayOf(
+                    "a",
+                    InnerAPLNull(),
+                    InnerAPLNull(),
+                    InnerAPLNull(),
+                    "bc",
+                    "de",
+                    "f"), result)
 1 4 0 1 0 1 ⊆ "abcdef"

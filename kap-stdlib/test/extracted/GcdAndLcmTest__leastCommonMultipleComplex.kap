@@ -1,1 +1,10 @@
+⍝ assert: assertSimpleComplex(Complex(123.0, 192.0), parseAPLExpression("6J21 math:lcm 9J30"))
+⍝ assert: assertSimpleComplex(Complex(38.0, 43.0), parseAPLExpression("5J8 math:lcm 1J6"))
+⍝ assert: assertSimpleComplex(Complex(495.0, -312.0), parseAPLExpression("9J30 math:lcm 5J18"))
+⍝ assert: assertSimpleComplex(Complex(-5.0, -14.0), parseAPLExpression("2J3 math:lcm 4J1"))
+⍝ assert: assertSimpleComplex(Complex(25.0, -19.0), parseAPLExpression("5J3 math:lcm 5J2"))
+⍝ assert: assertSimpleComplex(Complex(-31.0, 5.0), parseAPLExpression("¯5J3 math:lcm 5J2"))
+⍝ assert: assertSimpleComplex(Complex(-141.0, 75.0), parseAPLExpression("9J30 math:lcm 1J5"))
+⍝ assert: assertSimpleComplex(Complex(-6.0, 18.0), parseAPLExpression("3J6 math:lcm 2J2"))
+⍝ assert: assertSimpleComplex(Complex(4.0, 18.0), parseAPLExpression("3J5 math:lcm 4J18"))
 6J21 math:lcm 9J30

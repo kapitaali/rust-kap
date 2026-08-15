@@ -1,0 +1,6 @@
+assertIs(result)
+assertEquals(2, result.listSize())
+assertDimension(dimensionsOfSize(2, 2), v)
+assertArrayContent(arrayOf(0, 1, 2, 3), v)
+assertLabels(listOf(null, listOf("a", "b")), v)
+assertSimpleNumber(123, result.listElement(1))

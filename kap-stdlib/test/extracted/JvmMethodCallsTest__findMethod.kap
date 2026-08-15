@@ -1,1 +1,3 @@
+⍝ assert: assertTrue(result is JvmInstanceValue)
+⍝ assert: assertEquals(expected, result.instance)
 jvm:findMethod ((jvm:findClass "com.dhsdevelopments.kap.jvmmod.Foo") ; "staticTest" ; jvm:findClass "java.lang.String")

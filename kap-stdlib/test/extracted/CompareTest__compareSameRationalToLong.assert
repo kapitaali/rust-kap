@@ -1,0 +1,2 @@
+assertSimpleNumber(0, parseAPLExpression("(1÷2) ≡ 123"))
+assertSimpleNumber(1, parseAPLExpression("(1÷2) ≢ 123"))

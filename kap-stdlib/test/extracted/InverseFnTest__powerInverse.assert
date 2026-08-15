@@ -1,0 +1,1 @@
+assertNearDouble(NearDouble(8.0), parseAPLExpression("3⋆˝6561"))

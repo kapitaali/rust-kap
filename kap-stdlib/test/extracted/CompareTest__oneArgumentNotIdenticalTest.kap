@@ -1,1 +1,9 @@
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("≢0⍴0"))
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("≢4"))
+⍝ assert: assertSimpleNumber(4, parseAPLExpression("≢1 2 3 4"))
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("≢,4"))
+⍝ assert: assertSimpleNumber(2, parseAPLExpression("≢2 3 ⍴ ⍳100"))
+⍝ assert: assertSimpleNumber(8, parseAPLExpression("≢8 3 4 ⍴ ⍳100"))
+⍝ assert: assertSimpleNumber(2, parseAPLExpression("≢(2 2 ⍴ ⍳4) (2 2 ⍴ ⍳4)"))
+⍝ assert: assertSimpleNumber(5, parseAPLExpression("≢(1 2) (3 4) (5 6) (7 8) (9 10)"))
 ≢0⍴0

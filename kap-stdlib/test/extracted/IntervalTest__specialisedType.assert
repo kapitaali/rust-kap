@@ -1,0 +1,4 @@
+assertTrue(result.specialisedType.isBoolean)
+assertTrue(result.specialisedType.isBoolean)
+assertTrue(result.specialisedType.isLong)
+assertFalse(result.specialisedType.isBoolean)

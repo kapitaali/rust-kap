@@ -1,0 +1,4 @@
+assertDimension(dimensionsOfSize(2, 2), result)
+assertArrayContent(arrayOf(14, 15, 17, 18), result)
+assertEquals(ArrayMemberType.LONG, result.specialisedType)
+assertTrue(result.isDepth0)

@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("7 -˝ 6"))
 7 -˝ 6

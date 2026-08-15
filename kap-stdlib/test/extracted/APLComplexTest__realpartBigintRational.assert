@@ -1,0 +1,6 @@
+assert1DArray(
+                arrayOf(
+                    InnerBigIntOrLong("1234"),
+                    InnerBigIntOrLong("1234567890123456789012345678901234567890"),
+                    InnerRational(Rational.make(1, 3))),
+                result)

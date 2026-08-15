@@ -1,1 +1,26 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    NearDouble(-1.258754205),
+                    NearDouble(-1.249045772),
+                    NearDouble(-1.107148718),
+                    NearDouble(-0.8329812667),
+                    NearDouble(-0.7853981634),
+                    NearDouble(-0.7853481609),
+                    NearDouble(-0.3805063771),
+                    NearDouble(-0.00009999999967),
+                    NearDouble(0.0),
+                    NearDouble(0.00009999999967),
+                    NearDouble(0.09966865249),
+                    NearDouble(0.3805063771),
+                    NearDouble(0.7848979133),
+                    NearDouble(0.7853981634),
+                    NearDouble(0.7854481609),
+                    NearDouble(1.107148718),
+                    NearDouble(1.126377117),
+                    NearDouble(1.471128664),
+                    NearDouble(1.569796327),
+                    NearDouble(1.569986327),
+                    NearDouble(1.570795314),
+                    NearDouble(1.570796319)),
+                result)
 math:atan ¯3.1 ¯3.0 ¯2.0 ¯1.1 ¯1.0 ¯0.9999 ¯0.4 ¯0.0001 0.0 0.0001 0.1 0.4 0.999 1.0 1.0001 2.0 2.1 10.0001 1000.0 1234.5678 987654.123123 123456789.12345

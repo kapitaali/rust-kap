@@ -1,1 +1,2 @@
+⍝ assert: assertAPLValue(InnerBigIntOrLong(16), result)
 2*4

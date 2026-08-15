@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(334, result)
 ∇ (A;B) foo (C;D) { A+B+C+D+1 } ◊ (8;11) foo (10 ; (100;200) foo (1;2))

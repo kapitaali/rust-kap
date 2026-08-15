@@ -1,1 +1,2 @@
+⍝ assert: assertAPLNull(result)
 map:keys (map:with 1 2) map:remove 1

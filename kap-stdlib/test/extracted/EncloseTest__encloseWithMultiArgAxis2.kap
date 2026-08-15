@@ -1,1 +1,6 @@
+⍝ assert: assertDimension(dimensionsOfSize(2), result)
+⍝ assert: assertDimension(dimensionsOfSize(2, 2), v)
+⍝ assert: assertArrayContent(arrayOf(0, 4, 1, 5), v)
+⍝ assert: assertDimension(dimensionsOfSize(2, 2), v)
+⍝ assert: assertArrayContent(arrayOf(2, 6, 3, 7), v)
 ⊂[2 0] 2 2 2 ⍴ ⍳100

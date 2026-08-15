@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(10, result)
 ("foo" "bar" labels 10 20).(0)

@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<APLEvalException>
 (2 3 ⍴ ⍳6) +[0] 2 3 4 ⍴ ⍳24

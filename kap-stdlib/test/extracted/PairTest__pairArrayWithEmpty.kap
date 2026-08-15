@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(InnerAPLNull(), InnerAPLNull()), result)
 ⍬⍮⍬

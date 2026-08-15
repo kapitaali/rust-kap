@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<VariableNotAssigned>
 net:connect ("localhost" ; 1234)

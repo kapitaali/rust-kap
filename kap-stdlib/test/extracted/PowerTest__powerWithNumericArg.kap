@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(35, result)
 ({⍵+10}⍣3) 5

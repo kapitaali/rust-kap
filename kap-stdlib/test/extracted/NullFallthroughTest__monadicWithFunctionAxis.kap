@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(Inner1Dn(0, 2), Inner1Dn(1, 3)), result)
 ⊂[0]⍰ 2 2 ⍴ ⍳4

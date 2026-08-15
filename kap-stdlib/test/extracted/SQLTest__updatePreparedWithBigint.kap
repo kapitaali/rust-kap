@@ -1,1 +1,5 @@
+⍝ assert: assertDimension(dimensionsOfSize(1, 2), result)
+⍝ assert: assertSimpleNumber(1, result.valueAt(0))
+⍝ assert: assertIs(v)
+⍝ assert: assertEquals(BigInt.of("123456789012345678901234567890"), v.value)
 123456789012345678901234567890

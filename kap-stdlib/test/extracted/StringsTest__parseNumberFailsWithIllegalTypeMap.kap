@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<APLEvalException>
 ⍎map:with 1 2

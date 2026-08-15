@@ -1,0 +1,2 @@
+assertAPLNull(parseAPLExpression("⍋⍬"))
+assertAPLNull(parseAPLExpression("⍒⍬"))

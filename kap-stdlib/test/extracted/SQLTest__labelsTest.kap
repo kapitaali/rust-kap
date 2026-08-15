@@ -1,1 +1,12 @@
+⍝ assert: assertNotNull(labels)
+⍝ assert: assertEquals(2, labelList.size)
+⍝ assert: assertNull(labelList[0])
+⍝ assert: assertNotNull(axisLabels)
+⍝ assert: assertEquals(2, axisLabels.size)
+⍝ assert: assertNotNull(l)
+⍝ assert: assertEquals("fooId", l.title)
+⍝ assert: assertNotNull(l)
+⍝ assert: assertEquals("name", l.title)
+⍝ assert: assertDimension(dimensionsOfSize(1, 2), result)
+⍝ assert: assertArrayContent(arrayOf<Any>(10, "some text"), result)
 fooId

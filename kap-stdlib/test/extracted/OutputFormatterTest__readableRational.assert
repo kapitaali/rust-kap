@@ -1,0 +1,4 @@
+assertDimension(dimensionsOfSize(3), result)
+assertEquals("10r11", result.valueAt(0).formatted(FormatStyle.READABLE))
+assertEquals("¯10r11", result.valueAt(1).formatted(FormatStyle.READABLE))
+assertEquals("0r1", result.valueAt(2).formatted(FormatStyle.READABLE))

@@ -1,0 +1,1 @@
+assert1DArray(arrayOf("q", InnerAPLNull(), "we", InnerAPLNull(), "r"), result)

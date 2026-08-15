@@ -1,1 +1,2 @@
+⍝ assert: assertEquals("foo", result.formatted(FormatStyle.PLAIN))
 foo

@@ -1,1 +1,7 @@
+⍝ assert: assertDimension(dimensionsOfSize(2, 9), result)
+⍝ assert: assertArrayContent(
+                arrayOf(
+                    0, 1, 2, 100, 102, Inner1D(arrayOf(1000, 2000)), 200, 201, 202,
+                    3, 0, 1, 101, 103, Inner1D(arrayOf(1000, 2000)), 203, 204, 205),
+                result)
 ,/ (2 3 ⍴ ⍳4) (100 101) (102 103) (⊂1000 2000) (2 3 ⍴ 200+⍳6)

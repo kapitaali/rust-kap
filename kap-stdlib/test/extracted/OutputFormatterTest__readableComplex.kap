@@ -1,1 +1,6 @@
+⍝ assert: assertDimension(dimensionsOfSize(4), result)
+⍝ assert: assertEquals("3.0J4.0", result.valueAt(0).formatted(FormatStyle.READABLE))
+⍝ assert: assertEquals("¯3.0J¯4.0", result.valueAt(1).formatted(FormatStyle.READABLE))
+⍝ assert: assertEquals("1.5J10.5", result.valueAt(2).formatted(FormatStyle.READABLE))
+⍝ assert: assertEquals("¯1.5J¯10.5", result.valueAt(3).formatted(FormatStyle.READABLE))
 3j4 ¯3j¯4 1.5j10.5 ¯1.5j¯10.5

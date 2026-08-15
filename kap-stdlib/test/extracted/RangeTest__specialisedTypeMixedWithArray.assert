@@ -1,0 +1,10 @@
+assert1DArray(
+                arrayOf(
+                    Inner1Dn(InnerDouble(1.5), 2),
+                    InnerChar('a'),
+                    InnerChar('b'),
+                    InnerChar('c'),
+                    InnerChar('d'),
+                    InnerChar('a')),
+                result)
+assertEquals(ArrayMemberType.GENERIC, result.specialisedType)

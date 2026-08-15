@@ -1,1 +1,3 @@
+⍝ assert: assertEquals(0, result.dimensions.size)
+⍝ assert: assert1DArray(arrayOf(1, 2, 3), v)
 ⍬ ⍴ ⊂1 2 3

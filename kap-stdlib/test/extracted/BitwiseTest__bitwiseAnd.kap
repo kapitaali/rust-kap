@@ -1,1 +1,6 @@
+⍝ assert: assertSimpleNumber(66, parseAPLExpression("99 ∧∵ 70"))
+⍝ assert: assertBigIntOrLong(66, parseAPLExpression("(int:asBigint 99) ∧∵ (int:asBigint 70)"))
+⍝ assert: assertBigIntOrLong(
+            "154742504910672534362390528",
+            parseAPLExpression("309485009821327476538736640 ∧∵ 154742504910672551542259715"))
 99 ∧∵ 70

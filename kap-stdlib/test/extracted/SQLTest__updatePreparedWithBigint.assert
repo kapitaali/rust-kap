@@ -1,0 +1,4 @@
+assertDimension(dimensionsOfSize(1, 2), result)
+assertSimpleNumber(1, result.valueAt(0))
+assertIs(v)
+assertEquals(BigInt.of("123456789012345678901234567890"), v.value)

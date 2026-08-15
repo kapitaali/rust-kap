@@ -1,1 +1,5 @@
+⍝ assert: assertDimension(dimensionsOfSize(3), result)
+⍝ assert: assertEquals("10r11", result.valueAt(0).formatted(FormatStyle.READABLE))
+⍝ assert: assertEquals("¯10r11", result.valueAt(1).formatted(FormatStyle.READABLE))
+⍝ assert: assertEquals("0r1", result.valueAt(2).formatted(FormatStyle.READABLE))
 10r11 ¯10r11 (int:asRational 0)

@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<IncompatibleTypeException>
 map:keys 1

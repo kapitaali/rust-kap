@@ -1,0 +1,1 @@
+assertAPLValue(InnerBigIntOrLong(16), result)

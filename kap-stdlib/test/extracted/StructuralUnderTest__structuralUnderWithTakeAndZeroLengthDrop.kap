@@ -1,1 +1,2 @@
+⍝ assert: assertString("8fghijklmn", result)
 {,@0+8}⍢(5↑0↓) "abcdefghijklmn"

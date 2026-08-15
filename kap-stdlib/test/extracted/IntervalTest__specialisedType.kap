@@ -1,1 +1,5 @@
+⍝ assert: assertTrue(result.specialisedType.isBoolean)
+⍝ assert: assertTrue(result.specialisedType.isBoolean)
+⍝ assert: assertTrue(result.specialisedType.isLong)
+⍝ assert: assertFalse(result.specialisedType.isBoolean)
 ⍬ ⍸ 1 2 3

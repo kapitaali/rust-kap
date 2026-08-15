@@ -1,0 +1,5 @@
+assertSimpleNumber(123, parseAPLExpression("⍎\"123\""))
+assertSimpleNumber(-10, parseAPLExpression("⍎\"-10\""))
+assertSimpleNumber(30, parseAPLExpression("⍎\"  30\""))
+assertSimpleNumber(30, parseAPLExpression("⍎\"30   \""))
+assertSimpleNumber(30, parseAPLExpression("⍎\"  30   \""))

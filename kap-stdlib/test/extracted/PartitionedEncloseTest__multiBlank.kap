@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf("q", InnerAPLNull(), "we", InnerAPLNull(), "r"), result)
 1 2 0 2 ⊆ "qwer"

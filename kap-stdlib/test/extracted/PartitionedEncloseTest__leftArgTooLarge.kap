@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<APLEvalException>
 1 1 1 1 1 1 2 ⊆ "qwert"

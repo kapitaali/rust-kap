@@ -1,0 +1,1 @@
+assertAPLValue(NearComplex(Complex(0.4728708045015879, 0.47287080450158786)), result)

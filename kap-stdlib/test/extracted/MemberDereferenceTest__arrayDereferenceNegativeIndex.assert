@@ -1,0 +1,2 @@
+assertDimension(dimensionsOfSize(10), result)
+assertString((i + 100).toString(), result.valueAt(i), "String at index ${i}")

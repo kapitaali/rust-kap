@@ -1,1 +1,5 @@
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("(1÷2) ≡ (1÷2)"))
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("(1÷2) ≡ (1÷7)"))
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("(1÷2) ≢ (1÷2)"))
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("(1÷2) ≢ (1÷7)"))
 (1÷2) ≡ (1÷2)

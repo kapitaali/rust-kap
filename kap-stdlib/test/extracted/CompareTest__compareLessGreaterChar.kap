@@ -1,1 +1,5 @@
+⍝ assert: assert1DArray(arrayOf(0, 0, 1), result)
+⍝ assert: assert1DArray(arrayOf(1, 0, 0), result)
+⍝ assert: assert1DArray(arrayOf(0, 1, 1), result)
+⍝ assert: assert1DArray(arrayOf(1, 1, 0), result)
 @e @b @c < @a @b @f

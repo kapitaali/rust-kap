@@ -1,1 +1,2 @@
+⍝ assert: assertChar('x'.code, result)
 unicode:fromCodepoints 120

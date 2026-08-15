@@ -1,0 +1,1 @@
+assertBigIntOrLong("-9999800000000000000", result)

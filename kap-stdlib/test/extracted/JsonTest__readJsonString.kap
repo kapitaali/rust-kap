@@ -1,1 +1,2 @@
+⍝ assert: assertString("ab", result)
 json:readString "\"ab\""

@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<InvalidFunctionRedefinition>
 ∇ + (x) { 1 + x }

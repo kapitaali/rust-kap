@@ -1,0 +1,3 @@
+assertTrue(result.isScalar())
+assertDimension(dimensionsOfSize(3), v)
+assertArrayContent(arrayOf(10011, 10022, 10033), v)

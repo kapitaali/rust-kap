@@ -1,0 +1,4 @@
+assertDimension(dimensionsOfSize(3), result)
+assertSimpleNumber(3, result.valueAt(0))
+assertSimpleNumber(7, result.valueAt(1))
+assertSimpleNumber(6, result.valueAt(2))

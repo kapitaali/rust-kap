@@ -1,0 +1,6 @@
+assert1DArray(arrayOf(0, 1, 2, 4), result)
+assertNotNull(labels)
+assertLabelList(listOf("a", "c", "b", "d"), labels.labels[0])
+assert1DArray(arrayOf(4, 2, 1, 0), result)
+assertNotNull(labels)
+assertLabelList(listOf("d", "b", "c", "a"), labels.labels[0])

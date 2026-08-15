@@ -1,1 +1,6 @@
+⍝ assert: assertIs(result)
+⍝ assert: assertEquals(3, result.listSize())
+⍝ assert: assertSimpleNumber(11, result.listElement(0))
+⍝ assert: assertSimpleNumber(21, result.listElement(1))
+⍝ assert: assertSimpleNumber(31, result.listElement(2))
 (1+)⍢fromList (10 ; 20 ; 30)

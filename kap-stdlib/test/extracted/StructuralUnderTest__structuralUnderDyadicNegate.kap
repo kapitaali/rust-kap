@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(3, 4, 13, 14), result)
 12 {⍵+8×⍵≥0}⍢- 11 12 13 14

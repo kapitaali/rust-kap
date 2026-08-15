@@ -1,1 +1,4 @@
+⍝ assert: assertDimension(dimensionsOfSize(2), result)
+⍝ assert: assertSimpleNumber(2, result.valueAt(0))
+⍝ assert: assert1DArray(arrayOf(1, 2, 3), v)
 0 1 % (2 3) (⊂1 2 3)

@@ -1,1 +1,4 @@
+⍝ assert: assertFailsWith<InvalidDimensionsException>
+⍝ assert: assertFailsWith<InvalidDimensionsException>
+⍝ assert: assertFailsWith<InvalidDimensionsException>
 (⊂8 7) ⊃ 100+⍳100

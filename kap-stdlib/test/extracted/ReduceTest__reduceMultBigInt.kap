@@ -1,1 +1,2 @@
+⍝ assert: assertBigIntOrLong("295147905179352825856", result)
 ×/ 68 ⍴ 2

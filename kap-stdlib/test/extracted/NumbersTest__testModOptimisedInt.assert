@@ -1,0 +1,4 @@
+assertDimension(dimensionsOfSize(4), result)
+assertArrayContent(arrayOf(2, 1, 2, 2), result)
+assertDimension(dimensionsOfSize(4), result)
+assertArrayContent(arrayOf(2, 1, 2, 2), result)

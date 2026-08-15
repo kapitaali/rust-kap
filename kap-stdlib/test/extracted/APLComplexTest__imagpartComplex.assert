@@ -1,0 +1,1 @@
+assert1DArray(arrayOf(InnerDouble(2.5), InnerDouble(4.5), InnerDouble(-4.0), InnerDouble(-4.5)), result)

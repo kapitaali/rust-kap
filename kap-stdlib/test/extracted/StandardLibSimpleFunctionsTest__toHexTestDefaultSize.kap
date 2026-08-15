@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf("123AB", "1000", "0", "10", "3"), result)
 io:toHex¨ 74667 4096 0 16 3

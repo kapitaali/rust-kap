@@ -1,1 +1,2 @@
+⍝ assert: assertNearDouble(NearDouble(80760102.76, 2), result)
 10.2!32.2

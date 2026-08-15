@@ -1,1 +1,5 @@
+⍝ assert: assertDimension(dimensionsOfSize(3), result)
+⍝ assert: assertArrayContent(arrayOf(NearDouble(0.0, 4), NearDouble(0.1, 4), NearDouble(0.5, 4)), result)
+⍝ assert: assertDimension(dimensionsOfSize(3), result)
+⍝ assert: assertArrayContent(arrayOf(NearDouble(0.0, 4), NearDouble(0.1, 4), NearDouble(0.5, 4)), result)
 2.0 | int:ensureDouble 2.0 2.1 2.5

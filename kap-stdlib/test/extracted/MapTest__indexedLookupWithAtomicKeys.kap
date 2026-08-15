@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(300, 200), result)
 a ← map:with 10 100 20 200 30 300 ⋄ a[30 20]

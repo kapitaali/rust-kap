@@ -1,0 +1,7 @@
+assert1DArray(
+                arrayOf(
+                    Inner1Dn(2, 4, 3),
+                    Inner1Dn(-2, -2, -2),
+                    Inner1Dn(Complex(0.0, 3.0), Complex(0.0, 3.0)),
+                    Inner1Dn(Complex(0.0, -4.0), Complex(0.0, -1.0))),
+                result)

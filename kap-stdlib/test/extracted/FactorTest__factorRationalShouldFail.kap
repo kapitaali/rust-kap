@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<APLIllegalArgumentException>
 math:factor 1r2

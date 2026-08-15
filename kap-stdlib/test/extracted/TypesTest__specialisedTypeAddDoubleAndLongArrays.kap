@@ -1,1 +1,2 @@
+⍝ assert: assertEquals(ArrayMemberType.DOUBLE, result.specialisedType)
 1 2 + 10.0 11.3

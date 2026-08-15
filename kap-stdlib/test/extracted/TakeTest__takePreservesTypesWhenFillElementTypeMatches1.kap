@@ -1,1 +1,3 @@
+⍝ assert: assert1DArray(arrayOf(1, 1, 1), result)
+⍝ assert: assertEquals(ArrayMemberType.BOOLEAN, result.specialisedType)
 3 (↑ int:proto 1) 1 1

@@ -1,1 +1,7 @@
+⍝ assert: assertDimension(dimensionsOfSize(5), result)
+⍝ assert: assertArrayContent(arrayOf(10, 20, 30, 40, 50), result.valueAt(0))
+⍝ assert: assertArrayContent(arrayOf(50, 10, 20, 30, 40), result.valueAt(1))
+⍝ assert: assertArrayContent(arrayOf(40, 50, 10, 20, 30), result.valueAt(2))
+⍝ assert: assertArrayContent(arrayOf(30, 40, 50, 10, 20), result.valueAt(3))
+⍝ assert: assertArrayContent(arrayOf(20, 30, 40, 50, 10), result.valueAt(4))
 (-⍳5) ⌽¨ ⊂10 20 30 40 50

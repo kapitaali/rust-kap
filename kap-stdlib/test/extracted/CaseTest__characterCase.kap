@@ -1,1 +1,2 @@
+⍝ assert: assertString("aOc", result)
 0 1 0 % "abc" "FOO"

@@ -1,1 +1,12 @@
+⍝ assert: assertNumbers(a: Long, b: Long, value: APLValue)
+⍝ assert: assertDimension(dimensionsOfSize(2), value)
+⍝ assert: assertSimpleNumber(a, value.valueAt(0))
+⍝ assert: assertSimpleNumber(b, value.valueAt(1))
+⍝ assert: assertDimension(dimensionsOfSize(6), result)
+⍝ assert: assertNumbers(0, 2, result.valueAt(0))
+⍝ assert: assertNumbers(1, 0, result.valueAt(1))
+⍝ assert: assertNumbers(1, 3, result.valueAt(2))
+⍝ assert: assertNumbers(2, 1, result.valueAt(3))
+⍝ assert: assertNumbers(2, 4, result.valueAt(4))
+⍝ assert: assertNumbers(3, 2, result.valueAt(5))
 ⍸4 5⍴0 0 1

@@ -1,1 +1,5 @@
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("(time:parse \"2022-06-04T15:12:13.333Z\") ≡ 12345"))
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("12345 ≡ time:parse \"2022-06-04T15:12:13.333Z\""))
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("(time:parse \"2022-06-04T15:12:13.333Z\") ≢ 12345"))
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("12345 ≢ time:parse \"2022-06-04T15:12:13.333Z\""))
 (time:parse "2022-06-04T15:12:13.333Z") ≡ 12345

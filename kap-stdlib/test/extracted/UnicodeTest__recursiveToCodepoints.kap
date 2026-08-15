@@ -1,1 +1,6 @@
+⍝ assert: assertDimension(dimensionsOfSize(2), result)
+⍝ assert: assertDimension(dimensionsOfSize(3), v)
+⍝ assert: assertArrayContent(arrayOf(102, 111, 111), v)
+⍝ assert: assertDimension(dimensionsOfSize(5), v)
+⍝ assert: assertArrayContent(arrayOf(122, 120, 99, 118, 98), v)
 unicode:toCodepoints "foo" "zxcvb"

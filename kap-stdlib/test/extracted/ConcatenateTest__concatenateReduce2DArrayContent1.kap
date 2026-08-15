@@ -1,1 +1,4 @@
+⍝ assert: assertDimension(emptyDimensions(), result)
+⍝ assert: assertDimension(dimensionsOfSize(3, 7), v)
+⍝ assert: assertArrayContent(arrayOf(0, 1, 2, 100, 101, 102, 103, 2, 3, 2, 104, 105, 106, 107, 4, 5, 2, 108, 109, 110, 111), v)
 ,⌿ (3 2 ⍴ ⍳6) 2 (3 4 ⍴ 100+⍳12)

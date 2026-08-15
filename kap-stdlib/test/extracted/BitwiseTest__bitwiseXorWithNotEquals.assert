@@ -1,0 +1,2 @@
+assertSimpleNumber(37, parseAPLExpression("99 ≠∵ 70"))
+assertBigIntOrLong(37, parseAPLExpression("(int:asBigint 99) ≠∵ (int:asBigint 70)"))

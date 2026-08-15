@@ -1,0 +1,8 @@
+assertDimension(dimensionsOfSize(2, 2), result)
+assertArrayContent(
+                arrayOf(
+                    InnerString("a0foo1bar"),
+                    InnerString("a2foo3bar"),
+                    InnerString("a4foo5bar"),
+                    InnerString("a6foo7bar")),
+                result)

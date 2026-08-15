@@ -1,1 +1,3 @@
+⍝ assert: assertTrue(result.isStringValue())
+⍝ assert: assertEquals(expected, resultString)
 io:readFile "test-data/multi.txt"

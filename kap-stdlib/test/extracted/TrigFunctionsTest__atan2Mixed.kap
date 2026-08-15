@@ -1,1 +1,10 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    NearDouble(0.16514867741462685),
+                    NearDouble(-0.7853981633974483),
+                    NearDouble(0.7853981633974483),
+                    NearDouble(0.4636476090008061),
+                    NearDouble(1.1071487177940904),
+                    NearDouble(1.4711276743037347)),
+                result)
 (1.2 1.0 2 2 2 (int:asBigint 10)) math:atan2 0.2 ¯1.0 2 1 4 (int:asBigint 100)

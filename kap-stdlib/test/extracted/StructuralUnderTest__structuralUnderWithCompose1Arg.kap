@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(101, result)
 (100+)⍢(×∘(10+)) 100

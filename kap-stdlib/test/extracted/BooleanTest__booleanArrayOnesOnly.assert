@@ -1,0 +1,4 @@
+assertIs(result)
+assert1DArray(arrayOf(1, 1, 1, 1), result)
+assertIs(result)
+assert1DArray(content, result)

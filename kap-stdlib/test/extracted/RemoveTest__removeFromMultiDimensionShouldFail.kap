@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<InvalidDimensionsException>
 (2 4 ⍴ ⍳4) ~ 1 2

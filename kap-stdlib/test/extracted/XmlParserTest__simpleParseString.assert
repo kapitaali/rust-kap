@@ -1,0 +1,3 @@
+assertIs(result)
+assertIs(result.instance)
+assertEquals("foo", result.instance.childNodes.item(0).nodeName)

@@ -1,1 +1,8 @@
+⍝ assert: assertDimension(dimensionsOfSize(3, 4), result)
+⍝ assert: assertArrayContent(
+                arrayOf(
+                    1000, 3500, 6000, 8500,
+                    11000, 13500, 16000, 18500,
+                    21000, 23500, 26000, 28500),
+                result)
 (3 4 5 ⍴ ⍳1000) +∙× 100

@@ -1,0 +1,3 @@
+assert1DArray(arrayOf(1, 2, Inner1D(arrayOf(1, 2, 3))), result)
+assertEquals(ArrayMemberType.GENERIC, result.specialisedType)
+assertFalse(result.isDepth0)

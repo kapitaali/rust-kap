@@ -1,0 +1,4 @@
+assertTrue(v is APLChar)
+assertEquals('a'.code, v.value)
+assertTrue(v is APLChar)
+assertEquals('C'.code, v.value)

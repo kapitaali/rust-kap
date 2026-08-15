@@ -1,1 +1,12 @@
+⍝ assert: assertDoubleWithRange(Pair(1.0, 1.0), result.valueAt(0))
+⍝ assert: assertDoubleWithRange(Pair(0.5403023058, 0.5403023060), result.valueAt(1))
+⍝ assert: assertDoubleWithRange(Pair(0.8775825618, 0.8775825620), result.valueAt(2))
+⍝ assert: assertDoubleWithRange(Pair(0.8775825618, 0.8775825620), result.valueAt(3))
+⍝ assert: assertDoubleWithRange(Pair(0.9800665777, 0.9800665779), result.valueAt(4))
+⍝ assert: assertDoubleWithRange(Pair(0.9950041652, 0.9950041654), result.valueAt(5))
+⍝ assert: assertDoubleWithRange(Pair(-0.4161468366, -0.4161468364), result.valueAt(6))
+⍝ assert: assertDoubleWithRange(Pair(-0.9899924967, -0.9899924965), result.valueAt(7))
+⍝ assert: assertDoubleWithRange(Pair(-0.6536436210, -0.6536436208), result.valueAt(8))
+⍝ assert: assertDoubleWithRange(Pair(0.2836621854, 0.2836621856), result.valueAt(9))
+⍝ assert: assertDoubleWithRange(Pair(0.5403023058, 0.5403023060), result.valueAt(10))
 math:cos 0 1 0.5 ¯0.5 0.2 ¯0.1 2 3 4 5 ¯1 ¯2 ¯5

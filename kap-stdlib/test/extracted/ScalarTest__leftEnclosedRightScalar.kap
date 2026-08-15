@@ -1,1 +1,4 @@
+⍝ assert: assertTrue(result.isScalar())
+⍝ assert: assertDimension(dimensionsOfSize(2), v)
+⍝ assert: assertArrayContent(arrayOf(6, 7), v)
 (⊂5 6) + 1

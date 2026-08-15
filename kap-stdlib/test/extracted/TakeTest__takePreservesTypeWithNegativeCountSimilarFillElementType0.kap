@@ -1,1 +1,3 @@
+⍝ assert: assert1DArray(arrayOf(0, 0, 1, 2), result)
+⍝ assert: assertEquals(ArrayMemberType.LONG, result.specialisedType)
 ¯4 ↑ 1 2

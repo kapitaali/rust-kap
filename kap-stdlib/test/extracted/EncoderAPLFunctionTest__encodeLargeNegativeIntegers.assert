@@ -1,0 +1,2 @@
+assertDimension(dimensionsOfSize(n), result)
+assertBigIntOrLong(expected, result.valueAt(i), "index ${i}")

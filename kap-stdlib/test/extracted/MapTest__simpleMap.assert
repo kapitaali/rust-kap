@@ -1,0 +1,5 @@
+assertIs(result)
+assertEquals(3, result.elementCount())
+assertSimpleNumber(1, result.lookupValue(APLString.make("foo").makeTypeQualifiedKey())!!)
+assertSimpleNumber(2, result.lookupValue(APLString.make("bar").makeTypeQualifiedKey())!!)
+assertSimpleNumber(3, result.lookupValue(APLString.make("a").makeTypeQualifiedKey())!!)

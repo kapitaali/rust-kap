@@ -1,1 +1,5 @@
+⍝ assert: assertBigIntOrLong(1, parseAPLExpression("(int:asBigint 3) math:gcd (int:asBigint 8)"))
+⍝ assert: assertBigIntOrLong(4, parseAPLExpression("(int:asBigint 4) math:gcd (int:asBigint 8)"))
+⍝ assert: assertBigIntOrLong(4, parseAPLExpression("(int:asBigint 4) math:gcd (int:asBigint 16)"))
+⍝ assert: assertBigIntOrLong(2, parseAPLExpression("(int:asBigint 6) math:gcd (int:asBigint 16)"))
 (int:asBigint 3) math:gcd (int:asBigint 8)

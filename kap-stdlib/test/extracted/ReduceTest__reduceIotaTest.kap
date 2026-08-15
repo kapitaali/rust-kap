@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(499500, result)
 +/⍳1000

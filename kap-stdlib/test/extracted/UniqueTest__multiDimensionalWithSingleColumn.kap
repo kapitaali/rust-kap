@@ -1,1 +1,3 @@
+⍝ assert: assertDimension(dimensionsOfSize(3, 1), result)
+⍝ assert: assertArrayContent(arrayOf("abc", "def", "ghi"), result)
 abc

@@ -1,1 +1,2 @@
+⍝ assert: assertRational(Rational.make(5, 2), result)
 +/«÷»≢ 1 2 3 4

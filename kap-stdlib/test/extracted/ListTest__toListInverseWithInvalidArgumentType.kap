@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<APLIllegalArgumentException>
 toList˝ 1 2 3

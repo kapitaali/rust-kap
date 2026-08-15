@@ -1,1 +1,4 @@
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("1.6 cmp (3÷2)"))
+⍝ assert: assertSimpleNumber(-1, parseAPLExpression("(3÷2) cmp 1.6"))
+⍝ assert: assertSimpleNumber(-1, parseAPLExpression("1.5 cmp (3÷2)"))
 1.6 cmp (3÷2)

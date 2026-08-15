@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(Inner1D(arrayOf()), Inner1D(arrayOf())), result)
 math:divisors (int:asBigint 0) (int:asBigint 1)

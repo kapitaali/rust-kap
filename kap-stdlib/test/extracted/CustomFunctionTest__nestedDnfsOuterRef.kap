@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(7, result)
 q ⇐ { a ← 1 ◊ { a + ⍵ } ⍵ } ◊ { { ⍵ + q 2 } 4 } 100

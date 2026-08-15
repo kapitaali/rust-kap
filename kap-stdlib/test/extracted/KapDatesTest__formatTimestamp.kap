@@ -1,1 +1,2 @@
+⍝ assert: assertString("2022-06-04T15:12:13.333Z", result)
 time:format time:toTimestamp 1654355533333

@@ -1,1 +1,8 @@
+⍝ assert: assertDimension(dimensionsOfSize(3), result)
+⍝ assert: assertDimension(dimensionsOfSize(1, 1), v)
+⍝ assert: assertString("1", v.valueAt(0))
+⍝ assert: assertDimension(dimensionsOfSize(1, 1), v)
+⍝ assert: assertString("2", v.valueAt(0))
+⍝ assert: assertDimension(dimensionsOfSize(1, 1), v)
+⍝ assert: assertString("3", v.valueAt(0))
 1

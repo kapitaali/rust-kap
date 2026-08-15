@@ -1,1 +1,5 @@
+⍝ assert: assertBigIntOrLong(0, parseAPLExpression("(int:asBigint 0)∨(int:asBigint 0)"))
+⍝ assert: assertBigIntOrLong(1, parseAPLExpression("(int:asBigint 0)∨(int:asBigint 1)"))
+⍝ assert: assertBigIntOrLong(1, parseAPLExpression("(int:asBigint 1)∨(int:asBigint 0)"))
+⍝ assert: assertBigIntOrLong(1, parseAPLExpression("(int:asBigint 1)∨(int:asBigint 1)"))
 (int:asBigint 0)∨(int:asBigint 0)

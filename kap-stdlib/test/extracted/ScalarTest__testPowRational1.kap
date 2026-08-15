@@ -1,1 +1,2 @@
+⍝ assert: assertRational(Rational.make(-2187, 16384), result)
 (¯3÷4)*7

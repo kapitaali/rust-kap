@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(InnerBigIntOrLong(5), InnerBigIntOrLong(9995), InnerBigIntOrLong(-9995), InnerBigIntOrLong(-5)), result)
 (int:asBigint¨ 10000 10000 ¯10000 ¯10000) | int:asBigint¨ 20005 ¯20005 20005 ¯20005

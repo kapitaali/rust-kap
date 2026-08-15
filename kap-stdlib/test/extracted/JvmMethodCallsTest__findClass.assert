@@ -1,0 +1,2 @@
+assertTrue(result is JvmInstanceValue)
+assertSame(String::class.java, result.instance)

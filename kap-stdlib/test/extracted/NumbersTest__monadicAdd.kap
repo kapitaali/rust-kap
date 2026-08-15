@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(1, 2, -6, Complex(2.0, -7.0), Complex(2.0, 7.0)), result)
 +1 2 ¯6 2J7 2J¯7

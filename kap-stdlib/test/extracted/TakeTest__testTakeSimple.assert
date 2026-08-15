@@ -1,0 +1,2 @@
+assertTrue(result.isScalar())
+assertEquals(1L, result.ensureNumber().asLong())

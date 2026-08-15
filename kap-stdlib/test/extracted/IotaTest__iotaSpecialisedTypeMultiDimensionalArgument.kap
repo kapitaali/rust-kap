@@ -1,1 +1,2 @@
+⍝ assert: assertEquals(ArrayMemberType.GENERIC, parseAPLExpression("⍳2 2").specialisedType)
 ⍳2 2

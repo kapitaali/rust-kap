@@ -1,2 +1,3 @@
+⍝ assert: assertFailsWith<ParseException>
 a ← map:with 10 (map:with 100 200 300 400) 20 30
 a.20

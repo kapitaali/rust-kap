@@ -1,1 +1,3 @@
+⍝ assert: assertIs(result)
+⍝ assert: assertSimpleNumber(8, result)
 2⋆3

@@ -1,0 +1,7 @@
+assert1DArray(
+                    arrayOf(
+                        InnerBigIntOrLong("9223372036854775806"),
+                        InnerBigIntOrLong("9223372036854775807"),
+                        InnerBigIntOrLong("9223372036854775808"),
+                        InnerBigIntOrLong("9223372036854775809")),
+                    result)

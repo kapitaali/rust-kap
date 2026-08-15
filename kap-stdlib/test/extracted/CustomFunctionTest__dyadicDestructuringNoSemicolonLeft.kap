@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<ParseException>
 ∇ (x0 x1) foo (y0;y1) { x0+x1+y0+y1+3 } ◊ (10;11) foo (1;2)

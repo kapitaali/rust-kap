@@ -1,0 +1,5 @@
+assertDimension(dimensionsOfSize(4), result)
+assertString("as", result.valueAt(0))
+assertChar('a'.code, result.valueAt(1))
+assertChar('b'.code, result.valueAt(2))
+assertChar('c'.code, result.valueAt(3))

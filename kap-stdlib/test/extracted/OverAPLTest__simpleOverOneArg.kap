@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(-44, result)
 ({2×⍵}⍥-) 22

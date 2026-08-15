@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<InverseNotAvailable>
 9 ⊢⍨˝ 1234

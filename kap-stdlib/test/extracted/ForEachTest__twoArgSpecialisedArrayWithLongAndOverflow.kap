@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(11, 22, InnerBigIntOrLong("9223372036854775808"), 12, 4), result)
 10 20 1 2 3 +¨ 1 2 0x7fffffffffffffff 10 1

@@ -1,1 +1,6 @@
+⍝ assert: assertDimension(dimensionsOfSize(2, 2), result)
+⍝ assert: assert1DArray(arrayOf(11, 101), result.valueAt(0))
+⍝ assert: assert1DArray(arrayOf(10, 100), result.valueAt(1))
+⍝ assert: assert1DArray(arrayOf(14, 104), result.valueAt(2))
+⍝ assert: assert1DArray(arrayOf(14, 104), result.valueAt(3))
 (2 2 ⍴ 1 0 4 4) ⊇ {GENERIC} (⊂10 100)+⍳100

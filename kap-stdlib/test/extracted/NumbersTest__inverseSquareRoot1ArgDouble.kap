@@ -1,1 +1,14 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    InnerDouble(0.0),
+                    InnerDouble(1.0),
+                    InnerDouble(4.0),
+                    InnerDouble(10.889999999999999),
+                    InnerDouble(118.81),
+                    InnerDouble(97546101.63084899),
+                    InnerDouble(1.0),
+                    InnerDouble(5.289999999999999),
+                    InnerDouble(167.14300942440002),
+                    InnerDouble(86329830551646940.0)),
+                result)
 √˝ 0.0 1.0 2.0 3.3 10.9 9876.543 ¯1.0 ¯2.3 ¯12.92838 ¯293819384.234

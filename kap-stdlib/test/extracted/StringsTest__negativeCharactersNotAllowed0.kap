@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<APLEvalException>
 @a - 98

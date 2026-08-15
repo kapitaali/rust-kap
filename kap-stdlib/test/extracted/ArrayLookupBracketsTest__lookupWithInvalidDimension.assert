@@ -1,0 +1,2 @@
+assertFailsWith<InvalidDimensionsException>
+assertFailsWith<InvalidDimensionsException>

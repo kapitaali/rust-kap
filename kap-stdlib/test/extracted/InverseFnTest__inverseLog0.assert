@@ -1,0 +1,1 @@
+assertAPLValue(InnerBigIntOrLong(1024), parseAPLExpression("2 ⍟˝10"))

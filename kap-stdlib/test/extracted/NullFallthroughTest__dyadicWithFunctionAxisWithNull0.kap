@@ -1,1 +1,2 @@
+⍝ assert: assertAPLNil(result)
 100 200 ÷[0]⍰ null

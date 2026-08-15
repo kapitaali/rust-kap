@@ -1,0 +1,2 @@
+assertIs(e)
+assertEquals("abcd", e.message)

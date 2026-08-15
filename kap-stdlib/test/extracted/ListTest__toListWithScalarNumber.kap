@@ -1,1 +1,2 @@
+⍝ assert: assertListContent(listOf(1), result)
 toList 1

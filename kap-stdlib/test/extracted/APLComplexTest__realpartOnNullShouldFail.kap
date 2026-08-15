@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<IncompatibleTypeException>
 math:re null null

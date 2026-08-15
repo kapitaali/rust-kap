@@ -1,0 +1,2 @@
+assert1DArray(arrayOf(0, 1, 0, 0), result)
+assertTrue(result.isDepth0)

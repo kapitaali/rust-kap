@@ -1,1 +1,2 @@
+⍝ assert: assertString("xy", result)
 unicode:fromCodepoints 120 121

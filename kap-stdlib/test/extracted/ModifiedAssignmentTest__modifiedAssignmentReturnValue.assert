@@ -1,0 +1,1 @@
+assertSimpleNumber(11, parseAPLExpression("foo ← 8 ⋄ foo +← 3"))

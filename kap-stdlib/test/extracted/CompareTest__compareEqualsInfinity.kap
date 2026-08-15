@@ -1,1 +1,3 @@
+⍝ assert: assertSimpleNumber(expected, parseAPLExpression("${a}=${b}"))
+⍝ assert: assertSimpleNumber(1 - expected, parseAPLExpression("${a}≠${b}"))
 ${a}=${b}

@@ -1,1 +1,3 @@
+⍝ assert: assertDimension(dimensionsOfSize(4), result)
+⍝ assert: assertArrayContent(arrayOf(InnerDouble(1.0), InnerDouble(2.0), InnerDouble(3628800.0), InnerDouble(39916800.0)), result)
 !1 2 10 11

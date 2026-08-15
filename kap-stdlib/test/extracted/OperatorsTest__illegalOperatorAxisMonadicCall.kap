@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<AxisNotSupported>
 +⍨[0] 10 20

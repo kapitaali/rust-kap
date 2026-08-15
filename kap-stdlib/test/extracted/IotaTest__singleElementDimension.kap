@@ -1,1 +1,6 @@
+⍝ assert: assertElement(expected: Long, i: Int)
+⍝ assert: assertDimension(dimensionsOfSize(1), v)
+⍝ assert: assertSimpleNumber(expected, v.valueAt(0))
+⍝ assert: assertDimension(dimensionsOfSize(9), result)
+⍝ assert: assertElement(index.toLong(), index)
 ⍳,9

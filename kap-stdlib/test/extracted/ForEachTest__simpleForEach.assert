@@ -1,0 +1,5 @@
+assertDimension(dimensionsOfSize(4), result)
+assertEquals(1.0, result.valueAt(0).ensureNumber().asDouble())
+assertEquals(0.25, result.valueAt(1).ensureNumber().asDouble())
+assertEquals(0.5, result.valueAt(2).ensureNumber().asDouble())
+assertEquals(0.0625, result.valueAt(3).ensureNumber().asDouble())

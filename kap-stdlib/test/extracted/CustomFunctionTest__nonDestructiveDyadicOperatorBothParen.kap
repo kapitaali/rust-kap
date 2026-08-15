@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(109, 200), result)
 ∇ (x) (a foo b) (y) { 1 + 100 ⍞a (⌷x) ⍞b (⌷y) } ⋄ (10;100) +foo- (2;1)

@@ -1,1 +1,6 @@
+⍝ assert: assertFailsWith<APLIllegalArgumentException>
+⍝ assert: assertFailsWith<APLIllegalArgumentException>
+⍝ assert: assertFailsWith<APLIllegalArgumentException>
+⍝ assert: assertFailsWith<APLIllegalArgumentException>
+⍝ assert: assertFailsWith<APLIllegalArgumentException>
 time:parse "2020-30-01T15:16:01.123Z"

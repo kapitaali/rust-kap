@@ -1,0 +1,2 @@
+assertDimension(dimensionsOfSize(3), result)
+assertArrayContent(arrayOf(0, 3, 1), result)

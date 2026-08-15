@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<TagCatch>
 1 + 'foo throw 2

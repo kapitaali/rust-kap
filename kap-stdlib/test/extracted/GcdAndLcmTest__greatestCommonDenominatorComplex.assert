@@ -1,0 +1,3 @@
+assertSimpleComplex(Complex(6.0, 4.0), parseAPLExpression("6J4 math:gcd ¯10J54"))
+assertSimpleComplex(Complex(9.0, 2000.0), parseAPLExpression("9J2000 math:gcd ¯11973J6054"))
+assertSimpleComplex(Complex(11.0, 5.0), parseAPLExpression("¯15J33 math:gcd 32J134"))

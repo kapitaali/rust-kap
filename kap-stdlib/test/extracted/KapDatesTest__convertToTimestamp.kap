@@ -1,1 +1,3 @@
+⍝ assert: assertIs(result)
+⍝ assert: assertEquals(1654321234599L, result.time.toEpochMilliseconds())
 time:toTimestamp 1654321234599

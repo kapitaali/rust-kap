@@ -1,0 +1,4 @@
+assert1DArray(arrayOf(2, 4, 5), result)
+assertEquals(ArrayMemberType.LONG, result.specialisedType)
+assert1DArray(arrayOf(5, 4, 2), result)
+assertEquals(ArrayMemberType.LONG, result.specialisedType)

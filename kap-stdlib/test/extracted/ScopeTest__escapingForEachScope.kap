@@ -1,1 +1,6 @@
+⍝ assert: assertDimension(dimensionsOfSize(4), result)
+⍝ assert: assert1DArray(arrayOf(112, 212, 312, 412), result.valueAt(0))
+⍝ assert: assert1DArray(arrayOf(122, 222, 322, 422), result.valueAt(1))
+⍝ assert: assert1DArray(arrayOf(132, 232, 332, 432), result.valueAt(2))
+⍝ assert: assert1DArray(arrayOf(142, 242, 342, 442), result.valueAt(3))
 a0←10 ⋄ { a←⍵ ⋄ { { a + ⍵ }¨ ⍵+1 } 101 201 301 401 }¨ 10 20 30 40

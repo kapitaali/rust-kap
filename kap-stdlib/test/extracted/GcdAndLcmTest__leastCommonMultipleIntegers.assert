@@ -1,0 +1,7 @@
+assertSimpleNumber(0, parseAPLExpression("0 math:lcm 0"))
+assertSimpleNumber(6, parseAPLExpression("2 math:lcm 3"))
+assertSimpleNumber(6, parseAPLExpression("2 math:lcm 3"))
+assertSimpleNumber(12, parseAPLExpression("4 math:lcm 6"))
+assertSimpleNumber(-6, parseAPLExpression("2 math:lcm ¯3"))
+assertSimpleNumber(-6, parseAPLExpression("¯2 math:lcm 3"))
+assertSimpleNumber(6, parseAPLExpression("¯2 math:lcm ¯3"))

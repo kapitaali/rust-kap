@@ -1,1 +1,9 @@
+⍝ assert: assertDimension(dimensionsOfSize(2, 2), result)
+⍝ assert: assertValue(index: Int, vararg args: Int)
+⍝ assert: assertDimension(dimensionsOfSize(v.size), v)
+⍝ assert: assertArrayContent(args.toTypedArray(), v)
+⍝ assert: assertValue(i++, 300, 302, 304)
+⍝ assert: assertValue(i++, 301, 303, 305)
+⍝ assert: assertValue(i++, 306, 308, 310)
+⍝ assert: assertValue(i++, 307, 309, 311)
 ⊂[,1] 2 3 2 ⍴ 300+⍳1000

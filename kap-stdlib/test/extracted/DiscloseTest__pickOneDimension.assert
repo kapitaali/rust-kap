@@ -1,0 +1,1 @@
+assertSimpleNumber(102, parseAPLExpression("2⊃100+⍳100"))

@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<IllegalAxisException>
 labels[1] "foo" "bar" labels 1 2

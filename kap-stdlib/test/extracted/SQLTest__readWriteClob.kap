@@ -1,1 +1,4 @@
+⍝ assert: assertDimension(dimensionsOfSize(1, 2), result)
+⍝ assert: assertSimpleNumber(1, result.valueAt(0))
+⍝ assert: assertString("test string", result.valueAt(1))
 test string

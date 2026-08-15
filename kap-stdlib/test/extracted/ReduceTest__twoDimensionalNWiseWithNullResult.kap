@@ -1,1 +1,2 @@
+⍝ assert: assertDimension(dimensionsOfSize(3, 0), result)
 5 ,/ 3 4 ⍴ ⍳1000

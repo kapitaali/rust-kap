@@ -1,0 +1,2 @@
+assertTrue(v is APLChar)
+assertEquals("\uD835\uDC9F", v.asString())

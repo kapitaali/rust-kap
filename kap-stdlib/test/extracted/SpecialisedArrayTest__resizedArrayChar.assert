@@ -1,0 +1,2 @@
+assertString("aaaaaaa", result)
+assertEquals(ArrayMemberType.CHAR, result.specialisedType)

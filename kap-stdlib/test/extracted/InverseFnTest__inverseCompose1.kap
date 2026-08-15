@@ -1,1 +1,2 @@
+⍝ assert: assertAPLValue(NearDouble(10.125, 8), parseAPLExpression("8 -∘÷⍨˝ 10"))
 8 -∘÷⍨˝ 10

@@ -1,0 +1,2 @@
+assertFailsWith<IncompatibleTypeException>
+assertFailsWith<IncompatibleTypeException>

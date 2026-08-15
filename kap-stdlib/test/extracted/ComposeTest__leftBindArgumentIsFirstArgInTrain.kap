@@ -1,1 +1,2 @@
+⍝ assert: assertRational(Rational.make(23, 8), result)
 ((3-)÷) 8

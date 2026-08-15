@@ -1,1 +1,5 @@
+⍝ assert: assertDimension(dimensionsOfSize(2, 2, 3), result)
+⍝ assert: assertArrayContent(arrayOf(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11), result)
+⍝ assert: assertDimension(dimensionsOfSize(2, 2, 3), result)
+⍝ assert: assertArrayContent(arrayOf(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11).reversedArray(), result)
 ∧[2] 2 2 3 ⍴ 7 5 4 9 10 8 3 6 2 11 0 1

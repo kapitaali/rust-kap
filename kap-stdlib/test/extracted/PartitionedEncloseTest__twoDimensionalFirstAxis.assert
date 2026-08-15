@@ -1,0 +1,10 @@
+assertDimension(dimensionsOfSize(2, 3), result)
+assertArrayContent(
+                arrayOf(
+                    Inner1D(arrayOf(1000, 1003)),
+                    Inner1D(arrayOf(1001, 1004)),
+                    Inner1D(arrayOf(1002, 1005)),
+                    Inner1D(arrayOf(1006)),
+                    Inner1D(arrayOf(1007)),
+                    Inner1D(arrayOf(1008))),
+                result)

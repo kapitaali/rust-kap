@@ -1,1 +1,2 @@
+⍝ assert: assertArrayContent(arrayOf(1), result)
 1 ∪ 1

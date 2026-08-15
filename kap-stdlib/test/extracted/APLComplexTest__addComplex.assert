@@ -1,0 +1,1 @@
+assertEquals(Complex(5.0, 7.0), result.ensureNumber().asComplex())

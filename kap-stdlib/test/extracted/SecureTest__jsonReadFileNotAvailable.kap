@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<VariableNotAssigned>
 json:read "test-data/json-test.json"

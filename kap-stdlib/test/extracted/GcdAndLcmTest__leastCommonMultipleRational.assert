@@ -1,0 +1,1 @@
+assertRational(Rational.make(535, 2), parseAPLExpression("(10÷8) math:lcm (107÷10)"))

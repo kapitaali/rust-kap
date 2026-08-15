@@ -1,1 +1,3 @@
+⍝ assert: assertSimpleNumber(-9L, parseAPLExpression("0b0011 ≥∵ 0b1001"))
+⍝ assert: assertBigIntOrLong("-9", parseAPLExpression("0b1000000000000000000000000000000000000000000000000000000000000000000000000000000000011 ≥∵ 0b1001"))
 0b0011 ≥∵ 0b1001

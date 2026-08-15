@@ -1,1 +1,4 @@
+⍝ assert: assertString("8", parseAPLExpression("⍕8"))
+⍝ assert: assertString("100", parseAPLExpression("⍕100"))
+⍝ assert: assertString("-100", parseAPLExpression("⍕¯100"))
 ⍕8

@@ -1,1 +1,3 @@
+⍝ assert: assertSimpleNumber(5, result)
+⍝ assert: assertIs(result)
 null and 5

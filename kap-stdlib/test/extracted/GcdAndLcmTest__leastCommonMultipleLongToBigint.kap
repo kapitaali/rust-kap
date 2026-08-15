@@ -1,1 +1,2 @@
+⍝ assert: assertBigIntOrLong("11610190056198333600", result)
 219060189739591200 math:lcm 106

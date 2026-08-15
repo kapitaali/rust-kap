@@ -1,0 +1,5 @@
+assert1DArray(
+                arrayOf(
+                    InnerBigIntOrLong("-10000000000000000000000000000000"),
+                    InnerBigIntOrLong("10000000000000000000000000000000")),
+                result)

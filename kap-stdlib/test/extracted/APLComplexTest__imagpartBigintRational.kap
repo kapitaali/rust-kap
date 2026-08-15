@@ -1,1 +1,7 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    InnerBigIntOrLong(0),
+                    InnerBigIntOrLong(0),
+                    InnerBigIntOrLong(0)),
+                result)
 math:im (int:asBigint 1234) (int:asBigint 1234567890123456789012345678901234567890) 1r3

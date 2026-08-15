@@ -1,0 +1,2 @@
+assertSimpleNumber(5, result)
+assertIs(result)

@@ -1,1 +1,2 @@
+⍝ assert: assertNearDouble(NearDouble(0.9092974268256817), result)
 math:sin int:asBigint 2

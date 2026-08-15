@@ -1,0 +1,5 @@
+assertElement(expected: Long, i: Int)
+assertDimension(dimensionsOfSize(1), v)
+assertSimpleNumber(expected, v.valueAt(0))
+assertDimension(dimensionsOfSize(9), result)
+assertElement(index.toLong(), index)

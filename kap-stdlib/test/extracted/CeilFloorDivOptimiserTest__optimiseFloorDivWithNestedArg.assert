@@ -1,0 +1,4 @@
+assertDimension(dimensionsOfSize(3), result)
+assert1DArray(arrayOf(0, 1, 1), v)
+assert1DArray(arrayOf(2, 2), v)
+assert1DArray(arrayOf(3, 3, 4), v)

@@ -1,1 +1,2 @@
+⍝ assert: assertEquals(1, result.ensureNumber().asInt())
 2J3-1J3

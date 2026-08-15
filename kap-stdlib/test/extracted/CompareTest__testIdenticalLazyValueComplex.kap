@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("3J1≡0⌷3J1 4J1"))
 3J1≡0⌷3J1 4J1

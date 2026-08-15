@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(2, 4), result)
 math:divisors 8

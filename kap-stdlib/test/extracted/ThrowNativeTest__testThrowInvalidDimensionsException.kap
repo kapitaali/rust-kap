@@ -1,1 +1,3 @@
+⍝ assert: assertIs(e)
+⍝ assert: assertEquals("abcd", e.message)
 'kap:InvalidDimensionsException int:throwNative "abcd"

@@ -1,0 +1,1 @@
+assert1DArray(arrayOf(10 * 11 * 12 * 13, 10 + 11 + 12 + 13), result)

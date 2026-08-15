@@ -1,1 +1,2 @@
+⍝ assert: assertString("foo bar", parseAPLExpression("⍕\"foo bar\""))
 ⍕"foo bar"

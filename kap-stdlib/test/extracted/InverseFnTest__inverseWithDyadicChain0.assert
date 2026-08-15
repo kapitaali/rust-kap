@@ -1,0 +1,1 @@
+assertSimpleDouble(25.0, parseAPLExpression("15 (÷+)˝0.025"))

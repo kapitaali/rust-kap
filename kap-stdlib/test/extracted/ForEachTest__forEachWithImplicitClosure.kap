@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(4045, result)
 +/ { a←⍵ ◊ {⍵+a}¨ ⍳10 } 400

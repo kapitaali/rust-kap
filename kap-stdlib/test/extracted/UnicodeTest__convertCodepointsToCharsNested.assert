@@ -1,0 +1,7 @@
+assertDimension(dimensionsOfSize(4), result)
+assertChar('c'.code, result.valueAt(0))
+assertChar('d'.code, result.valueAt(1))
+assertChar('e'.code, result.valueAt(2))
+assertDimension(dimensionsOfSize(2), v)
+assertChar('f'.code, v.valueAt(0))
+assertChar('g'.code, v.valueAt(1))

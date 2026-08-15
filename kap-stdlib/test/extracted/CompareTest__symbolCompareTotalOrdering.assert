@@ -1,0 +1,3 @@
+assertSimpleNumber(-1, parseAPLExpression(":s cmp :x"))
+assertSimpleNumber(1, parseAPLExpression(":x cmp :s"))
+assertSimpleNumber(0, parseAPLExpression(":v cmp :v"))

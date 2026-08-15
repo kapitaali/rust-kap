@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf("foo", "bar"), result)
 labels "foo" "bar" labels 1 2

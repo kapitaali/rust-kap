@@ -1,0 +1,10 @@
+assertDimension(dimensionsOfSize(5, 4), result)
+assertArrayContent(
+                arrayOf(
+                    InnerDouble(1.0), InnerDouble(2.0), InnerDouble(3.0), InnerDouble(0.0),
+                    InnerDouble(4.0), InnerDouble(5.0), InnerDouble(6.0), InnerDouble(0.0),
+                    InnerDouble(7.0), InnerDouble(8.0), InnerDouble(9.0), InnerDouble(0.0),
+                    InnerDouble(0.0), InnerDouble(0.0), InnerDouble(0.0), InnerDouble(0.0),
+                    InnerDouble(0.0), InnerDouble(0.0), InnerDouble(0.0), InnerDouble(0.0)),
+                result)
+assertEquals(ArrayMemberType.DOUBLE, result.specialisedType)

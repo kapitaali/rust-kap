@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(1, result)
 a←1 ◊ ∇ b (a) { a←2+a } ◊ b 100 ◊ a

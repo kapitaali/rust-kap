@@ -1,1 +1,4 @@
+⍝ assert: assertDimension(dimensionsOfSize(2, 2), result)
+⍝ assert: assertArrayContent(arrayOf(8, 6, 2, 0), result)
+⍝ assert: assertLabelList(listOf("c", "a"), result.metadata.labels?.labels?.get(0))
 c

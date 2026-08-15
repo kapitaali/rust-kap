@@ -1,1 +1,15 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    NearDouble(-1.849603679),
+                    NearDouble(-1.818446459),
+                    NearDouble(-0.8814442959),
+                    NearDouble(-0.881373587),
+                    NearDouble(-0.8806663034),
+                    NearDouble(-0.009999833341),
+                    NearDouble(0.8806663034),
+                    NearDouble(0.881373587),
+                    NearDouble(0.8814442959),
+                    NearDouble(1.443635475),
+                    NearDouble(1.487482837)),
+                result)
 math:asinh ¯3.1 ¯3.0 ¯1.0001 ¯1.0 ¯0.999 ¯0.01 0.999 1.0 1.0001 2.0 2.1

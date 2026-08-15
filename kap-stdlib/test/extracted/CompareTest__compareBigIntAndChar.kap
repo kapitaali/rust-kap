@@ -1,1 +1,3 @@
+⍝ assert: assertSimpleNumber(-1, parseAPLExpression("100000000000000000000000000 cmp @c"))
+⍝ assert: assertSimpleNumber(1, parseAPLExpression("@c cmp 100000000000000000000000000"))
 100000000000000000000000000 cmp @c

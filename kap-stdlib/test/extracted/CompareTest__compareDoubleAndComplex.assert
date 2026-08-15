@@ -1,0 +1,6 @@
+assertSimpleNumber(-1, parseAPLExpression("2.1 cmp 2.2J5"))
+assertSimpleNumber(-1, parseAPLExpression("3.1 cmp 2.2J5"))
+assertSimpleNumber(1, parseAPLExpression("2.2J1 cmp 2.0"))
+assertSimpleNumber(1, parseAPLExpression("1J1 cmp 2.0"))
+assertSimpleNumber(0, parseAPLExpression("2J0 cmp 2.0"))
+assertSimpleNumber(0, parseAPLExpression("2.0 cmp 2J0"))

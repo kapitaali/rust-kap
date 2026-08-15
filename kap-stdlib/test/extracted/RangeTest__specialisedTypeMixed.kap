@@ -1,1 +1,11 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    InnerDouble(1.5),
+                    InnerChar('a'),
+                    InnerChar('b'),
+                    InnerChar('c'),
+                    InnerChar('d'),
+                    InnerChar('a')),
+                result)
+⍝ assert: assertEquals(ArrayMemberType.ATOM, result.specialisedType)
 1.5 @a … @d @a

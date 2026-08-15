@@ -1,1 +1,7 @@
+⍝ assert: assertIs(result)
+⍝ assert: assertEquals(3, result.elementCount())
+⍝ assert: assertSimpleNumber(1, result.lookupValue(APLString.make("foo").makeTypeQualifiedKey())!!)
+⍝ assert: assertSimpleNumber(2, result.lookupValue(APLString.make("bar").makeTypeQualifiedKey())!!)
+⍝ assert: assertSimpleNumber(3, result.lookupValue(APLString.make("a").makeTypeQualifiedKey())!!)
+⍝ assert: assertNull(result.lookupValue(APLString.make("x").makeTypeQualifiedKey()))
 map:with 3 2 ⍴ "foo" 1 "bar" 2 "a" 3

@@ -1,1 +1,3 @@
+⍝ assert: assert1DArray(arrayOf(5, 10, InnerAPLNil(), InnerAPLNil()), result)
+⍝ assert: assert1DArray(arrayOf(InnerAPLNil(), InnerAPLNil(), 10, 5), result)
 ∧ 10 5 null null

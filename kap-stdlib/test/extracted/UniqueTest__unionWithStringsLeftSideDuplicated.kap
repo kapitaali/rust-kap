@@ -1,1 +1,2 @@
+⍝ assert: assertString("fooabc", result)
 "foo" ∪ "abc"

@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf("test", "foo"), result)
 int:symbolName 'foo:test

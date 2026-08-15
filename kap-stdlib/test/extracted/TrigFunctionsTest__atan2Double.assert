@@ -1,0 +1,15 @@
+assert1DArray(
+                arrayOf(
+                    NearDouble(-2.82955053202726),
+                    NearDouble(-2.8501358591119264),
+                    NearDouble(-3.131593986703168),
+                    NearDouble(3.141592653589793),
+                    NearDouble(2.356194490192345),
+                    NearDouble(1.5707963267948966),
+                    NearDouble(1.5706963267952299),
+                    NearDouble(0.8334792295124032),
+                    NearDouble(0.8760088722858688),
+                    NearDouble(1.373400766945016),
+                    NearDouble(1.5497994129783337),
+                    NearDouble(1.3258176671974442)),
+                result)

@@ -1,0 +1,4 @@
+assertTrue(result.isScalar())
+assertTrue(result !is APLSingleValue)
+assertDimension(dimensionsOfSize(2, 9), inner)
+assertArrayContent(arrayOf(10, 11, 12, 20, 21, 22, 30, 31, 32, 13, 14, 15, 23, 24, 25, 33, 34, 35), inner)

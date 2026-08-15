@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(21, parseAPLExpression("10 +⌻ 11"))
 10 +⌻ 11

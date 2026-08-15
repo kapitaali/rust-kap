@@ -1,1 +1,2 @@
+⍝ assert: assertSym("bar", "foo", result)
 namespace("foo") 'bar

@@ -1,0 +1,1 @@
+assertSimpleNumber(0, parseAPLExpression("≡1J3"))

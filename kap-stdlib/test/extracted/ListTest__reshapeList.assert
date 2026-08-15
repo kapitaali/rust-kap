@@ -1,0 +1,2 @@
+assertDimension(dimensionsOfSize(2, 2), result)
+assertListContent(listOf(1, 2), result.valueAt(i))

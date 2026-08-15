@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(99, parseAPLExpression("⍬⊃99"))
 ⍬⊃99

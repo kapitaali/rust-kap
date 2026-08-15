@@ -1,0 +1,3 @@
+assert1DArray(arrayOf(InnerBigIntOrLong(1), InnerBigIntOrLong(0)), result)
+assertEquals(ArrayMemberType.BOOLEAN, result.specialisedType)
+assertTrue(result.isDepth0)

@@ -1,1 +1,2 @@
+⍝ assert: assertAPLNull(parseAPLExpression("2 ~ 2"))
 2 ~ 2

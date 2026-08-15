@@ -1,1 +1,3 @@
+⍝ assert: assertEquals(findValue, value, "Value for key does not match")
+⍝ assert: assertDimension(dimensionsOfSize(2, 2), result)
 a ← map:with 2 2 ⍴ "foo" "abc" "bar" "bcd" ◊ map:entries a

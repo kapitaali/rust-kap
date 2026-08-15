@@ -1,1 +1,16 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    NearDouble(3.257299494980466),
+                    NearDouble(3.132091952673165),
+                    NearDouble(1.0001499937509373),
+                    NearDouble(0.999),
+                    NearDouble(0.01414213562373095),
+                    NearDouble(0.9),
+                    NearDouble(1.000000005),
+                    NearDouble(1.4859343861691876),
+                    NearDouble(1.5621139555102885),
+                    NearDouble(10.198039027185569),
+                    NearDouble(100.0220475695234),
+                    NearDouble(41.23105725057267)),
+                result)
 (¯3.1 ¯3.0 ¯1.0001 ¯0.999 ¯0.01 0.0 0.0001 0.999 1.0001 2.0 2.1 10.0000001) math:hypot ¯1.0 ¯0.9 ¯0.01 ¯0 0.01 0.9 1.0 1.1 1.2 10.0 100.0 40.000001

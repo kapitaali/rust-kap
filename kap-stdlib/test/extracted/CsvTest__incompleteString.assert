@@ -1,0 +1,127 @@
+assertFailsWith<CsvParseException>
+assertDimension(dimensionsOfSize(2, 3), result)
+assertDoubleWithRange(Pair(1.19999, 1.20001), result.valueAt(0))
+assertDoubleWithRange(Pair(0.29999, 0.30001), result.valueAt(1))
+assertDoubleWithRange(Pair(3.99999, 4.00001), result.valueAt(2))
+assertString(".", result.valueAt(3))
+assertSimpleDouble(100.0, result.valueAt(4))
+assertSimpleDouble(-2.5e3, result.valueAt(5))
+assertDimension(dimensionsOfSize(0, 0), result)
+assertDimension(dimensionsOfSize(9, 4), result)
+assertArrayContent(
+            arrayOf<Any>(
+                1, 2, 3, 4, "", "", "", "", 5, 6, 7, 8,
+                "", "", "", "", "", "", "", "", 9, 10, 11, 12,
+                13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24),
+            result)
+assertDimension(dimensionsOfSize(2, 3), result)
+assertArrayContent(arrayOf("foo", "bar", "xyztest\nnewline", "w", "ab\ncd\nefgh\nij", "a\nb"), result)
+assertDimension(dimensionsOfSize(4, 2), result)
+assertArrayContent(arrayOf<Any>("foo", "bar", 1, 2, "test\n\nabc\n\n\nx", "\n\na", "\n\n", "b"), result)
+assertDimension(dimensionsOfSize(4, 2), result)
+assertArrayContent(arrayOf("foo", "bar", "abc\"def", "\"abc", "def\"", "\"\"fgh", "\"", "ab"), result)
+assertDimension(dimensionsOfSize(3, 3), result)
+assertArrayContent(arrayOf<Any>(" foo", "bar", 1234, "  abc  ", "\"test\"", " def", "  1  ", 2, "12abc"), result)
+assertDimension(dimensionsOfSize(2, 3), result)
+assertArrayContent(arrayOf("a", "b", "c", "ABC", "bar", "xyz"), result)
+assertDimension(dimensionsOfSize(2, 3), result)
+assertArrayContent(arrayOf<Any>("    \"123\"  ", "   \"456\"", "ABC", "  xyz  ", "    cvb", "98765"), result)
+assertDimension(dimensionsOfSize(3, 3), result)
+assertArrayContent(arrayOf("foo", "bar", "test", "1", "2", "1.5", "4", "1000000000000000000000000000000000000000000000000000000000", "aaa"), result)
+assertDimension(dimensionsOfSize(2, 3), result)
+assertArrayContent(arrayOf("foo", "bar", "test", "1", "2", ""), result)
+assertDimension(dimensionsOfSize(2, 3), result)
+assertArrayContent(arrayOf("foo", "bar", "test", "1", "2", ""), result)
+assertLabels(
+            listOf(
+                null,
+                listOf("a", "b", "c")
+            ), result)
+assertDimension(dimensionsOfSize(2, 3), result)
+assertArrayContent(arrayOf("foo", "bar", "test", "1", "2", ""), result)
+assertLabels(
+            listOf(
+                listOf("a", "b"),
+                null
+            ), result)
+assertDimension(dimensionsOfSize(3, 3), result)
+assertArrayContent(arrayOf("1", "2", "3", "4", "5", "6", "7", "8", "9"), result)
+assertLabels(
+            listOf(
+                null,
+                listOf("foo", "bar", "test")
+            ), result)
+assertDimension(dimensionsOfSize(3, 3), result)
+assertArrayContent(arrayOf("1", "2", "3", "4", "5", "6", "7", "8", "9"), result)
+assertLabels(
+            listOf(
+                listOf("abctest", "abcd", "zxcvbnm"),
+                null
+            ), result)
+assertDimension(dimensionsOfSize(3, 3), result)
+assertArrayContent(arrayOf("1", "2", "3", "4", "5", "6", "7", "8", "9"), result)
+assertLabels(
+            listOf(
+                listOf("abctest", "abcd", "zxcvbnm"),
+                listOf("aa", "bb", "cccc")
+            ), result)
+assertDimension(dimensionsOfSize(3, 3), result)
+assertArrayContent(arrayOf("1", "2", "3", "4", "5", "6", "7", "8", "9"), result)
+assertLabels(
+            listOf(
+                null,
+                listOf("foo", "bar", "")
+            ), result)
+assertDimension(dimensionsOfSize(4, 3), result)
+assertArrayContent(arrayOf("1", "2", "3", "4", "5", "6", "", "", "", "7", "8", "9"), result)
+assertLabels(
+            listOf(
+                listOf("abctest", "abcd", "", "zxcvbnm"),
+                null
+            ), result)
+assertDimension(dimensionsOfSize(5, 4), result)
+assertArrayContent(
+            arrayOf(
+                "foo", "bar", "1234", "12.25",
+                "11", "xyz", "a", "b",
+                "a", "", "b", "c",
+                "abc", "  def ", "11", "11.5",
+                "123456789012345678901234567890", "-2", "-1.5", "-1234567890123456789012345678900000"),
+            result)
+assertDimension(dimensionsOfSize(5, 4), result)
+assertArrayContent(
+            arrayOf(
+                "foo", "bar", 1234, InnerDouble(12.25),
+                11, "xyz", "a", "b",
+                "a", "", "b", "c",
+                "abc", "  def ", 11, InnerDouble(11.5),
+                InnerBigIntOrLong("123456789012345678901234567890"), -2, InnerDouble(-1.5), InnerBigIntOrLong("-1234567890123456789012345678900000")),
+            result)
+assertDimension(dimensionsOfSize(4, 3), result)
+assertArrayContent(
+                arrayOf(
+                    "b", "1", "2",
+                    "c", "q", "w",
+                    "d", "100", "aa",
+                    "e", "1.5", "2.5"),
+                result)
+assertLabels(listOf(null, listOf("a", "foo", "abc")), result)
+assertDimension(dimensionsOfSize(5, 2), result)
+assertArrayContent(
+                arrayOf(
+                    "foo", "abc",
+                    "1", "2",
+                    "q", "w",
+                    "100", "aa",
+                    "1.5", "2.5"),
+                result)
+assertLabels(listOf(listOf("a", "b", "c", "d", "e"), null), result)
+assertDimension(dimensionsOfSize(4, 2), result)
+assertArrayContent(
+                arrayOf(
+                    "1", "2",
+                    "q", "w",
+                    "100", "aa",
+                    "1.5", "2.5"),
+                result)
+assertLabels(listOf(listOf("b", "c", "d", "e"), listOf("foo", "abc")), result)

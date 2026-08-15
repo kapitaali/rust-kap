@@ -1,1 +1,4 @@
+⍝ assert: assertDimension(dimensionsOfSize(3), result)
+⍝ assert: assertDimension(dimensionsOfSize(2, 9), inner)
+⍝ assert: assertArrayContent(expected, inner)
 ,/[0] 3 3 ⍴ (2 3 ⍴ 10+⍳6) (2 3 ⍴ 20+⍳6) (2 3 ⍴ 30+⍳6) 

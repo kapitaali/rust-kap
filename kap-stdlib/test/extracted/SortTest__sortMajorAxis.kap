@@ -1,1 +1,3 @@
+⍝ assert: assertDimension(dimensionsOfSize(7, 2), result)
+⍝ assert: assertArrayContent(arrayOf(1, 1, 1, 1, 1, 2, 1, 2, 1, 4, 1, 4, 2, 1), result)
 ∧7 2 ⍴ 1 2 2 1 1 1 1 2 1 4 1 1 1 4

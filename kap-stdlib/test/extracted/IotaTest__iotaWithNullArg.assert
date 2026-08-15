@@ -1,0 +1,2 @@
+assertDimension(emptyDimensions(), result)
+assertAPLNull(inner)

@@ -1,1 +1,3 @@
+⍝ assert: assertFailsWith<IncompatibleTypeException>
+⍝ assert: assertFailsWith<IncompatibleTypeException>
 null⌊null

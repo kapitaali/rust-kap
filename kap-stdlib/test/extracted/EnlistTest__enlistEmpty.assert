@@ -1,0 +1,2 @@
+assertAPLNull(result)
+assertEquals(ArrayMemberType.ALL, result.specialisedType)

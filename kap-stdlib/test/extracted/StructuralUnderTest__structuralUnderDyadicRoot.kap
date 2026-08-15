@@ -1,1 +1,2 @@
+⍝ assert: assertNearDouble(NearDouble(2197.0), parseAPLExpression("(4+)⍢(3√) 729"))
 (4+)⍢(3√) 729

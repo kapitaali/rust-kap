@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(0), result)
 ∇ foo (a) { ⍴ fromList a } ⋄ foo⟦⟧

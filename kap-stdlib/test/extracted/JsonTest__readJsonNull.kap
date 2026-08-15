@@ -1,1 +1,2 @@
+⍝ assert: assertAPLNil(result)
 json:readString "null"

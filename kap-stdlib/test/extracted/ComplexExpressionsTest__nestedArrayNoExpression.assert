@@ -1,0 +1,3 @@
+assertDimension(dimensionsOfSize(2), result)
+assertArrayContent(arrayOf(1, 2), result.valueAt(0))
+assertArrayContent(arrayOf(3, 4), result.valueAt(1))

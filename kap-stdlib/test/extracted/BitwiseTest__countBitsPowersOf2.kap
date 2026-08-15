@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(expected, result)
 ⍸∵ 2⋆1+⍳60

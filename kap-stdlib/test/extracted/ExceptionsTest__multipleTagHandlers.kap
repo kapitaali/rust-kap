@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(6, result)
 {'foo throw 1}catch 4 2 ⍴ 'xyz λ{2+⍺} 'test123 λ{3+⍺} 'bar λ{4+⍺} 'foo λ{5+⍺}

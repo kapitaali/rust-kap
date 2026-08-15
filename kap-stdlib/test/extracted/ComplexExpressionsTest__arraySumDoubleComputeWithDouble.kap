@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(NearDouble(3.2), NearDouble(2.2)), result)
 2.0 + 1.1 0.1 + 0.1 0.1

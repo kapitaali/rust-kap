@@ -1,0 +1,12 @@
+assertDimension(dimensionsOfSize(9), result)
+assertArrayContent(
+                arrayOf(
+                    InnerAPLNull(),
+                    "a",
+                    InnerAPLNull(),
+                    InnerAPLNull(),
+                    InnerAPLNull(),
+                    "bc",
+                    "de",
+                    InnerAPLNull(),
+                    "f"), result)

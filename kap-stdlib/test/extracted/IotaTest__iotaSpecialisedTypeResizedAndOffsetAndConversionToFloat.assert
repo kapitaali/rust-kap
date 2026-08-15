@@ -1,0 +1,3 @@
+assertEquals(ArrayMemberType.BOOLEAN, parseAPLExpression("5 5 ⍴ 10.0+⍳0").specialisedType)
+assertEquals(ArrayMemberType.DOUBLE, parseAPLExpression("5 5 ⍴ 10.0+⍳3").specialisedType)
+assertEquals(ArrayMemberType.DOUBLE, parseAPLExpression("5 5 ⍴ 10.0+⍳100").specialisedType)

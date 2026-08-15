@@ -1,1 +1,13 @@
+⍝ assert: assertDimension(dimensionsOfSize(2, 4), result)
+⍝ assert: assertArrayContent(
+                arrayOf(
+                    Inner1Dn(1, 2),
+                    Inner1Dn(3, 4, 5),
+                    Inner1Dn(6, 7),
+                    Inner1Dn(8, 9, 10, 11, 12),
+                    Inner1Dn(13, 14),
+                    Inner1Dn(15, 16, 17, 18),
+                    Inner1Dn(19, 20),
+                    Inner1Dn(21)),
+                result)
 x ← encoder:encode 2 4 ⍴ (1 2) (3 4 5) (6 7) (8 9 10 11 12) (13 14) (15 16 17 18) (19 20) (,21) ⋄ encoder:decode x

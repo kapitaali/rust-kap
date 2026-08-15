@@ -1,1 +1,11 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    NearDouble(0.0),
+                    NearDouble(1.557407725),
+                    NearComplex(Complex(0.0, 0.761594156)),
+                    NearComplex(Complex(1.64137959, 0.8338942274)),
+                    NearComplex(Complex(-0.1724237513, 0.3932289478)),
+                    NearComplex(Complex(4.303303588, -2.586389822)),
+                    NearComplex(Complex(-0.000001645359989, -1.000000242))),
+                result)
 math:tan 0j0 1j0 0j1 1.1j0.2 ¯0.2j0.4 1.4j¯0.1 ¯4j¯7 

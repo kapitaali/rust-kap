@@ -1,0 +1,20 @@
+assert1DArray(
+                arrayOf(
+                    NearComplex(Complex(-12.41679258, 3.141592654)),
+                    NearComplex(Complex(-7.601002205, 3.141592654)),
+                    NearComplex(Complex(-5.299291916, 3.141592654)),
+                    NearComplex(Complex(-1.797456568, 3.141592654)),
+                    NearComplex(Complex(-1.762747174, 3.141592654)),
+                    NearComplex(Complex(-0.01414201778, 3.141592654)),
+                    NearComplex(Complex(0.0, 3.141592654)),
+                    NearComplex(Complex(0.0, 3.096867566)),
+                    NearComplex(Complex(-1.110223025E-16, 1.580796493)),
+                    NearComplex(Complex(0.0, 0.04472508717)),
+                    NearDouble(0.0),
+                    NearDouble(0.01414201778),
+                    NearDouble(1.316957897),
+                    NearDouble(1.372859144),
+                    NearDouble(2.993232896),
+                    NearDouble(5.298293366),
+                    NearDouble(14.49623589)),
+                result)

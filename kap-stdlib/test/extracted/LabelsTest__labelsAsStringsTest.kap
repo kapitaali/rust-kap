@@ -1,1 +1,3 @@
+⍝ assert: assert1DArray(arrayOf(1, 2), result)
+⍝ assert: assertEquals(listOf("a", "b"), labels)
 "a" "b" labels 1 2

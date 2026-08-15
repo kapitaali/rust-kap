@@ -1,0 +1,1 @@
+assertString("abcd", parseAPLExpression("@a … @d"))

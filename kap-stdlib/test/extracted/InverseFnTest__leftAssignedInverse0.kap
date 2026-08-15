@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(7, parseAPLExpression("((1+)˝) 8"))
 ((1+)˝) 8

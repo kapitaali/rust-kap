@@ -1,1 +1,7 @@
+⍝ assert: assertDimension(dimensionsOfSize(3, 3), result)
+⍝ assert: assertArrayContent(arrayOf(0, 1, 2, 3, 4, 5, 6, 7, 8), result)
+⍝ assert: assertNotNull(labels)
+⍝ assert: assertEquals(2, labelList.size)
+⍝ assert: assertLabelList(listOf("g", "h", "i"), labelList[0])
+⍝ assert: assertLabelList(listOf("d", "e", "f"), labelList[1])
 g

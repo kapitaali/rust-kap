@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(1, result)
 a ← "a1" "a2" labels 1 2 ⋄ "a1" s:col a

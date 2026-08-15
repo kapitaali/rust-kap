@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(1, result)
 3 ⍷ 3.0

@@ -1,1 +1,3 @@
+⍝ assert: assertTrue(v is APLDouble, "expected APLDouble, actual type: ${v::class.simpleName}")
+⍝ assert: assertSimpleDouble(3.0, v)
 math:floorc 3.4J0.01

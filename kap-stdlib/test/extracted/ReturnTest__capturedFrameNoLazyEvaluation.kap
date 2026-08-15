@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(30, result)
 { S ⇐ → ◊ 100 + { S ⍵+20 ◊ ⍵+1 } 10 } 0

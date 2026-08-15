@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(1, result)
 ≡ comp +/¨ ⍳4 5 6

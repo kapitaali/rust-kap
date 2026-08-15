@@ -1,1 +1,3 @@
+⍝ assert: assert1DArray(arrayOf(1, 1, 0, 1), result)
+⍝ assert: assertTrue(result.isDepth0)
 (int:asBigint 1) (int:asBigint 0) (int:asBigint 1) (int:asBigint 0) ⍲ (int:asBigint 0) (int:asBigint 0) (int:asBigint 1) (int:asBigint 1)

@@ -1,0 +1,4 @@
+assertIs(result)
+assertEquals(2, result.listSize())
+assertSimpleNumber(2, result.listElement(0))
+assertSimpleNumber(11, result.listElement(1))

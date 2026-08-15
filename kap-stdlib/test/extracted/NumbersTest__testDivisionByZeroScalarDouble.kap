@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleDouble(Double.POSITIVE_INFINITY, result)
 1.2÷0.0

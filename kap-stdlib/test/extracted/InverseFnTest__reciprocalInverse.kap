@@ -1,1 +1,2 @@
+⍝ assert: assertRational(Rational.make(1, 8), parseAPLExpression("÷˝ 8"))
 ÷˝ 8

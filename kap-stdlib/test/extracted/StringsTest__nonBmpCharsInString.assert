@@ -1,0 +1,2 @@
+assertDimension(dimensionsOfSize(1), result)
+assertString("\uD835\uDC9F", result)

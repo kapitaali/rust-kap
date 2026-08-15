@@ -1,0 +1,1 @@
+assertString("testabcfoo", result)

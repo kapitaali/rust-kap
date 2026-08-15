@@ -1,0 +1,4 @@
+assertIs(result)
+assertIs(result.instance)
+assertEquals("ghi", result.instance.nodeName)
+assertEquals("test0", result.instance.attributes.getNamedItem("a").nodeValue)

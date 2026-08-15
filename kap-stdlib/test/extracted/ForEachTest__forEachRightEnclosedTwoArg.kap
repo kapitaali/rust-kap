@@ -1,1 +1,8 @@
+⍝ assert: assertDimension(dimensionsOfSize(3), result)
+⍝ assert: assertDimension(dimensionsOfSize(3), v)
+⍝ assert: assertArrayContent(arrayOf(10011, 10012, 10013), v)
+⍝ assert: assertDimension(dimensionsOfSize(3), v)
+⍝ assert: assertArrayContent(arrayOf(10021, 10022, 10023), v)
+⍝ assert: assertDimension(dimensionsOfSize(3), v)
+⍝ assert: assertArrayContent(arrayOf(10031, 10032, 10033), v)
 10 20 30 {10000+⍵+⍺}¨ ⊂1 2 3

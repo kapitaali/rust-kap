@@ -1,1 +1,2 @@
+⍝ assert: assertDimension(dimensionsOfSize(3, 3, 0, 2, 2), result)
 3 3 :match 2 2⍴ ⍬

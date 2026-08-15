@@ -1,2 +1,4 @@
+⍝ assert: assertIs(result)
+⍝ assert: assertEquals(0, result.listSize())
 ∇ foo { if(isLocallyBound '⍺) { throw "got left argument" } else {⍵} } 
 foo⟦⟧

@@ -1,0 +1,1 @@
+assert1DArray(arrayOf(Inner1Dn(20), Inner1Dn(10, 40), Inner1Dn(30)), result)

@@ -1,1 +1,2 @@
+⍝ assert: assertString("fooAbarAbar", result)
 "x[0-9]*" regex:replace ("foox11barx8bar";"A")

@@ -1,1 +1,14 @@
+⍝ assert: assertDimension(dimensionsOfSize(3, 3, 3), result)
+⍝ assert: assertArrayContent(
+                arrayOf(
+                    1, 99, 99,
+                    4, 99, 99,
+                    7, 99, 99,
+                    99, 11, 99,
+                    99, 14, 99,
+                    99, 17, 99,
+                    99, 99, 21,
+                    99, 99, 24,
+                    99, 99, 27
+                ), result)
 0 1 0 (⍉ int:proto 99)˝ 3 3 ⍴ 1 4 7 11 14 17 21 24 27

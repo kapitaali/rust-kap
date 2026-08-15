@@ -1,0 +1,2 @@
+assertSimpleNumber(10, result)
+assertSimpleNumber(20, result)

@@ -1,1 +1,19 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    NearComplex(Complex(-1.570796327, 1.797456568)),
+                    NearComplex(Complex(-1.570796327, 1.762747174)),
+                    NearComplex(Complex(-1.570796327, 0.4435682544)),
+                    NearDouble(-1.570796327),
+                    NearDouble(-1.119769515),
+                    NearDouble(-0.01000016667),
+                    NearDouble(0.0),
+                    NearDouble(0.01000016667),
+                    NearDouble(1.119769515),
+                    NearDouble(1.570796327),
+                    NearComplex(Complex(1.570796327, -0.4435682544)),
+                    NearComplex(Complex(1.570796327, -0.6223625037)),
+                    NearComplex(Complex(1.570796327, -2.993222846)),
+                    NearComplex(Complex(1.570796327, -5.298292366)),
+                    NearComplex(Complex(1.570796327, -4.381870373))),
+                result)
 math:asin ¯3.1 ¯3.0 ¯1.1 ¯1.0 ¯0.9 ¯0.01 ¯0 0.01 0.9 1.0 1.1 1.2 10.0 100.0 40.000001

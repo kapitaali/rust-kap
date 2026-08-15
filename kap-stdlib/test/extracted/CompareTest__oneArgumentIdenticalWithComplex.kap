@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(0, parseAPLExpression("≡1J3"))
 ≡1J3

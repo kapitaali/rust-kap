@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(77, result)
 ((11+)(22+)) 44

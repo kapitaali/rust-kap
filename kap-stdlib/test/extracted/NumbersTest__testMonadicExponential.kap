@@ -1,1 +1,8 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    NearDouble(2.718281828),
+                    NearDouble(7.389056099),
+                    NearDouble(20.08553692),
+                    NearDouble(0.00004539992976, 8)),
+                result)
 ⋆1 2 (int:asBigint 3) ¯10

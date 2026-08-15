@@ -1,1 +1,3 @@
+⍝ assert: assertDimension(dimensionsOfSize(2, 3), result)
+⍝ assert: assertArrayContent(arrayOf(3003, 2001, 1000, 3012, 2007, 1003), result)
 ⌽[1] +\[1] 2 3 ⍴ 1000+⍳6

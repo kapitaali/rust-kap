@@ -1,1 +1,2 @@
+⍝ assert: assert1DArray(arrayOf(0, 1, 0, 1, 0, 1), result)
 6 ⍴ 2 ⍴ ⍳100

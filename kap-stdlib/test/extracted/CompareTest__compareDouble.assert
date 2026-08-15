@@ -1,0 +1,7 @@
+assertSimpleNumber(1, parseAPLExpression("3.0 cmp 1.0"))
+assertSimpleNumber(-1, parseAPLExpression("10.0 cmp 110.0"))
+assertSimpleNumber(0, parseAPLExpression("1.0 cmp 1.0"))
+assertSimpleNumber(0, parseAPLExpression("¯3.0 cmp ¯3.0"))
+assertSimpleNumber(0, parseAPLExpression("(1.0÷0.0) cmp (1.0÷0.0)"))
+assertSimpleNumber(0, parseAPLExpression("(¯1.0÷0.0) cmp (¯1.0÷0.0)"))
+assertSimpleNumber(-1, parseAPLExpression("4.0 cmp (1.0÷0.0)"))

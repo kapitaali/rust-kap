@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<IncompatibleTypeParseException>
 "testabc"[2] ← 3

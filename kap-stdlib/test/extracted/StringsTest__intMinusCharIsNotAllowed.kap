@@ -1,1 +1,2 @@
+⍝ assert: assertFailsWith<APLEvalException>
 98 200 - "aj"

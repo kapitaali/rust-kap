@@ -1,1 +1,2 @@
+⍝ assert: assertEnclosed(Inner1D(arrayOf(1, 0)), result)
 (3 3 ⍴ ⍳9) ⍳ 3

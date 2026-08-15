@@ -1,1 +1,8 @@
+⍝ assert: assert1DArray(
+                arrayOf(
+                    Inner1Dn(2, 4, 3),
+                    Inner1Dn(-2, -2, -2),
+                    Inner1Dn(Complex(0.0, 3.0), Complex(0.0, 3.0)),
+                    Inner1Dn(Complex(0.0, -4.0), Complex(0.0, -1.0))),
+                result)
 ⌊⍢| (2 4.3 3.9) (¯2 ¯2.3 ¯2.9) (0j3 0j3.1) (0j¯4 0j¯1.1)

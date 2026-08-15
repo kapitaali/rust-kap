@@ -1,1 +1,4 @@
+⍝ assert: assertDimension(dimensionsOfSize(2, 4), result)
+⍝ assert: assertArrayContent(arrayOf(1, 2, 3, 4, 3, 4, InnerDouble(5.5), InnerDouble(5.5)), result)
+⍝ assert: assertEquals(ArrayMemberType.ATOM, result.specialisedType)
 (⊃ int:proto 5.5) (1 2 3 4) (3 4)

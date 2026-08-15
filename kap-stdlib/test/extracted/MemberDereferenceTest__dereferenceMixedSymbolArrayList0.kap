@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(30, result)
 (map:with 'foo (10 20 (30;40;"abc")) 'bar 10).default:foo.(2).(0)

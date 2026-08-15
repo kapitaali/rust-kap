@@ -1,1 +1,2 @@
+⍝ assert: assertSimpleNumber(9, result)
 {S ⇐ → ⋄ comp {(S⍣(81=×⍨⍵)) ⍵}¨⍳10} 0
