@@ -17,6 +17,31 @@ use std::cmp::Ordering;
 use crate::{APLValue, AplError, AplRef, Engine, Environment};
 use std::rc::Rc;
 
+/// Adjust a (possibly negative) index into a valid 0-based position within `axis_size`,
+/// matching Kap's `Dimensions.checkAndAdjustSelectedIndex` (dimension.kt):
+/// non-negative `i` must satisfy `0 <= i < axis_size`; negative `i` counts from the end
+/// (`axis_size + i`), valid when `-axis_size <= i`. Anything else is out of bounds.
+fn check_and_adjust_selected_index(index: i64, axis_size: usize) -> Result<usize, AplError> {
+    let n = axis_size as i64;
+    if index >= 0 {
+        if index >= n {
+            return Err(AplError::runtime(format!(
+                "index {} is outside valid range (axis size {})",
+                index, n
+            )));
+        }
+        Ok(index as usize)
+    } else {
+        if index < -n {
+            return Err(AplError::runtime(format!(
+                "index {} is outside valid range (axis size {})",
+                index, n
+            )));
+        }
+        Ok((n + index) as usize)
+    }
+}
+
 impl Environment {
     /// Look up a symbol, walking parent environments. Returns a shared ref to the value.
     pub fn lookup(&self, name: &str, ns: &Option<String>) -> Option<AplRef<APLValue>> {
@@ -180,6 +205,11 @@ impl Engine {
                 ))
             }
             Instr::Value(v) => Ok(v.clone()),
+            Instr::Index { array, selector } => {
+                let arr = self.eval_instr(array, env)?;
+                let sel = self.eval_instr(selector, env)?;
+                self.pick(&arr, &sel)
+            }
         }
     }
 
@@ -301,7 +331,10 @@ impl Engine {
             "≤" => self.cmp2(left_val, right_val, |o| o != Ordering::Greater, "≤"),
             "≥" => self.cmp2(left_val, right_val, |o| o != Ordering::Less, "≥"),
             "⍳" | "iota" => self.iota(right_val),
-            "⍴" | "rho" => self.shape(right_val),
+            "⍴" | "rho" => match left_val {
+                None => self.shape(right_val),
+                Some(l) => self.reshape(l, right_val),
+            },
             "≢" | "tally" => self.tally(right_val),
             "⊃" | "first" => self.first(right_val),
             "," => self.catenate(left_val, right_val),
@@ -381,7 +414,6 @@ impl Engine {
         right: &Box<Instr>,
         env: &AplRef<Environment>,
     ) -> Result<AplRef<APLValue>, AplError> {
-        let right_val = self.eval_instr(right, env)?;
         match left {
             None => {
                 // --- Monadic ---
@@ -664,6 +696,59 @@ impl Engine {
         }
     }
 
+    fn reshape(&self, left_val: AplRef<APLValue>, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        // Dyadic `⍴`: `(dims) ⍴ data` builds an array of shape `dims`, filled by
+        // cycling through the flat elements of `data` (Kap/APL reshape semantics).
+        let dims_val = left_val.force(self)?;
+        let mut dims: Vec<usize> = Vec::new();
+        match dims_val.as_ref() {
+            APLValue::Array(a) => {
+                for e in a.elements() {
+                    if let APLValue::Number(KapNumber::Long(v)) = e.as_ref() {
+                        if *v < 0 {
+                            return Err(AplError::runtime("reshape dimensions must be non-negative".into()));
+                        }
+                        dims.push(*v as usize);
+                    } else {
+                        return Err(AplError::runtime("reshape dimensions must be integers".into()));
+                    }
+                }
+            }
+            APLValue::Number(KapNumber::Long(v)) => {
+                if *v < 0 {
+                    return Err(AplError::runtime("reshape dimensions must be non-negative".into()));
+                }
+                dims.push(*v as usize);
+            }
+            _ => return Err(AplError::runtime("reshape dimensions must be an array or integer".into())),
+        }
+        if dims.is_empty() {
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(vec![], ArrayData::Nested(vec![]))))));
+        }
+        let total: usize = dims.iter().product();
+        // Guard against absurd sizes (the OOM case was an ~1e12 product). Empty arrays
+        // (total == 0) are VALID in Kap and used widely, so do not reject them here.
+        if total > 100_000_000 {
+            return Err(AplError::runtime("reshape result too large".into()));
+        }
+        let data = right_val.force(self)?;
+        let mut src: Vec<AplRef<APLValue>> = match data.as_ref() {
+            APLValue::Array(a) => a.elements(),
+            other => vec![Rc::new(other.clone())],
+        };
+        if src.is_empty() {
+            // Filling with a prototype: use a scalar 0 (matches Kap's empty-fill behaviour for
+            // numeric reshape sources).
+            src = vec![Rc::new(APLValue::Number(KapNumber::Long(0)))];
+        }
+        let total: usize = dims.iter().product();
+        let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(total);
+        for i in 0..total {
+            out.push(Rc::new(src[i % src.len()].as_ref().clone()));
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(dims, ArrayData::Nested(out))))))
+    }
+
     fn tally(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
         match right_val.as_ref() {
             APLValue::Array(a) => Ok(Rc::new(APLValue::Number(KapNumber::Long(
@@ -812,6 +897,232 @@ impl Engine {
             vec![1],
             ArrayData::Nested(vec![right_val]),
         )))))
+    }
+
+    /// Convert an `APLValue` into a 0-based integer index. Accepts Long and Double
+    /// (truncated toward zero, matching Kap's numeric->int coercion).
+    fn index_to_i64(&self, v: &APLValue) -> Result<i64, AplError> {
+        match v {
+            APLValue::Number(KapNumber::Long(i)) => Ok(*i),
+            APLValue::Number(KapNumber::Double(f)) => Ok(*f as i64),
+            _ => Err(AplError::runtime("array index must be an integer".into())),
+        }
+    }
+
+    /// Kap bracket indexing `target[selector]`, matching the Kotlin reference
+    /// (`lookup.kt`): `PickResultValue` for a single `;`-section, and
+    /// `AccessFromIndexAPLFunction` (per-axis selection) for `;`-separated sections.
+    ///
+    /// Single section (no `;`): result shape = the index's shape; each scalar cell of the
+    /// index selects from `target` (a scalar index discloses to a scalar). Negative
+    /// indices count from the end; out-of-range errors.
+    ///
+    /// Multiple sections (`a[r;c]`): per target axis
+    ///   - `⍬`/empty section -> select the *entire* axis ("all"),
+    ///   - scalar            -> collapse to that position (axis dropped from result),
+    ///   - vector of rank s  -> pick those positions; contributes s axes (its shape).
+    /// A fully-collapsed selection (every axis a scalar) errors, matching Kap.
+    fn pick(&self, target: &APLValue, selector: &APLValue) -> Result<AplRef<APLValue>, AplError> {
+        let target = target.force(self)?;
+        let selector = selector.force(self)?;
+
+        // Selector -> axis specs; `⍬`/Null means "all" for that axis.
+        let specs: Vec<AplRef<APLValue>> = match selector.as_ref() {
+            APLValue::Array(a) => a.elements(),
+            other => vec![Rc::new(other.clone())],
+        };
+
+        // ---- Single section: PickResultValue ----
+        if specs.len() == 1 {
+            let index = specs.into_iter().next().unwrap();
+            let index = index.force(self)?;
+            if matches!(index.as_ref(), APLValue::Null) {
+                return Ok(Rc::new(APLValue::Null));
+            }
+            let target_elems = match target.as_ref() {
+                APLValue::Array(a) => a.elements(),
+                _ => vec![Rc::new(target.as_ref().clone())],
+            };
+            let target_rank = match target.as_ref() {
+                APLValue::Array(a) => a.rank(),
+                _ => 0,
+            };
+            if target_rank != 1 {
+                return Err(AplError::runtime(format!(
+                    "pick into rank-{} array requires coordinate indices",
+                    target_rank
+                )));
+            }
+            let idx_dims = match index.as_ref() {
+                APLValue::Array(a) => a.dimensions.clone(),
+                _ => vec![],
+            };
+            let idx_elems = match index.as_ref() {
+                APLValue::Array(a) => a.elements(),
+                other => vec![Rc::new(other.clone())],
+            };
+            let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(idx_elems.len());
+            for e in &idx_elems {
+                let i = self.index_to_i64(e.as_ref())?;
+                let adj = check_and_adjust_selected_index(i, target_elems.len())?;
+                out.push(Rc::new(target_elems[adj].as_ref().clone()));
+            }
+            if idx_dims.is_empty() {
+                Ok(out.into_iter().next().unwrap())
+            } else {
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    idx_dims,
+                    ArrayData::Nested(out),
+                )))))
+            }
+        } else {
+            // ---- Multi-axis: AccessFromIndex ----
+            let bdims = match target.as_ref() {
+                APLValue::Array(a) => a.dimensions.clone(),
+                _ => vec![1],
+            };
+            let r = bdims.len();
+            let na = specs.len();
+            if na > r {
+                return Err(AplError::runtime(format!(
+                    "too many index axes ({} specifiers for rank-{})",
+                    na, r
+                )));
+            }
+            let bstride: Vec<usize> = {
+                let mut s = vec![1usize; r];
+                for k in (0..r).rev() {
+                    if k + 1 < r {
+                        s[k] = s[k + 1] * bdims[k + 1];
+                    }
+                }
+                s
+            };
+
+            enum Spec {
+                All(usize),
+                Collapsed(usize),
+                VecIndex {
+                    v_dims: Vec<usize>,
+                    v_elems: Vec<AplRef<APLValue>>,
+                    out_start: usize,
+                },
+            }
+
+            let mut plans: Vec<(usize, Spec)> = Vec::with_capacity(r);
+            let mut out_dims: Vec<usize> = Vec::new();
+            let mut next_out = 0usize;
+            for k in 0..r {
+                let spec_val = if k < na {
+                    specs[k].force(self)?
+                } else {
+                    Rc::new(APLValue::Null)
+                };
+                match spec_val.as_ref() {
+                    APLValue::Null => {
+                        let axis = next_out;
+                        out_dims.push(bdims[k]);
+                        next_out += 1;
+                        plans.push((k, Spec::All(axis)));
+                    }
+                    APLValue::Array(v) => {
+                        let v_dims = v.dimensions.clone();
+                        let v_elems = v.elements();
+                        let out_start = next_out;
+                        for &d in &v_dims {
+                            out_dims.push(d);
+                        }
+                        next_out += v_dims.len();
+                        plans.push((
+                            k,
+                            Spec::VecIndex {
+                                v_dims,
+                                v_elems,
+                                out_start,
+                            },
+                        ));
+                    }
+                    other => {
+                        let i = self.index_to_i64(other)?;
+                        let adj = check_and_adjust_selected_index(i, bdims[k])?;
+                        plans.push((k, Spec::Collapsed(adj)));
+                    }
+                }
+            }
+
+            let target_elems = match target.as_ref() {
+                APLValue::Array(a) => a.elements(),
+                _ => vec![Rc::new(target.as_ref().clone())],
+            };
+
+            if out_dims.is_empty() {
+                // Fully-collapsed selection (every axis a scalar): disclose the single element.
+                let mut src_coords = vec![0usize; r];
+                for (k, spec) in &plans {
+                    if let Spec::Collapsed(c) = spec {
+                        src_coords[*k] = *c;
+                    }
+                }
+                let mut tflat = 0usize;
+                for k in 0..r {
+                    tflat += src_coords[k] * bstride[k];
+                }
+                return Ok(Rc::new(target_elems[tflat].as_ref().clone()));
+            }
+
+            let ostride: Vec<usize> = {
+                let mut s = vec![1usize; out_dims.len()];
+                for k in (0..out_dims.len()).rev() {
+                    if k + 1 < out_dims.len() {
+                        s[k] = s[k + 1] * out_dims[k + 1];
+                    }
+                }
+                s
+            };
+
+            let result_size: usize = out_dims.iter().product();
+            if result_size == 0 || result_size > 100_000_000 {
+                return Err(AplError::runtime("index selection result too large".into()));
+            }
+            let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(result_size);
+            let mut out_coords = vec![0usize; out_dims.len()];
+            for pos in 0..result_size {
+                let mut rem = pos;
+                for ax in 0..out_dims.len() {
+                    out_coords[ax] = rem / ostride[ax];
+                    rem %= ostride[ax];
+                }
+                let mut src_coords = vec![0usize; r];
+                for (k, spec) in &plans {
+                    match spec {
+                        Spec::All(axis) => src_coords[*k] = out_coords[*axis],
+                        Spec::Collapsed(c) => src_coords[*k] = *c,
+                        Spec::VecIndex {
+                            v_dims,
+                            v_elems,
+                            out_start,
+                        } => {
+                            let mut vflat = 0usize;
+                            for d in 0..v_dims.len() {
+                                vflat = vflat * v_dims[d] + out_coords[out_start + d];
+                            }
+                            let vval = &v_elems[vflat];
+                            let i = self.index_to_i64(vval.as_ref())?;
+                            src_coords[*k] = check_and_adjust_selected_index(i, bdims[*k])?;
+                        }
+                    }
+                }
+                let mut tflat = 0usize;
+                for k in 0..r {
+                    tflat += src_coords[k] * bstride[k];
+                }
+                out.push(Rc::new(target_elems[tflat].as_ref().clone()));
+            }
+            Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                out_dims,
+                ArrayData::Nested(out),
+            )))))
+        }
     }
 
     /// Convert an evaluated `APLValue` back into an `Instr` so we can re-dispatch a

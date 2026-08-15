@@ -6,8 +6,13 @@
 //! parse or evaluate; the harness reports the breakdown so we can track how much
 //! of the language is implemented.
 //!
-//! Run: `cargo test --test conformance -- --nocapture`
-//! (or `cargo test --test conformance` for just the summary line + pass count)
+//! NOTE: `cargo test` captures a passing test's stdout/stderr and only prints it
+//! when the test *fails* or with `-- --nocapture`. To always see the summary,
+//! the harness ALSO writes it to `/tmp/conform_summary.txt`. The `conformance_probe`
+//! test fails on purpose so the summary is surfaced in the terminal output.
+//!
+//! Run: `cargo test -p kap-core --test conformance`
+//!   or with visible output: `cargo test -p kap-core --test conformance -- --nocapture`
 
 use kap_core::Engine;
 use std::collections::BTreeMap;
@@ -69,7 +74,8 @@ fn load_cases() -> Vec<Case> {
 fn classify(engine: &Engine, c: &Case) -> Outcome {
     // Guard against engine panics (e.g. unchecked indexing in builtins): a crash is
     // treated as "unsupported", never an abort of the whole suite.
-    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.eval_to_string(&c.expr)));
+    let res =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.eval_to_string(&c.expr)));
     match res {
         Ok(Ok(got)) => {
             if let Some(exp) = &c.expected {
@@ -122,47 +128,80 @@ fn run_kotlin_conformance() {
                 }
             }
         }
+        if std::env::var("CONFORM_DUMP").is_ok() {
+            use std::io::Write;
+            let oc = match o {
+                Outcome::Ok => "OK",
+                Outcome::Mismatch => "MISMATCH",
+                Outcome::Unsupported => "UNSUPPORTED",
+            };
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/conform_dump.txt")
+                .unwrap();
+            let _ = writeln!(f, "{}\t{}\t{}", c.file, oc, c.expr);
+            let _ = c.expected.as_ref().map(|e| writeln!(f, "\t\tEXP {}", e));
+        }
     }
 
     let total = cases.len();
     let oks = by_outcome.get(&Outcome::Ok).copied().unwrap_or(0);
     let mism = by_outcome.get(&Outcome::Mismatch).copied().unwrap_or(0);
     let unsup = by_outcome.get(&Outcome::Unsupported).copied().unwrap_or(0);
-
-    println!("=== Kap conformance vs Kotlin reference suite ===");
-    println!("total extracted cases : {total}");
-    println!("  ok (parsed+evaluated){oks}");
-    println!("  mismatch (ran, wrong value) : {mism}");
-    println!("  unsupported (parse/runtime err) : {unsup}");
     let pct = (oks as f64 / total as f64) * 100.0;
-    println!("  coverage : {pct:.1}%");
 
-    println!("\n--- worst-covered files (most unsupported) ---");
+    // Build a single summary string so we can both print it and persist it.
+    let mut s = String::new();
+    s.push_str("=== Kap conformance vs Kotlin reference suite ===\n");
+    s.push_str(&format!("total extracted cases : {total}\n"));
+    s.push_str(&format!("  ok (parsed+evaluated)   : {oks}\n"));
+    s.push_str(&format!("  mismatch (ran, wrong)    : {mism}\n"));
+    s.push_str(&format!("  unsupported (parse/err)  : {unsup}\n"));
+    s.push_str(&format!("  coverage : {pct:.1}%\n"));
+
+    // Rank files by absolute number of unsupported cases.
     let mut ranked: Vec<_> = by_file.iter().collect();
     ranked.sort_by(|a, b| {
         let ra = a.1 .1 - a.1 .0;
         let rb = b.1 .1 - b.1 .0;
         rb.cmp(&ra).then_with(|| b.1 .1.cmp(&a.1 .1))
     });
+    s.push_str("\n--- worst-covered files (most unsupported) ---\n");
     for (f, (ok, tot)) in ranked.iter().take(15) {
         let un = tot - ok;
-        println!("  {un:4}/{tot:4} unsupported  {f}");
+        s.push_str(&format!("  {un:4}/{tot:4} unsupported  {f}\n"));
     }
 
-    println!("\n--- sample unsupported cases ---");
-    for c in &unsupported_examples {
-        println!("  [{}] {} : {}", c.kind, c.test, c.expr);
+    if !unsupported_examples.is_empty() {
+        s.push_str("\n--- sample unsupported cases ---\n");
+        for c in &unsupported_examples {
+            s.push_str(&format!("  [{}] {} : {}\n", c.kind, c.test, c.expr));
+        }
     }
     if !mismatch_examples.is_empty() {
-        println!("\n--- sample mismatch cases ---");
+        s.push_str("\n--- sample mismatch cases ---\n");
         for (c, got) in &mismatch_examples {
-            println!("  {} : expr={} expected={:?} got={}", c.test, c.expr, c.expected, got);
+            s.push_str(&format!(
+                "  {} : expr={} expected={:?} got={}\n",
+                c.test, c.expr, c.expected, got
+            ));
         }
     }
 
-    // We do not assert a pass rate here (it grows over time); the test "passes"
-    // if it runs. Real per-feature assertions live in the curated suite below.
-    assert!(total > 0);
+    // Always persist to a file (cargo swallows test stdout/stderr on success).
+    let _ = std::fs::write("/tmp/conform_summary.txt", &s);
+    // Also emit to stderr (visible with `-- --nocapture` or when a test fails).
+    eprint!("{s}");
+
+    // We do NOT assert a pass rate here (it grows over time). Instead we FAIL this
+    // test on purpose so cargo prints the captured summary above — a passing test's
+    // output is suppressed by `cargo test`. Run `conformance_probe`'s result is the
+    // summary. The real per-feature pass/fail gate is `curated_kap_parity`.
+    panic!(
+        "conformance summary (run with `cargo test ... -- --test-threads=1` or rely on this \
+         failure's output):\n{s}\n\n(remove the final panic in run_kotlin_conformance to stop the intentional failure)"
+    );
 }
 
 /// Curated hand-ported cases: features we KNOW are implemented, each with an
@@ -188,8 +227,14 @@ fn curated_kap_parity() {
         ("if (1 < 2) { 42 }", "42"),
         ("if (1 > 2) { 42 } else { 7 }", "7"),
         ("{ 1 ⋄ 2 ⋄ 3 }", "3"),
-        ("i ← 0 ⋄ s ← 0 ⋄ while (i < 5) { s ← s + i ⋄ i ← i + 1 } ⋄ s", "10"),
-        ("b ← 2 ⋄ when { (b=1){ \"one\" } (b=2){ \"two\" } (1){ \"other\" } }", "two"),
+        (
+            "i ← 0 ⋄ s ← 0 ⋄ while (i < 5) { s ← s + i ⋄ i ← i + 1 } ⋄ s",
+            "10",
+        ),
+        (
+            "b ← 2 ⋄ when { (b=1){ \"one\" } (b=2){ \"two\" } (1){ \"other\" } }",
+            "two",
+        ),
         ("if (0) { 1 }", "null"),
         // Adverbs (Phase 7)
         ("+/ 1 2 3 4", "10"),
@@ -211,10 +256,25 @@ fn curated_kap_parity() {
         ("1 ∨ 0", "1"),
         ("~ 1", "0"),
         ("~ 0", "1"),
-        ("1 2 3 ∊ 1 2 3 4", "(1 1 1)"),  // membership is element-wise (returns vector)
+        ("1 2 3 ∊ 1 2 3 4", "(1 1 1)"), // membership is element-wise (returns vector)
         ("5 ∊ 1 2 3 4", "(0)"),
         ("⍋ 3 1 4 2", "(1 3 0 2)"), // grade-up (monadic): 0-based indices ascending
-        // Trains (Phase 9): verified cases are added after the broad run confirms behavior.
+        // Bracket indexing (pick + multi-axis access) — dyadic ⍴ required
+        ("(10 20 30 40)[2]", "30"),
+        ("(10 20 30 40)[0 2]", "(10 30)"),
+        ("(10 20 30 40)[¯4]", "10"),
+        ("(3 4 ⍴ 10×⍳100)[2;]", "(80 90 100 110)"),
+        ("(3 4 ⍴ 10×⍳100)[;3]", "(30 70 110)"),
+        ("(3 4 ⍴ 10×⍳100)[;0 3]", "(0 30 40 70 80 110)"),
+        ("(2 3 ⍴ ⍳6)[1;⍳3]", "(3 4 5)"),
+        (
+            "(1 2 3 4)[4 4 ⍴ 0 1 3 1 2 2 0 1 2 2 0 3 1 0 2 2]",
+            "(1 2 4 2 3 3 1 2 3 3 1 4 2 1 3 3)",
+        ),
+        (
+            "(2 2 2 ⍴ 100+⍳8)[0;2 3 ⍴ 0 0 1 1 0 0;0]",
+            "(100 100 102 102 100 100)",
+        ),
     ];
 
     let mut failures = Vec::new();
@@ -222,7 +282,9 @@ fn curated_kap_parity() {
         match engine.eval_to_string(expr) {
             Ok(got) => {
                 if &got != expected {
-                    failures.push(format!("MISMATCH  {expr:?}  expected {expected:?} got {got:?}"));
+                    failures.push(format!(
+                        "MISMATCH  {expr:?}  expected {expected:?} got {got:?}"
+                    ));
                 }
             }
             Err(e) => {

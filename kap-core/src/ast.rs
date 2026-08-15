@@ -69,6 +69,13 @@ pub enum Instr {
     Value(crate::AplRef<crate::APLValue>),
     /// An empty array / nil.
     Empty,
+    /// Array *pick* / selection: `array[selector]`. `selector` is an index expression
+    /// (a scalar or vector of integers) parsed from `[...]`. Semantics (Kap `PickAPLFunction`
+    /// / `PickResultValue`): 1-D, each index `i` is adjusted with negative-from-end support
+    /// (`checkAndAdjustSelectedIndex`); a 1-element selection is disclosed to a scalar, a
+    /// multi-element selection is a vector of the picked elements. Binds tightly to the
+    /// preceding primary (postfix), so `a b (c d)[0] e` indexes `(c d)`, not the whole strand.
+    Index { array: Box<Instr>, selector: Box<Instr> },
 }
 
 impl Instr {

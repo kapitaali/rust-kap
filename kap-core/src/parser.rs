@@ -409,6 +409,7 @@ impl<'a> Parser<'a> {
         // into it. So we accumulate strand elements in a Vec and only build the result
         // `Instr::Array` once at the end — never pushing *into* an existing array element.
         let mut strand: Option<Vec<Instr>> = None;
+        let first = self.parse_index_suffix(first)?;
         let mut left = first;
         loop {
             // Stop at a statement boundary: newlines separate statements at the top
@@ -424,7 +425,9 @@ impl<'a> Parser<'a> {
             let paren_op = self.next_is_paren_operator();
             match self.peek() {
                 Some(t) if Self::is_strand_operand(&t.token) && !paren_op => {
-                    let operand = self.parse_primary()?;
+                    let mut operand = self.parse_primary()?;
+                    // Selection also binds to this operand.
+                    operand = self.parse_index_suffix(operand)?;
                     match strand {
                         None => strand = Some(vec![left.clone(), operand]),
                         Some(ref mut elems) => elems.push(operand),
@@ -890,6 +893,57 @@ impl<'a> Parser<'a> {
             }
             _ => Err(self.err("unexpected token in primary")),
         }
+    }
+
+    /// Consume a trailing `[...]` index selector (Kap array *pick* / selection) and wrap
+    /// `base` into `Instr::Index`. Repeats for chained `a[i][j]`.
+    ///
+    /// The bracket content is parsed as `;`-separated axis *sections*. Each section is
+    /// stored as one element of an `Instr::Array` selector:
+    ///   - an empty section (`[2;]` second part, or `⍬`) -> `Instr::Empty` (means "all" along that axis)
+    ///   - otherwise the parsed expression: a scalar index, or a strand/vector of indices
+    ///     (e.g. `[0 2]` -> one section that is the vector `(0 2)`, NOT `((0 2))`).
+    /// A single section with no `;` is the 1-D pick form (`a[i]`, `a[i j]`); multiple
+    /// sections (`a[r;c]`) are multi-axis selection. Binds more tightly than stranding
+    /// and any dyadic operator, so `a b (c d)[0] e` indexes `(c d)`, not the whole strand.
+    fn parse_index_suffix(&mut self, mut base: Instr) -> Result<Instr, AplError> {
+        loop {
+            let is_open_bracket =
+                matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenBracket));
+            if !is_open_bracket {
+                break;
+            }
+            self.advance();
+            let mut sections: Vec<Instr> = Vec::new();
+            let mut current: Option<Instr> = None;
+            loop {
+                self.skip_newlines();
+                match self.peek() {
+                    Some(t) if matches!(t.token, Token::CloseBracket) => {
+                        self.advance();
+                        sections.push(current.take().unwrap_or(Instr::Empty));
+                        break;
+                    }
+                    Some(t) if matches!(t.token, Token::ListSeparator) => {
+                        self.advance();
+                        sections.push(current.take().unwrap_or(Instr::Empty));
+                        continue;
+                    }
+                    _ => {
+                        // `parse_expr` consumes a whole strand (`0 2` -> one Array instr),
+                        // so a section is exactly one instr.
+                        let e = self.parse_expr()?;
+                        current = Some(e);
+                    }
+                }
+            }
+            let selector_instr = Instr::Array { elements: sections };
+            base = Instr::Index {
+                array: Box::new(base),
+                selector: Box::new(selector_instr),
+            };
+        }
+        Ok(base)
     }
 }
 
