@@ -42,6 +42,24 @@ fn check_and_adjust_selected_index(index: i64, axis_size: usize) -> Result<usize
     }
 }
 
+/// Compute the stride (elements per axis unit) for each axis of a shape, in
+/// row-major order. `strides[0]` = product of all dims except the first, etc.;
+/// `strides[rank-1] == 1`. Used by `transpose`.
+fn strides(dims: &[usize]) -> Vec<usize> {
+    let r = dims.len();
+    let mut s = vec![1usize; r];
+    if r == 0 {
+        return s;
+    }
+    for k in (0..r - 1).rev() {
+        s[k] = s[k + 1] * dims[k + 1];
+    }
+    s
+}
+
+
+
+
 impl Environment {
     /// Look up a symbol, walking parent environments. Returns a shared ref to the value.
     pub fn lookup(&self, name: &str, ns: &Option<String>) -> Option<AplRef<APLValue>> {
@@ -338,8 +356,9 @@ impl Engine {
             "≢" | "tally" => self.tally(right_val),
             "⊃" | "first" => self.first(right_val),
             "," => self.catenate(left_val, right_val),
-            "⌽" | "⊖" => self.reverse(right_val),
-            "⍉" => self.transpose(right_val),
+            "⌽" | "rotateright" => self.reverse_horizontal(left_val, right_val),
+            "⊖" | "rotateleft" => self.reverse_vertical(left_val, right_val),
+            "⍉" => self.transpose(left_val, right_val),
             "↑" => self.take(left_val, right_val),
             "↓" => self.drop(left_val, right_val),
             "⊂" => self.enclose(right_val),
@@ -795,38 +814,225 @@ impl Engine {
         }
     }
 
-    fn reverse(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
-        match right_val.as_ref() {
-            APLValue::Array(a) => {
-                let mut elems = a.elements();
-                elems.reverse();
-                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                    vec![elems.len()],
-                    ArrayData::Nested(elems),
-                )))))
-            }
-            other => Ok(Rc::new(other.clone())),
-        }
+    fn reverse_horizontal(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        // `⌽` reverses/rotates along the *last* axis (default for `⌽`).
+        self.reverse_axis(left_val, right_val, None, true)
     }
 
-    fn transpose(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
-        // Phase 4: a vector transposes to itself; a 2-D matrix is transposed.
-        match right_val.as_ref() {
-            APLValue::Array(a) if a.rank() == 2 => {
-                let (r, c) = (a.dimensions[0], a.dimensions[1]);
+    fn reverse_vertical(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        // `⊖` reverses/rotates along the *first* axis (default for `⊖`).
+        self.reverse_axis(left_val, right_val, Some(0), true)
+    }
+
+    /// Reverse or rotate one axis of an n-D array (Kap `⌽`/`⊖`).
+    /// - `axis`: fixed axis (Some(k)) or the last axis (None ⇒ rank-1).
+    /// - monadic (left=None) ⇒ reverse that axis;
+    /// - dyadic (left=scalar n) ⇒ rotate every cell along the axis by n;
+    /// - dyadic (left=vector v) ⇒ rotate cell i by v[i] (length must equal #cells).
+    fn reverse_axis(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+        axis: Option<usize>,
+        _reverse_when_none: bool,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let right = right_val.force(self)?;
+        match right.as_ref() {
+            APLValue::Number(_) | APLValue::Null => Ok(Rc::new(right.as_ref().clone())),
+            APLValue::Array(a) => {
+                let dims = a.dimensions.clone();
+                let rank = dims.len();
+                if rank == 0 {
+                    return Ok(Rc::new(right.as_ref().clone()));
+                }
+                let axis = axis.unwrap_or(rank - 1).min(rank - 1);
+                let n = dims[axis];
+                let stride: usize = dims[axis + 1..].iter().product();
+                let cells: usize = dims[..axis].iter().copied().product::<usize>().max(1);
+
+                // Build a per-cell shift (rotate amount). None left ⇒ reverse.
+                let mut do_reverse = false;
+                let mut shifts: Vec<i64> = Vec::with_capacity(cells);
+                match left_val {
+                    None => {
+                        do_reverse = true;
+                        shifts = vec![0; cells];
+                    }
+                    Some(l) => {
+                        let lv = l.force(self)?;
+                        match lv.as_ref() {
+                            APLValue::Number(KapNumber::Long(x)) => {
+                                shifts = vec![*x; cells];
+                            }
+                            APLValue::Array(va) => {
+                                for e in va.elements() {
+                                    match e.as_ref() {
+                                        APLValue::Number(KapNumber::Long(x)) => shifts.push(*x),
+                                        _ => {
+                                            return Err(AplError::runtime(
+                                                "⌽/⊖ shift must be integers".into(),
+                                            ))
+                                        }
+                                    }
+                                }
+                                if !shifts.is_empty() && shifts.len() != cells {
+                                    return Err(AplError::runtime(
+                                        "⌽/⊖ shift vector length must match number of cells".into(),
+                                    ));
+                                }
+                            }
+                            _ => {
+                                return Err(AplError::runtime(
+                                    "⌽/⊖ shift must be an integer or vector".into(),
+                                ))
+                            }
+                        }
+                    }
+                }
+
                 let elems = a.elements();
-                let mut out = Vec::with_capacity(r * c);
-                for cc in 0..c {
-                    for rr in 0..r {
-                        out.push(elems[rr * c + cc].clone());
+                let mut out = elems.clone();
+                let n64 = n as i64;
+                for c in 0..cells {
+                    let base = c * n * stride;
+                    let shift = if do_reverse { 0 } else { shifts[c % shifts.len().max(1)] };
+                    for k in 0..n {
+                        let src = if do_reverse {
+                            n - 1 - k
+                        } else {
+                            (((k as i64) + shift).rem_euclid(n64)) as usize
+                        };
+                        for s in 0..stride {
+                            out[base + k * stride + s] =
+                                elems[base + src * stride + s].clone();
+                        }
                     }
                 }
                 Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                    vec![c, r],
+                    dims,
                     ArrayData::Nested(out),
                 )))))
             }
-            other => Ok(Rc::new(other.clone())),
+            other => Err(AplError::runtime(
+                "⌽/⊖ not implemented for this value type".into(),
+            )),
+        }
+    }
+
+    fn transpose(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        // Monadic `⍉ A` reverses the axis order. Dyadic `axes ⍉ A` permutes axes
+        // per `axes` (must be a permutation of 0..rank-1, else InvalidDimensions).
+        let right = right_val.force(self)?;
+        match right.as_ref() {
+            APLValue::Number(_) | APLValue::Null => Ok(Rc::new(right.as_ref().clone())),
+            APLValue::Array(a) => {
+                let dims = a.dimensions.clone();
+                let rank = dims.len();
+                if rank == 0 {
+                    return Ok(Rc::new(right.as_ref().clone()));
+                }
+                // Resolve the axis permutation.
+                let perm: Vec<usize> = match left_val {
+                    None => (0..rank).rev().collect(),
+                    Some(l) => {
+                        let lv = l.force(self)?;
+                        let axes: Vec<i64> = match lv.as_ref() {
+                            APLValue::Number(KapNumber::Long(x)) => vec![*x],
+                            APLValue::Array(va) => {
+                                let mut v = Vec::with_capacity(va.element_count());
+                                for e in va.elements() {
+                                    match e.as_ref() {
+                                        APLValue::Number(KapNumber::Long(x)) => v.push(*x),
+                                        _ => {
+                                            return Err(AplError::runtime(
+                                                "⍉ axes must be integers".into(),
+                                            ))
+                                        }
+                                    }
+                                }
+                                v
+                            }
+                            _ => {
+                                return Err(AplError::runtime(
+                                    "⍉ axes must be an integer or vector".into(),
+                                ))
+                            }
+                        };
+                        if axes.len() != rank {
+                            return Err(AplError::runtime(format!(
+                                "⍉ axis count {} does not match array rank {}",
+                                axes.len(),
+                                rank
+                            )));
+                        }
+                        let mut seen = vec![false; rank];
+                        let mut perm = Vec::with_capacity(rank);
+                        for &x in &axes {
+                            if x < 0 || x as usize >= rank || seen[x as usize] {
+                                return Err(AplError::runtime(
+                                    "⍉ axes must be a permutation of 0..rank-1".into(),
+                                ));
+                            }
+                            seen[x as usize] = true;
+                            perm.push(x as usize);
+                        }
+                        perm
+                    }
+                };
+
+                let elems = a.elements();
+                // Kotlin `TransposedAPLValue`: result axis k has dimension
+                // `d[perm⁻¹[k]]` (it stores inverseTransposedAxis = perm⁻¹).
+                let mut inv = vec![0usize; rank];
+                for (k, &p) in perm.iter().enumerate() {
+                    inv[p] = k;
+                }
+                let new_dims: Vec<usize> = (0..rank).map(|k| dims[inv[k]]).collect();
+                let old_stride = strides(&dims);
+                let new_stride = strides(&new_dims);
+                let total: usize = new_dims.iter().product();
+                if total > 100_000_000 {
+                    return Err(AplError::runtime("transpose result too large".into()));
+                }
+                let mut out: Vec<AplRef<APLValue>> = vec![elems[0].clone(); total];
+                for pos in 0..total {
+                    let mut rem = pos;
+                    let mut new_coords = vec![0usize; rank];
+                    for k in 0..rank {
+                        new_coords[k] = rem / new_stride[k];
+                        rem %= new_stride[k];
+                    }
+                    let mut old_coords = vec![0usize; rank];
+                    for k in 0..rank {
+                        // Kotlin `TransposedAPLValue.translateIndex`:
+                        // `s[index] = c[transposeAxis[index]]`, i.e. source coord
+                        // `k` equals result coord `perm[k]`.
+                        old_coords[k] = new_coords[perm[k]];
+                    }
+                    let mut oflat = 0usize;
+                    for k in 0..rank {
+                        oflat += old_coords[k] * old_stride[k];
+                    }
+                    out[pos] = elems[oflat].clone();
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    new_dims,
+                    ArrayData::Nested(out),
+                )))))
+            }
+            other => Err(AplError::runtime("⍉ not implemented for this value type".into())),
         }
     }
 
