@@ -576,4 +576,52 @@ For reference during implementation and test parity validation, the reference Ko
 - **Test Harness Base**: `test-tools/src/commonMain/kotlin/com/dhsdevelopments/kap/APLTest.kt`
 - **Platform-specific**: `array/src/jvmTest/` (JVM interop/IO/XML), `array/src/linuxTest/` (Linux native), `array/src/jsTest/` (JS engine/regex)
 
+---
 
+## Conformance harness (Phase 9 work-in-progress instrument)
+
+**Goal:** measure how much of the Kap language our Rust engine implements, by running the
+reference Kotlin unit-test corpus against it.
+
+**How to run:**
+```
+python3 tools/extract_kotlin_tests.py          # regenerate conformance/kotlin_tests.jsonl
+cargo test --jobs 1 --test conformance -- --nocapture
+```
+
+**What it produces:**
+- `tools/extract_kotlin_tests.py` — parses every `*Test.kt`, emits one record per `@Test` to
+  `conformance/kotlin_tests.jsonl` (`{file, test, kind, expr, expected}`). Best-effort `expected`
+  is populated only for single-line `assertSimpleNumber`/`assert1DArray`/`assertString`.
+- `kap-core/tests/conformance.rs` — two tests:
+  - `run_kotlin_conformance` — data-driven over all extracted cases. Classifies each as `ok`
+    (parsed+evaluated; matches `expected` if known), `mismatch` (ran, wrong value), or
+    `unsupported` (parse/runtime error **or engine panic** — wrapped in `catch_unwind` so a
+    crash never aborts the run). Prints a coverage summary + worst-covered files.
+  - `curated_kap_parity` — hand-picked cases with exact expected strings that we KNOW pass
+    today; this is the green anchor that must stay red->green.
+
+**Baseline coverage (commit after this log): 2535 extracted cases -> 20.2%**
+(512 ok + 166 mismatch = 678 parse/evaluate; 1857 unsupported). The 166 "mismatch" are mostly
+known gaps (see list). Worst-covered: `CustomFunctionTest` (112/124), `CompareTest`, `ReshapeTest`,
+`LabelsTest`, `NumbersTest`, `MemberDereferenceTest`, `ReduceTest`, `TakeTest`, `ComposeTest`,
+`InverseFnTest`, `UniqueTest`, `PickTest`, `StructuralUnderTest`.
+
+**Known gaps surfaced by the harness (NOT yet fixed — real bugs to schedule):**
+- Multi-variable assignment chains / destructuring: `a<-1+b<-2 <> …` and `(a b)<-…` do not parse
+  (parser rejects `unexpected token in primary` at the chain). Reference: `AssignmentTest`.
+- `|` (modulo) lacks scalar-left x array-right extension: `| 7 ¯7` errors "needs two args".
+  Reference: `NumbersTest`/`ScalarTest`.
+- `∊` (membership) returns a vector in Kap; we return it but the reference scalar case is fine —
+  dyadic shape handling for non-vector right differs.
+- Dyadic `⍋` (grade with comparison axis) and `⊤`/`⊥` (encode/decode) are monadic-only here;
+  the reference dyadic forms differ.
+- `⍟` (log base) float precision: `10 ⍟ 1000` -> `2.9999999999999996` vs expected `3.0` (formatting).
+- `num2` array×array path had an **out-of-bounds panic** on mismatched lengths — guarded with an
+  error (root cause fixed), but proper length-mismatch semantics still TBD.
+- `⍳` and `⍋` are **0-based** in Kap (confirmed in `docs/reference.asciidoc` §1000 / §1436 and
+  `IotaTest.kt` / `builtins/sort.kt`). Do NOT "fix" them to 1-based.
+
+**Reference-check discipline:** every builtin semantics must be verified against
+`~/Apps/array/docs/reference.asciidoc` (and the Kotlin `src/commonMain` impl) before assuming
+indexing/grade/base conventions. Kap is 0-based throughout.

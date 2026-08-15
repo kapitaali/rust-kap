@@ -51,6 +51,14 @@ pub enum Instr {
     While { cond: Box<Instr>, body: Box<Instr> },
     /// `when { (cond){ body } … (1){ default } }` — first truthy clause's body is evaluated.
     When { clauses: Vec<(Instr, Instr)> },
+    /// A *train*: a parenthesised sequence of functions, e.g. `(f g h)`.
+    /// - Monadic `(f g h) y` evaluates right-to-left as `f (g (h y))` (composition).
+    /// - Dyadic `x (f g) y` = `f x (g y)` (2-train / atop); `x (f g h) y` = `(x f y) g (x h y)` (3-fork).
+    /// The explicit fork syntax `a « b » c` desugars to the same 3-function train.
+    Train { funcs: Vec<Instr> },
+    /// A pre-evaluated runtime value wrapped as an expression (used internally to pass
+    /// already-computed results back into `eval_apply`, e.g. by trains).
+    Value(crate::AplRef<crate::APLValue>),
     /// An empty array / nil.
     Empty,
 }

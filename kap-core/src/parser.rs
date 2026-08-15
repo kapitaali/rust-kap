@@ -290,6 +290,30 @@ impl<'a> Parser<'a> {
     /// apply := (fn term) | (term fn term)*  — monadic `f x` or dyadic `a f b` / trains.
     fn parse_apply(&mut self) -> Result<Instr, AplError> {
         let first = self.parse_primary()?;
+        // A leading *function atom* that cannot be a value — a train, a lambda, or a
+        // derived (adverb) operator — is a monadic/dyadic application `fn x` / `x fn y`
+        // (e.g. `(f g) y`, `λ(x)x*2 5`, `+/ 1 2 3`). Bare symbols are handled below by the
+        // original heuristic, since a symbol may also be a *value* (variable) used as a
+        // dyadic left operand (`x + 1`).
+        if matches!(
+            &first,
+            Instr::Train { .. } | Instr::Lambda { .. } | Instr::Derived { .. }
+        ) {
+            // A statement boundary ends the expression: the function stands alone.
+            if self.at_statement_boundary() {
+                return Ok(first);
+            }
+            self.skip_newlines();
+            if self.at_statement_boundary() {
+                return Ok(first);
+            }
+            let operand = self.parse_apply()?;
+            return Ok(Instr::Apply {
+                fn_expr: Box::new(first),
+                left: None,
+                right: Box::new(operand),
+            });
+        }
         // A leading symbol is parsed as a MONADIC application `f x` when:
         //   * it is a primitive AND the next token is a plain operand, or another primitive
         //     (train: `⊃ ⍳5` = `⊃(⍳5)`, `≢ ⍳5` = `≢(⍳5)`); or
@@ -546,6 +570,106 @@ impl<'a> Parser<'a> {
         self.parse_primary()
     }
 
+    /// Try to parse a *train*: a parenthesised sequence of >=2 function expressions,
+    /// e.g. `(f g h)`. Returns `Some(Train{funcs})` on success, `None` (without side effects
+    /// other than `self.pos`, which the caller restores) otherwise.
+    ///
+    /// Each member is parsed with `parse_function_expr` (a *function atom* — symbols, derived
+    /// operators, lambdas, or nested trains), NOT a full expression, so `(| -)` yields two
+    /// separate functions `[|, -]` rather than the dyadic application `| -`.
+    fn try_parse_train(&mut self) -> Option<Instr> {
+        // We are positioned just after the opening '('.
+        let mut funcs = Vec::new();
+        loop {
+            self.skip_newlines();
+            match self.peek() {
+                Some(t) if matches!(t.token, Token::CloseParen) => {
+                    self.advance();
+                    break;
+                }
+                None => return None,
+                _ => {
+                    let e = match self.parse_function_expr() {
+                        Ok(e) => e,
+                        Err(_) => return None,
+                    };
+                    funcs.push(e);
+                }
+            }
+        }
+        // A train needs >= 2 function-like expressions.
+        if funcs.len() >= 2 && funcs.iter().all(Self::is_function_expr) {
+            Some(Instr::Train { funcs })
+        } else {
+            None
+        }
+    }
+
+    /// Parse a single *function atom* suitable as a train member: a symbol, a derived
+    /// (adverb) operator, a lambda, or a nested parenthesised train. Rejects values
+    /// (numbers, strings, arrays) and dyadic applications.
+    fn parse_function_expr(&mut self) -> Result<Instr, AplError> {
+        let t = self.peek().ok_or_else(|| self.err("expected a function in train"))?;
+        match &t.token {
+            Token::Literal(LiteralValue::Symbol { name, namespace }) => {
+                let name = name.clone();
+                let namespace = namespace.clone();
+                self.advance();
+                Ok(Instr::Symbol { name, namespace })
+            }
+            Token::OpenParen => {
+                // Nested train or group of functions.
+                self.advance();
+                self.skip_newlines();
+                let save = self.pos;
+                if let Some(train) = self.try_parse_train() {
+                    return Ok(train);
+                }
+                self.pos = save;
+                Err(self.err("expected a function in train"))
+            }
+            // Derived operators (e.g. `+/`) are function atoms.
+            Token::Literal(LiteralValue::Symbol { name: sym_name, .. }) => {
+                let sym = sym_name.clone();
+                self.advance();
+                if let Some(Token::Literal(LiteralValue::Symbol { name: adv_name, .. })) =
+                    self.peek().map(|x| x.token.clone())
+                {
+                    if Self::is_adverb(&adv_name) {
+                        let adv = adv_name.clone();
+                        self.advance();
+                        Ok(Instr::Derived {
+                            func: Box::new(Instr::Symbol {
+                                name: sym,
+                                namespace: None,
+                            }),
+                            op: Box::new(Instr::Symbol {
+                                name: adv,
+                                namespace: None,
+                            }),
+                        })
+                    } else {
+                        Err(self.err("expected an adverb after function in train"))
+                    }
+                } else {
+                    Err(self.err("expected an adverb after function in train"))
+                }
+            }
+            _ => Err(self.err("expected a function in train")),
+        }
+    }
+
+    /// Whether an expression is a *function* suitable for a train operand.
+    fn is_function_expr(e: &Instr) -> bool {
+        matches!(
+            e,
+            Instr::Symbol { .. }
+                | Instr::Derived { .. }
+                | Instr::Lambda { .. }
+                | Instr::Train { .. }
+        )
+    }
+
     /// primary := number | char | string | symbol | ( expr ) | [ elements ] | ⍬
     fn parse_primary(&mut self) -> Result<Instr, AplError> {
         let t = self.peek().ok_or_else(|| self.err("unexpected end of input"))?;
@@ -564,6 +688,13 @@ impl<'a> Parser<'a> {
             Token::OpenParen => {
                 self.advance();
                 self.skip_newlines();
+                // A parenthesised *sequence of >=2 functions* is a train: `(f g h)`.
+                // Try that first; if it doesn't pan out, fall back to a normal group.
+                let save = self.pos;
+                if let Some(train) = self.try_parse_train() {
+                    return Ok(train);
+                }
+                self.pos = save;
                 let e = self.parse_expr()?;
                 self.skip_newlines();
                 match self.peek() {

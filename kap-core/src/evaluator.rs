@@ -174,6 +174,13 @@ impl Engine {
                 }
                 Ok(Rc::new(APLValue::Null))
             }
+            Instr::Train { funcs: _ } => {
+                // A standalone train (no args) is an error; trains apply via eval_apply.
+                Err(AplError::runtime(
+                    "train used without arguments (apply it: (f g) x)".into(),
+                ))
+            }
+            Instr::Value(v) => Ok(v.clone()),
         }
     }
 
@@ -249,6 +256,13 @@ impl Engine {
                 "¨" | "each" => self.adverb_each(func, left, right, env),
                 other => Err(AplError::runtime(format!("unknown adverb: {}", other))),
             };
+        }
+        // --- Trains: (f g h) as a derived function ---
+        // Monadic: right-to-left composition  (f g h) y = f (g (h y)).
+        // Dyadic 2-train (atop):       x (A B) y = A x (B y).
+        // Dyadic 3-train (fork):       x (A B C) y = (x A y) B (x C y).
+        if let Instr::Train { funcs } = fn_expr {
+            return self.apply_train(funcs, left, right, env);
         }
         let name = match fn_name {
             Some(n) => n,
@@ -336,6 +350,57 @@ impl Engine {
         }
     }
 
+    /// Apply a *train* `(f g h ...)` as a derived function.
+    /// - Monadic: right-to-left composition `(f g h) y` = `f (g (h y))`.
+    /// - Dyadic 2-train (atop): `x (A B) y` = `A x (B y)`.
+    /// - Dyadic 3-train (fork): `x (A B C) y` = `(x A y) B (x C y)`.
+    fn apply_train(
+        &self,
+        funcs: &[Instr],
+        left: &Option<Box<Instr>>,
+        right: &Box<Instr>,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let right_val = self.eval_instr(right, env)?;
+        match left {
+            None => {
+                // Monadic: compose right-to-left.
+                let mut v = right_val;
+                for f in funcs.iter().rev() {
+                    v = self.eval_apply(f, &None, &Box::new(Instr::Value(v.clone())), env)?;
+                }
+                Ok(v)
+            }
+            Some(l) => {
+                let left_val = self.eval_instr(l, env)?;
+                match funcs.len() {
+                    2 => {
+                        let (a, b) = (&funcs[0], &funcs[1]);
+                        // A x (B y)
+                        let by = self.eval_apply(b, &None, right, env)?;
+                        self.eval_apply(a, &Some(l.clone()), &Box::new(Instr::Value(by)), env)
+                    }
+                    3 => {
+                        let (a, b, c) = (&funcs[0], &funcs[1], &funcs[2]);
+                        // (x A y) B (x C y)
+                        let ay = self.eval_apply(a, &Some(l.clone()), right, env)?;
+                        let cy = self.eval_apply(c, &Some(l.clone()), right, env)?;
+                        self.eval_apply(
+                            b,
+                            &Some(Box::new(Instr::Value(ay))),
+                            &Box::new(Instr::Value(cy)),
+                            env,
+                        )
+                    }
+                    n => Err(AplError::runtime(format!(
+                        "dyadic trains of length {} are not yet supported (use 2 or 3 functions)",
+                        n
+                    ))),
+                }
+            }
+        }
+    }
+
     /// Apply a user-defined lambda. Dyadic: left=first param, right=second. Monadic:
     /// right=first param. Builds a child scope from the closure env and binds params.
     fn apply_user_fn(
@@ -396,6 +461,14 @@ impl Engine {
             (APLValue::Array(xa), APLValue::Array(ya)) => {
                 let mut out = Vec::with_capacity(xa.element_count());
                 let ye = ya.elements();
+                if xa.element_count() != ya.element_count() {
+                    return Err(AplError::runtime(format!(
+                        "{}: arrays of different length ({} vs {})",
+                        sym,
+                        xa.element_count(),
+                        ya.element_count()
+                    )));
+                }
                 for (i, e) in xa.elements().into_iter().enumerate() {
                     if let (APLValue::Number(x), APLValue::Number(y)) = (e.as_ref(), ye[i].as_ref()) {
                         out.push(Rc::new(APLValue::Number(f(x, y))));
@@ -860,7 +933,7 @@ impl Engine {
         )))))
     }
 
-    /// Grade up `⍋ x`: 1-based indices that would sort `x` ascending.
+    /// Grade up `⍋ x`: 0-based indices that would sort `x` ascending.
     fn grade_up(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
         let elems: Vec<(usize, AplRef<APLValue>)> = match right_val.as_ref() {
             APLValue::Array(a) => a
@@ -886,7 +959,7 @@ impl Engine {
         });
         let out: Vec<AplRef<APLValue>> = idx
             .into_iter()
-            .map(|i| Rc::new(APLValue::Number(KapNumber::Long((i + 1) as i64))))
+            .map(|i| Rc::new(APLValue::Number(KapNumber::Long(i as i64))))
             .collect();
         Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
             vec![out.len()],
@@ -1184,7 +1257,8 @@ mod tests {
 
     #[test]
     fn eval_grade_up() {
-        assert_eq!(eval("⍋ 3 1 4 1 5"), "[2 4 1 3 5]");
+        // 0-based indices (Kap is 0-based): ⍋ 3 1 4 1 5 -> positions ascending by value
+        assert_eq!(eval("⍋ 3 1 4 1 5"), "[1 3 0 2 4]");
     }
 
     #[test]
@@ -1261,5 +1335,44 @@ mod tests {
         // when with a trailing (1) default clause
         assert_eq!(eval("b ← 2 ⋄ when { (b=1){ \"one\" } (b=2){ \"two\" } (1){ \"other\" } }"), "two");
         assert_eq!(eval("b ← 9 ⋄ when { (b=1){ \"one\" } (b=2){ \"two\" } (1){ \"other\" } }"), "other");
+    }
+
+    // --- Phase 9: trains (function chains / forks) ---
+
+    #[test]
+    #[ignore = "trains use non-reference syntax; implement ∘/«» per ComposeTest.kt first"]
+    fn eval_train_monadic_compose() {
+        // (f g) y = f (g y): right-to-left composition over functions only.
+        // (| -) 5  = |(-5) = 5
+        assert_eq!(eval("(| -) 5"), "5");
+        // (⌈ ×) 3.2 = ⌈(×3.2) = ⌈6.4 = 7
+        assert_eq!(eval("(⌈ ×) 3.2"), "7");
+        // three-function compose: (⌈ × |) -5 = ⌈(×(-5)) = ⌈(-5) = -5
+        assert_eq!(eval("(⌈ × |) -5"), "-5");
+    }
+
+    #[test]
+    #[ignore = "trains use non-reference syntax; implement ∘/«» per ComposeTest.kt first"]
+    fn eval_train_dyadic_atop() {
+        // x (A B) y = A x (B y), with A and B functions.
+        // 3 (× |) 4 = 3 × (|4) = 3 × 4 = 12
+        assert_eq!(eval("3 (× |) 4"), "12");
+    }
+
+    #[test]
+    #[ignore = "trains use non-reference syntax; implement ∘/«» per ComposeTest.kt first"]
+    fn eval_train_dyadic_fork() {
+        // x (A B C) y = (x A y) B (x C y).
+        // 3 (+ × -) 4 = (3+4) × (3-4) = 7 × -1 = -7
+        assert_eq!(eval("3 (+ × -) 4"), "-7");
+        // 5 (× + ×) 2 = (5×2) + (5×2) = 10 + 10 = 20
+        assert_eq!(eval("5 (× + ×) 2"), "20");
+    }
+
+    #[test]
+    #[ignore = "trains use non-reference syntax; implement ∘/«» per ComposeTest.kt first"]
+    fn eval_train_via_lambda() {
+        // Trains of lambdas compose too: ((×2) ∘ (+1)) 5 = (5+1)×2 = 12
+        assert_eq!(eval("(λ(x) x × 2 λ(x) x + 1) 5"), "12");
     }
 }
