@@ -1,0 +1,1 @@
+:UTF8 unicode:enc comp {(5000×≢⍵) ⍴ ⍵} "abcå"

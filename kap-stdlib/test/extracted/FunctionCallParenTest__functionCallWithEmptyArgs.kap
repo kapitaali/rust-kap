@@ -1,0 +1,1 @@
+∇ foo (a) { ⍴ fromList a } ⋄ foo⟦⟧

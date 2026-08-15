@@ -1,0 +1,2 @@
+a ← map:with 'map 10 'math:sin 20
+a.default:map

@@ -1,0 +1,2 @@
+a ← map:with 'foo 10 'bar 20
+a.default:foo a.default:bar

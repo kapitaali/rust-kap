@@ -1,0 +1,2 @@
+a ← map:with :a 1 :b (map:with :c (map:with :d 10 :e 20) :f 30 :g 40) :h 50
+a.:b.:c.:abc

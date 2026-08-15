@@ -1,0 +1,1 @@
+foo ← "jkc" ⋄ "abc" ⍳ foo[2]

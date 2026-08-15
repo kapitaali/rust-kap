@@ -1,0 +1,1 @@
+(⊂ int:ensureGeneric 5 6) + (⊂ int:ensureGeneric 10 11)

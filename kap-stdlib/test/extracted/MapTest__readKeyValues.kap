@@ -1,0 +1,1 @@
+a ← map:with 2 2 ⍴ "foo" "abc" "bar" "bcd" ◊ map:entries a

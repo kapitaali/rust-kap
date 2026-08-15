@@ -1,0 +1,1 @@
+a ← map:with "foo" 3 "bar" 4 ⋄ a["foo" "bar"]

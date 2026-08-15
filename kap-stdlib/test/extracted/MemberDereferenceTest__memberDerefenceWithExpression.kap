@@ -1,0 +1,2 @@
+a ← map:with 10 "abc" 20 "def" 30 "ghi"
+a.(2+8)

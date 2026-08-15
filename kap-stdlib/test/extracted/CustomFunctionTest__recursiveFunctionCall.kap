@@ -1,0 +1,1 @@
+∇ foo (A) { A+1 } ◊ foo foo 2

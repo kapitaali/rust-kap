@@ -1,0 +1,1 @@
+(int:asBigint 3) math:gcd (int:asBigint 8)

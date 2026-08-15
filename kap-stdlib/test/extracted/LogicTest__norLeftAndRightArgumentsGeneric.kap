@@ -1,0 +1,1 @@
+(int:ensureGeneric 1 1 0 0) ⍱ (int:ensureGeneric 0 1 1 0)

@@ -1,0 +1,1 @@
+(int:ensureGeneric 2 2 ¯2 ¯2) | (int:ensureGeneric 123 ¯123 123 ¯123)

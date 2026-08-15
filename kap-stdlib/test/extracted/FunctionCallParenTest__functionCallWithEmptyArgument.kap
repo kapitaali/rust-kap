@@ -1,0 +1,2 @@
+∇ foo { if(isLocallyBound '⍺) { throw "got left argument" } else {⍵} } 
+foo⟦⟧

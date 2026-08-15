@@ -1,0 +1,1 @@
+x ← io:readdir "test-data/readdir-test/" ◊ x[⍋x;]

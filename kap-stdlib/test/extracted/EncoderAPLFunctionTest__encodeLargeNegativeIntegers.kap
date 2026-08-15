@@ -1,0 +1,1 @@
+x ← encoder:encode -2 ⋆ ⍳ ${n} ⋄ encoder:decode x

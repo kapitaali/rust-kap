@@ -1,0 +1,1 @@
+json:readString "{\"a\":10,\"b\":\"c\"}"

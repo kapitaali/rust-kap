@@ -1,0 +1,1 @@
+n←0 ◊ foo ⇐ { if(⍵≡0) { 1 } else { n←n+1 ◊ foo ¯1+⍵ } } ◊ n,foo 10

@@ -1,0 +1,2 @@
+foo ← map:with 'test 1 'abc 2
+foo.bar

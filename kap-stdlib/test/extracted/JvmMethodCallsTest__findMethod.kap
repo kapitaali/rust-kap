@@ -1,0 +1,1 @@
+jvm:findMethod ((jvm:findClass "com.dhsdevelopments.kap.jvmmod.Foo") ; "staticTest" ; jvm:findClass "java.lang.String")

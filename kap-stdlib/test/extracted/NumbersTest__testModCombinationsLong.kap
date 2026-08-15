@@ -1,0 +1,1 @@
+(int:ensureLong 2 2 ¯2 ¯2) | (int:ensureLong 123 ¯123 123 ¯123)

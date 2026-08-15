@@ -1,0 +1,2 @@
+findMap ⇐ { map:with 'foo 10 'bar 20 }
+(findMap 0).default:foo

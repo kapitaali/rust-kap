@@ -1,0 +1,1 @@
+close atLeave io2:open "test-data/multi.txt"

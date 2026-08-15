@@ -1,0 +1,1 @@
+foo:bar ← 1 ◊ a:bar ← 2 ◊ foo:abc ← 3 ◊ foo:bar a:bar foo:abc

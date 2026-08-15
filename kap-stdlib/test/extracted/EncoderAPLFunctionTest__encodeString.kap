@@ -1,0 +1,1 @@
+x ← encoder:encode "abcd" ⋄ encoder:decode x

@@ -1,0 +1,1 @@
+{'foo throw 1}catch 1 2 ⍴ 'foo λ{2+⍺}
