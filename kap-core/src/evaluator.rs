@@ -762,6 +762,10 @@ impl Engine {
                     );
                 }
                 match funcs.len() {
+                    1 => {
+                        // A single parenthesised function `(f) y` = `f y`.
+                        self.eval_apply(&funcs[0], &None, right, env)
+                    }
                     2 => {
                         // Atop: (f g) y = f(g(y))
                         let gy = self.eval_apply(&funcs[1], &None, right, env)?;
@@ -807,6 +811,10 @@ impl Engine {
                     );
                 }
                 match funcs.len() {
+                    1 => {
+                        // A single parenthesised function `x (f) y` = `x f y`.
+                        self.eval_apply(&funcs[0], &Some(Box::new(Instr::Value(left_val))), right, env)
+                    }
                     2 => {
                         let (a, b) = (&funcs[0], &funcs[1]);
                         if Self::is_value(a) {
@@ -2771,5 +2779,36 @@ mod tests {
         // x (f g) y = f(x g y)  (atop: g dyadic between x and y)
         assert_eq!(eval("2 (-*) 5"), "¯32"); // -(2*5)
         assert_eq!(eval("10 (-,) 20"), "(¯10 ¯20)"); // -(10,20) = (-10,-20)
+    }
+
+    // --- Phase 9b: function-assignment validation (SHOULD FAIL, per Kotlin CustomFunctionTest/FnParseTest) ---
+
+    /// A fork MUST have exactly three functions: `A«B»C`. A two-function fork
+    /// `⊢«⊣»` is a parse error ("Right argument is not a function" in real Kap).
+    #[test]
+    #[should_panic]
+    fn parse_fork_requires_three_functions() {
+        eval("foo ⇐ ⊢«⊣» ⋄ 1 foo 2");
+    }
+
+    /// `foo ⇐ ⊢«⊣»,` (comma is the 3rd fn) is VALID → 2; this guards the opposite
+    /// direction so the above failure is specifically the *missing third function*.
+    #[test]
+    fn parse_fork_with_third_function_ok() {
+        assert_eq!(eval("foo ⇐ ⊢«⊣», ⋄ 1 foo 2"), "2");
+    }
+
+    /// Defining a function with a bare value (not a function) on the RHS is invalid.
+    #[test]
+    #[should_panic]
+    fn parse_fndef_rhs_must_be_function() {
+        eval("foo ⇐ 42 ⋄ foo 1");
+    }
+
+    /// A train/fork may not be built from a lone/adverb-only RHS.
+    #[test]
+    #[should_panic]
+    fn parse_fork_inner_must_be_functions() {
+        eval("foo ⇐ «» ⋄ foo 1 2");
     }
 }
