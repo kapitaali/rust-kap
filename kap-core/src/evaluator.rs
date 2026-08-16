@@ -80,6 +80,23 @@ impl Environment {
             .borrow_mut()
             .insert((name.to_string(), ns.clone()), value);
     }
+
+    /// Names of all symbols in this scope (and parents) that currently hold a
+    /// user-defined or native function value. Used by the parser to distinguish a
+    /// function symbol (which applies) from a value symbol (which strands).
+    pub fn function_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut cur: Option<&Environment> = Some(self);
+        while let Some(env) = cur {
+            for ((name, _ns), val) in env.symbols.borrow().iter() {
+                if matches!(val.as_ref(), APLValue::UserFn { .. }) && !names.contains(name) {
+                    names.push(name.clone());
+                }
+            }
+            cur = env.parent.as_deref();
+        }
+        names
+    }
 }
 
 impl APLValue {
@@ -119,15 +136,31 @@ impl Engine {
         src: &str,
         env: &AplRef<Environment>,
     ) -> Result<AplRef<APLValue>, AplError> {
+        // Parse and evaluate one statement at a time, refreshing the set of known function
+        // names between statements. This lets a function defined in one statement
+        // (`∇ foo ...`) be visible to later statements (`foo 10`), so the parser can tell a
+        // value symbol (`a c` strands) from a function symbol (`foo 10` applies).
         let toks = tokenise(src);
-        let (stmts, errs) = parser::parse(&toks);
-        if !errs.is_empty() {
-            // Surface the first error with its real source position.
-            return Err(errs.into_iter().next().unwrap());
-        }
+        let mut pos = 0;
         let mut last: AplRef<APLValue> = Rc::new(APLValue::Null);
-        for stmt in &stmts {
-            last = self.eval_instr(stmt, env)?;
+        loop {
+            // Fresh function-name set each statement, so a function defined earlier in
+            // this same input (`∇ foo ...`) is visible to later statements (`foo 10`).
+            // The parser also grows this set as it parses `∇`/`⇐` defs, so a function
+            // body that references its own name parses as an application (recursion).
+            let fn_names: Vec<String> = env.function_names();
+            let mut p = parser::Parser {
+                toks: &toks,
+                pos,
+                known_functions: fn_names,
+            };
+            match p.parse_statements()? {
+                Some(instr) => {
+                    pos = p.pos;
+                    last = self.eval_instr(&instr, env)?;
+                }
+                None => break,
+            }
         }
         Ok(last)
     }
@@ -369,7 +402,7 @@ impl Engine {
             _ => None,
         };
         if let Some((params, split, body)) = lambda {
-            return self.apply_user_fn(&params, split, &body, left, right, env);
+            return self.apply_user_fn(&params, split, &body, left, right, env, fn_name.as_deref());
         }
         // --- Derived functions from adverbs (e.g. `+/`, `×¨`) ---
         // `fn_expr` is an `Instr::Derived { func, op }`; `op` is the adverb name (`/`,
@@ -395,9 +428,9 @@ impl Engine {
             return self.apply_train(funcs, *reverse, *compose, left, right, env);
         }
         let name = match fn_name {
-            Some(n) => n,
+            Some(ref n) => n.clone(),
             None => {
-                return Err(AplError::runtime("only symbol/lambda functions supported yet".into()))
+                return Err(AplError::runtime("only symbol/lambda functions supported yet".into()));
             }
         };
         // For dyadic, force left then right; for monadic, only right.
@@ -653,6 +686,7 @@ impl Engine {
         left: &Option<Box<Instr>>,
         right: &Box<Instr>,
         closure_env: &AplRef<Environment>,
+        self_name: Option<&str>,
     ) -> Result<AplRef<APLValue>, AplError> {
         let child = Rc::new(Environment {
             symbols: Default::default(),
@@ -665,6 +699,20 @@ impl Engine {
             Some(l) => Some(self.eval_instr(l, closure_env)?.force(self)?),
             None => None,
         };
+        // Argument-count validation (Kap raises if arity is wrong).
+        let needed_left = split;
+        let needed_right = params.len().saturating_sub(split);
+        let have_left = match &left_val {
+            Some(v) => self.element_count(v),
+            None => 0,
+        };
+        let have_right = self.element_count(&right_val);
+        if have_left != needed_left || have_right != needed_right {
+            return Err(AplError::runtime(format!(
+                "function called with wrong number of arguments: expected {} left and {} right, got {} left and {} right",
+                needed_left, needed_right, have_left, have_right
+            )));
+        }
         if split > 0 {
             if let Some(lv) = &left_val {
                 for p in &params[..split.min(params.len())] {
@@ -679,6 +727,16 @@ impl Engine {
         child.define("⍵", &None, right_val);
         if let Some(lv) = &left_val {
             child.define("⍺", &None, lv.clone());
+        }
+        // Self-binding: so a function can recurse by name (e.g. `fib` calling `fib`).
+        if let Some(name) = self_name {
+            let self_fn = APLValue::UserFn {
+                params: params.to_vec(),
+                split,
+                body: Rc::new(body.clone()),
+                env: closure_env.clone(),
+            };
+            child.define(name, &None, Rc::new(self_fn));
         }
         self.eval_instr(body, &child)
     }
@@ -1717,6 +1775,15 @@ impl Engine {
         match v.as_ref() {
             APLValue::Array(a) => a.elements(),
             other => vec![Rc::new(other.clone())],
+        }
+    }
+
+    /// Number of "user-function argument slots" a value fills: a scalar is 1, an array is
+    /// its element count (matches Kap's `;`/`⍵`-destructuring semantics).
+    fn element_count(&self, v: &APLValue) -> usize {
+        match v {
+            APLValue::Array(a) => a.element_count(),
+            _ => 1,
         }
     }
 

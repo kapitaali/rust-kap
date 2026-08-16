@@ -24,26 +24,33 @@ use crate::AplError;
 
 /// Parse a full source string's token stream into a list of statement `Instr`s.
 /// Returns `(statements, errors)`. `errors` is non-empty on parse failure.
-pub fn parse(tokens: &[SpannedToken]) -> (Vec<Instr>, Vec<AplError>) {
-    let mut p = Parser { toks: tokens, pos: 0 };
+///
+/// `known_functions` is the set of names currently bound to user-defined (or
+/// native) functions in the evaluation environment. It lets the parser tell a
+/// *value* symbol from a *function* symbol so that `a c` strands to `(a c)`
+/// (both values) while `foo 10` applies `foo` monadically and `x foo y` applies
+/// `foo` dyadically. Without this, every bare symbol would be treated as an
+/// operator and `a c` would wrongly parse as `a(c)`.
+/// Parse a single statement starting at the parser's current position, advancing past
+/// it (and any trailing `⋄` separator). Returns `Ok(Some(instr))` for a parsed statement,
+/// `Ok(None)` at end-of-input, or `Err` on a parse failure. Intended for incremental
+/// use by the Engine, which re-derives `known_functions` between statements so that a
+/// function defined in one statement is visible to later statements in the same input.
+pub fn parse(
+    tokens: &[SpannedToken],
+    known_functions: &[&str],
+) -> (Vec<Instr>, Vec<AplError>) {
+    let mut p = Parser {
+        toks: tokens,
+        pos: 0,
+        known_functions: known_functions.iter().map(|s| s.to_string()).collect(),
+    };
     let mut stmts = Vec::new();
     let mut errors = Vec::new();
     loop {
-        p.skip_newlines();
-        if p.peek().map(|t| matches!(t.token, Token::EndOfFile)).unwrap_or(true) {
-            break;
-        }
-        match p.parse_expr() {
-            Ok(instr) => {
-                stmts.push(instr);
-                p.skip_newlines();
-                if let Some(t) = p.peek() {
-                    if matches!(t.token, Token::StatementSeparator) {
-                        p.advance();
-                        continue;
-                    }
-                }
-            }
+        match p.parse_statements() {
+            Ok(Some(instr)) => stmts.push(instr),
+            Ok(None) => break,
             Err(e) => {
                 errors.push(e);
                 // bail out to avoid an infinite loop on a broken token stream
@@ -54,9 +61,14 @@ pub fn parse(tokens: &[SpannedToken]) -> (Vec<Instr>, Vec<AplError>) {
     (stmts, errors)
 }
 
-struct Parser<'a> {
-    toks: &'a [SpannedToken],
-    pos: usize,
+pub struct Parser<'a> {
+    pub toks: &'a [SpannedToken],
+    pub pos: usize,
+    /// Names currently bound to functions. Seeded with the eval environment's function
+    /// names; also grown as the parser encounters `∇ name …` / `name ⇐ …` definitions,
+    /// so a function body that references its own (or a mutually-earlier) name parses as
+    /// an application rather than a strand. See `parse`.
+    pub known_functions: Vec<String>,
 }
 
 impl<'a> Parser<'a> {
@@ -69,6 +81,10 @@ impl<'a> Parser<'a> {
             self.pos += 1;
         }
         t
+    }
+    /// Whether `name` denotes a known function (so it should parse as an operator / apply).
+    fn is_known_fn(&self, name: &str) -> bool {
+        self.known_functions.iter().any(|n| n == name)
     }
     fn skip_newlines(&mut self) {
         while let Some(t) = self.peek() {
@@ -93,6 +109,30 @@ impl<'a> Parser<'a> {
                 msg: format!("unexpected end of input: {}", msg),
             },
         }
+    }
+
+    /// Parse a single statement starting at the parser's current position, advancing past
+    /// it (and any trailing `⋄` separator). Returns `Ok(Some(instr))` for a parsed statement,
+    /// `Ok(None)` at end-of-input, or `Err` on a parse failure. Intended for incremental
+    /// use by the Engine, which re-derives `known_functions` between statements so that a
+    /// function defined in one statement is visible to later statements in the same input.
+    pub fn parse_statements(&mut self) -> Result<Option<Instr>, AplError> {
+        self.skip_newlines();
+        if self
+            .peek()
+            .map(|t| matches!(t.token, Token::EndOfFile))
+            .unwrap_or(true)
+        {
+            return Ok(None);
+        }
+        let instr = self.parse_expr()?;
+        self.skip_newlines();
+        if let Some(t) = self.peek() {
+            if matches!(t.token, Token::StatementSeparator) {
+                self.advance();
+            }
+        }
+        Ok(Some(instr))
     }
 
     /// Expect the next token to be `tok`; consume it or return a parse error.
@@ -340,6 +380,24 @@ impl<'a> Parser<'a> {
         };
         self.advance(); // consume ⇐
         let value = self.parse_apply()?;
+        // Validation: a primitive operator/function name cannot be reassigned to a function,
+        // and the RHS must be a function (lambda/train/symbol), not a value.
+        if Self::is_primitive_op(&name) {
+            return Err(self.err(&format!("cannot redefine primitive function '{}'", name)));
+        }
+        if !matches!(
+            value,
+            Instr::Lambda { .. }
+                | Instr::Train { .. }
+                | Instr::Symbol { .. }
+                | Instr::Derived { .. }
+        ) {
+            return Err(self.err(&format!("'{} ⇐' requires a function on the right", name)));
+        }
+        // Register the name so a later body / mutual reference treats it as a function.
+        if !self.known_functions.iter().any(|n| n == &name) {
+            self.known_functions.push(name.clone());
+        }
         Ok(Instr::FnAssign {
             name,
             namespace,
@@ -369,10 +427,30 @@ impl<'a> Parser<'a> {
             },
             None => return Err(self.err("expected function name after ∇")),
         };
+        // Register the name as a known function *now* (before the body is parsed) so that a
+        // recursive reference (`fact N-1`) inside the body parses as an application rather
+        // than a value strand. (Kap functions are visible to their own bodies — recursion.)
+        if !self.known_functions.iter().any(|n| n == &name) {
+            self.known_functions.push(name.clone());
+        }
         self.skip_newlines();
         let right_params = self.parse_fn_params_opt(true)?;
         self.skip_newlines();
         let body = self.parse_block_body()?; // expects `{ … }`
+        // Validation (Kap semantics):
+        //  * a native (primitive) operator/function name cannot be redefined.
+        //  * parameter names must be distinct (no duplicated arguments).
+        if Self::is_primitive_op(&name) {
+            return Err(self.err(&format!("cannot redefine primitive function '{}'", name)));
+        }
+        {
+            let mut seen = std::collections::HashSet::new();
+            for p in left_params.iter().chain(right_params.iter()) {
+                if !seen.insert(p.clone()) {
+                    return Err(self.err(&format!("duplicated argument name '{}'", p)));
+                }
+            }
+        }
         Ok(Instr::UserFnDef {
             name,
             namespace,
@@ -405,10 +483,7 @@ impl<'a> Parser<'a> {
                             }
                             self.advance();
                         }
-                        Some(t)
-                            if matches!(t.token, Token::Comma)
-                                || matches!(t.token, Token::ListSeparator) =>
-                        {
+                        Some(t) if matches!(t.token, Token::Comma) || matches!(t.token, Token::ListSeparator) => {
                             self.advance();
                         }
                         _ => return Err(self.err("expected parameter name or ')'")),
@@ -463,6 +538,10 @@ impl<'a> Parser<'a> {
         // Valence is ultimately resolved at runtime; this is a syntactic heuristic.
         if let Instr::Symbol { name, .. } = &first {
             let is_prim = Self::is_primitive_op(name);
+            // A leading symbol is a *function* (and thus eligible for monadic apply `f x`)
+            // only if it is a primitive or a known (user/native) function. Otherwise it is a
+            // value and must strand (`a c` -> (a c)) rather than apply (`a(c)`).
+            let is_known = self.is_known_fn(name);
             // A top-level newline/separator ends the statement: `a ← 3` followed by a
             // newline is NOT a monadic apply of whatever comes next. Check BEFORE
             // skipping newlines so we see the boundary, not the next statement's token.
@@ -512,12 +591,14 @@ impl<'a> Parser<'a> {
                 _ => false,
             };
             let do_monadic = if is_prim {
-                // A leading primitive followed by an adverb (`+/`, `×¨`, `⍟\`) is the
+                // A leading primitive followed by an adverb (`+/`, `×¨`, `⍟\\`) is the
                 // *function-then-operator* form, NOT monadic application: it is a derived
                 // function `func op` applied to the following data.
                 (next_is_operand_not_fn || next_is_primitive) && !next_is_adverb
             } else {
-                next_is_operand_not_fn
+                // A leading user symbol applies monadically only when it names a function.
+                // A leading *value* symbol does not apply — it strands with the next operand.
+                is_known && next_is_operand_not_fn
             };
             if do_monadic {
                 let operand = self.parse_apply()?;
@@ -569,7 +650,7 @@ impl<'a> Parser<'a> {
             }
             let paren_op = self.next_is_paren_operator();
             match self.peek() {
-                Some(t) if Self::is_strand_operand(&t.token) && !paren_op => {
+                Some(t) if self.is_strand_operand(&t.token) && !paren_op => {
                     let mut operand = self.parse_primary()?;
                     // Selection also binds to this operand.
                     operand = self.parse_index_suffix(operand)?;
@@ -604,7 +685,12 @@ impl<'a> Parser<'a> {
             let paren_op = self.next_is_paren_operator();
             let is_operator = match self.peek() {
                 Some(t) => match &t.token {
-                    Token::Literal(LiteralValue::Symbol { .. }) => true,
+                    // A bare symbol is an operator only if it's a primitive or a
+                    // known (user/native) function. Otherwise it's a value and must
+                    // strand (`a c`) rather than apply (`a c` -> a(c)).
+                    Token::Literal(LiteralValue::Symbol { name, .. }) => {
+                        Self::is_primitive_op(name) || self.is_known_fn(name)
+                    }
                     Token::OpenParen => paren_op,
                     Token::OpenBracket => true,
                     Token::LambdaToken => true,
@@ -733,14 +819,22 @@ impl<'a> Parser<'a> {
     }
 
     /// Whether a token can begin a strand element (an operand, not an operator/separator).
-    fn is_strand_operand(tok: &Token) -> bool {
-        matches!(tok, Token::Literal(LiteralValue::Number(_)))
-            || matches!(tok, Token::Literal(LiteralValue::Char(_)))
-            || matches!(tok, Token::Literal(LiteralValue::Str(_)))
-            || matches!(tok, Token::OpenParen)
-            || matches!(tok, Token::OpenBracket)
-            || matches!(tok, Token::LambdaToken)
-            || matches!(tok, Token::APLNullSym)
+    fn is_strand_operand(&self, tok: &Token) -> bool {
+        match tok {
+            Token::Literal(LiteralValue::Number(_))
+            | Token::Literal(LiteralValue::Char(_))
+            | Token::Literal(LiteralValue::Str(_))
+            | Token::OpenParen
+            | Token::OpenBracket
+            | Token::LambdaToken
+            | Token::APLNullSym => true,
+            // A bare symbol is a strand operand (so `a c` -> (a c)) UNLESS it names a
+            // function — a function symbol in strand position is applied instead.
+            Token::Literal(LiteralValue::Symbol { name, .. }) => {
+                !Self::is_primitive_op(name) && !self.is_known_fn(name)
+            }
+            _ => false,
+        }
     }
 
     /// Kap primitive function/operator names (single-glyph). Used to decide monadic vs
@@ -949,6 +1043,24 @@ impl<'a> Parser<'a> {
                 self.pos = save;
                 let e = self.parse_expr()?;
                 self.skip_newlines();
+                // A `;` between operands inside a group is a vector literal: `(10;20;30)`.
+                // (Kap uses `;` as the list separator in vectors and function argument lists.)
+                if matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator)) {
+                    let mut elems = vec![e];
+                    while matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator)) {
+                        self.advance();
+                        self.skip_newlines();
+                        elems.push(self.parse_expr()?);
+                        self.skip_newlines();
+                    }
+                    match self.peek() {
+                        Some(t) if matches!(t.token, Token::CloseParen) => {
+                            self.advance();
+                            return Ok(Instr::Array { elements: elems });
+                        }
+                        _ => return Err(self.err("expected ')' after ';'-separated vector")),
+                    }
+                }
                 match self.peek() {
                     Some(t) if matches!(t.token, Token::CloseParen) => {
                         self.advance();
@@ -1112,7 +1224,7 @@ mod tests {
 
     fn parse_one(src: &str) -> Instr {
         let toks = tokenise(src);
-        let (stmts, errs) = parse(&toks);
+        let (stmts, errs) = parse(&toks, &[]);
         assert!(errs.is_empty(), "parse errors for {:?}: {:?}", src, errs);
         assert_eq!(stmts.len(), 1, "expected one statement for {:?}", src);
         stmts.into_iter().next().unwrap()

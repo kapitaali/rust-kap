@@ -146,6 +146,7 @@ fn single_char_token(c: char) -> Option<Token> {
         '[' => Token::OpenBracket,
         ']' => Token::CloseBracket,
         '⋄' => Token::StatementSeparator,
+        '◊' => Token::StatementSeparator,
         '←' => Token::LeftArrow,
         '⍬' => Token::APLNullSym,
         'λ' => Token::LambdaToken,
