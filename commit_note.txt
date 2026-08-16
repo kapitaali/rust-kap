@@ -1,0 +1,58 @@
+# Commit Note — CustomFunctions work (operators, ⍞ dynamic ref, ⍓ bare-block, derived ⇐ RHS)
+
+Branch: CustomFunctions  (named after CustomFunctionTest.kt — the Kap Kotlin source we are
+grounding our parser/evaluator semantics in.)
+
+NOTE: this file was previously polluted with an auto-generated context-compaction dump. The
+real working note is below.
+
+## What I am doing
+Implementing user-defined **functions** AND **operators** in the Rust Kap interpreter so the
+extracted `CustomFunctionTest__*.kap` conformance cases (from the Kap Kotlin suite) pass under
+the Kap-native harness. All work is grounded in the actual Kotlin source at
+`/home/theb/Apps/array/array/src/commonMain/kotlin/com/dhsdevelopments/kap/` (parser.kt,
+op.kt, tokeniser.kt, instr.kt) — NOT invented macros. (Earlier an `Instrs_FnAtom!()` macro was
+hallucinated; removed.)
+
+## Status / what is implemented
+- `∇ name { body }` and `∇ (x;y) name (a;b) { body }` traditional functions (component-list grammar
+  matching Kotlin parser.kt 694-820).
+- `name ⇐ fn-expr` and `name ← fn-expr` both define a first-class function (FnAssign → UserFn).
+- Named + anonymous self-recursion via `⍓` (OUTER_CALL_SYMBOL): bound for named ⇐/`∇` AND for bare
+  blocks (`{ … } 1`); split clamped to params.len() to avoid panic.
+- `≡` (Compare/depth), `⊢` (Identity), `⊣` (Hide), `⍓` added to is_primitive_op.
+- Fork `a « b » c` (and 2-train `a « b »` with optional c), trains, derived `f/` `f¨`.
+- **Operators**: `∇ (x foo) a { 10 ⍞x a }` (one fn operand) and `∇ (x foo y) a { … }` (two fn
+  operands) → stored as `APLValue::UserOp`. Operator calls `+foo 2`, `-foo+ 3` parsed as
+  `Instr::OpCall{op, left_fn, right_fn}` and evaluated by `apply_user_op` (function operands
+  wrapped and bound to op_left/op_right; body applied to data args).
+- **`⍞`** (ApplyToken) → `Instr::DynamicRef{name}` = dynamic function reference (fetch var value
+  as function, apply). Faithful to Kotlin `DynamicFunctionDescriptor`.
+- Parser tracks `known_ops` (seeded from env.operator_names() each statement) so operators are
+  recognized as operators, not stranded values.
+
+## Open tasks / problems
+- BUILD: should be green after prior fixes (let mut first in parse_apply; APLValue::UserOp has no
+  `name` field — removed; added UserOp arms to truthy + array-element match; added OpCall arm to
+  eval_instr). NEEDS A FRESH `cargo build` + conformance run to confirm.
+- `shortFormWithSimpleOperator`: `foo ⇐ ×/` must parse `×/` as `Instr::Derived` and apply as
+  multiply-reduce (`foo 1 2 3` → 6). Derived-function-as-⇐-RHS support still needed.
+- 5 SHOULD-FAIL cases currently do NOT error (they return values instead of parse errors):
+    dyadicDestructuringNoSemicolonBoth, dyadicDestructuringNoSemicolonLeft,
+    functionDefinitionWithExtraLeftArgumentsShouldFail, duplicatedArgumentsTest2,
+    parenMonadicDestructuringNoSemicolon. Need stricter parse-time validation.
+- After green build + conformance, run the full CustomFunctionTest harness and report pass/fail.
+
+## Goals
+- Get the Rust interpreter to match the Kotlin `CustomFunctionTest.kt` expectations for functions
+  and operators (value cases correct, and the 5 should-fail cases actually rejecting).
+- Keep PROGRESS-20260816.md updated (append-only daily log) and commit it.
+- Then commit to dev branch (CustomFunctions) and continue iterating.
+
+## Reference (Kotlin ground truth)
+- parser.kt ~694-820: `∇` component-list grammar (name component with 2-3 symbols => operator).
+- parser.kt ~1194-1245: `⍞` → DynamicFunctionDescriptor.
+- tokeniser.kt ~474: `"⍞" to ApplyToken`.
+- op.kt: UserDefinedOperatorOneArg (opBinding), UserDefinedOperatorTwoArg (leftOp/rightOp).
+- operator call `-foo+ 3`: left fn `-`, op `foo`, right fn `+`, data `3` (parseAndCombineFunctions
+  reads a right function arg for 2-arg ops).

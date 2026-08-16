@@ -97,6 +97,23 @@ impl Environment {
         }
         names
     }
+
+    /// Names bound to user-defined *operators* (`APLValue::UserOp`), used to seed the
+    /// parser's `known_ops` so an operator call (`+foo 2`) in a later statement parses
+    /// `foo` as an operator even though the defining `∇` was a separate parse.
+    pub fn operator_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut cur: Option<&Environment> = Some(self);
+        while let Some(env) = cur {
+            for ((name, _ns), val) in env.symbols.borrow().iter() {
+                if matches!(val.as_ref(), APLValue::UserOp { .. }) && !names.contains(name) {
+                    names.push(name.clone());
+                }
+            }
+            cur = env.parent.as_deref();
+        }
+        names
+    }
 }
 
 impl APLValue {
@@ -149,10 +166,12 @@ impl Engine {
             // The parser also grows this set as it parses `∇`/`⇐` defs, so a function
             // body that references its own name parses as an application (recursion).
             let fn_names: Vec<String> = env.function_names();
+            let op_names: Vec<String> = env.operator_names();
             let mut p = parser::Parser {
                 toks: &toks,
                 pos,
                 known_functions: fn_names,
+                known_ops: op_names,
             };
             match p.parse_statements()? {
                 Some(instr) => {
@@ -181,6 +200,11 @@ impl Engine {
                 let found = env.lookup(name, namespace).ok_or_else(|| AplError::runtime(format!("undefined symbol: {}", name)))?;
                 // clone the inner value out of the shared ref
                 Ok(Rc::new(found.as_ref().clone()))
+            }
+            Instr::OpCall { op, left_fn, right_fn } => {
+                // An operator call only appears as a *function*; route it through
+                // `eval_apply` with no trailing data argument.
+                self.apply_user_op(op, left_fn, right_fn, &None, &Box::new(Instr::Empty), env)
             }
             Instr::Array { elements } => {
                 let mut vals = Vec::with_capacity(elements.len());
@@ -326,6 +350,35 @@ impl Engine {
                 env.define(name, namespace, v.clone());
                 Ok(v)
             }
+            Instr::UserOpDef {
+                name,
+                op_left,
+                op_right,
+                left_params,
+                right_params,
+                body,
+            } => {
+                // Compile to `APLValue::UserOp`: a function that, when applied with
+                // function-operands (via `OpCall`), binds `op_left`/`op_right` to those
+                // operands and runs `body` with the ordinary data args.
+                let v = Rc::new(APLValue::UserOp {
+                    op_left: op_left.clone(),
+                    op_right: op_right.clone(),
+                    left_params: left_params.clone(),
+                    right_params: right_params.clone(),
+                    body: Rc::new(*body.clone()),
+                    env: env.clone(),
+                });
+                env.define(name, &None, v.clone());
+                Ok(v)
+            }
+            Instr::DynamicRef { name, namespace } => {
+                // Kap's `⍞name`: fetch the variable's *value* and apply it as a function.
+                let found = env
+                    .lookup(name, namespace)
+                    .ok_or_else(|| AplError::runtime(format!("undefined symbol: {}", name)))?;
+                Ok(found)
+            }
             Instr::Value(v) => Ok(v.clone()),
             Instr::Index { array, selector } => {
                 let arr = self.eval_instr(array, env)?;
@@ -366,6 +419,7 @@ impl Engine {
             APLValue::Char(_) => true,
             APLValue::Null => false,
             APLValue::UserFn { .. } => true,
+            APLValue::UserOp { .. } => true,
             APLValue::Deferred { .. } => false,
         }
     }
@@ -399,6 +453,36 @@ impl Engine {
                 }
                 _ => None,
             },
+            // A bare block `{ … }` applied as a function: bind `⍵` (right) / `⍺` (left) and
+            // evaluate the block body in a fresh child scope. (`{ … } x` and `a { … } b`.)
+            Instr::Block { body } => {
+                let child = Rc::new(Environment {
+                    symbols: Default::default(),
+                    parent: Some(env.clone()),
+                });
+                let right_val = self.eval_instr(right, env)?.force(self)?;
+                if let Some(l) = left {
+                    let lv = self.eval_instr(l, env)?.force(self)?;
+                    child.define("⍺", &None, lv);
+                }
+                child.define("⍵", &None, right_val.clone());
+                // `⍓` (Kap's OUTER_CALL_SYMBOL) refers to the enclosing function — for a bare
+                // block it is the block itself, enabling anonymous self-recursion.
+                child.define("⍓", &None, Rc::new(APLValue::UserFn {
+                    params: vec![],
+                    split: 1,
+                    body: Rc::new(Instr::Block { body: body.clone() }),
+                    env: env.clone(),
+                }));
+                return self.eval_block(body, &child);
+            }
+            // Operator call with function operands, e.g. `+foo 2` / `-foo+ 3`. `op` names a
+            // user-defined operator (resolved to `APLValue::UserOp`); `left_fn`/`right_fn`
+            // are the function operands bound to its `op_left`/`op_right`. The combined
+            // operator is then applied to the trailing data args (`2`, `3`).
+            Instr::OpCall { op, left_fn, right_fn } => {
+                return self.apply_user_op(op, left_fn, right_fn, left, right, env);
+            }
             _ => None,
         };
         if let Some((params, split, body)) = lambda {
@@ -520,6 +604,18 @@ impl Engine {
             "⍋" | "grade" => self.grade_up(right_val),
             "⊤" | "encode" => self.encode(left_val, right_val),
             "⊥" | "decode" => self.decode(left_val, right_val),
+            // Identity (⊢): monadic → argument; dyadic → right argument.
+            "⊢" => match left_val {
+                None => Ok(right_val),
+                Some(_) => Ok(right_val),
+            },
+            // Hide (⊣): monadic → EmptyValue (discard); dyadic → left argument.
+            "⊣" => match left_val {
+                None => Ok(Rc::new(APLValue::Null)),
+                Some(l) => Ok(l),
+            },
+            // Match / depth (≡): dyadic → 1 if deeply equal else 0; monadic → depth.
+            "≡" => self.match_or_depth(left_val, right_val),
             _ => Err(AplError::runtime(format!("unknown function: {}", name))),
         }
     }
@@ -699,29 +795,37 @@ impl Engine {
             Some(l) => Some(self.eval_instr(l, closure_env)?.force(self)?),
             None => None,
         };
-        // Argument-count validation (Kap raises if arity is wrong).
-        let needed_left = split;
-        let needed_right = params.len().saturating_sub(split);
-        let have_left = match &left_val {
-            Some(v) => self.element_count(v),
-            None => 0,
-        };
-        let have_right = self.element_count(&right_val);
-        if have_left != needed_left || have_right != needed_right {
-            return Err(AplError::runtime(format!(
-                "function called with wrong number of arguments: expected {} left and {} right, got {} left and {} right",
-                needed_left, needed_right, have_left, have_right
-            )));
-        }
-        if split > 0 {
-            if let Some(lv) = &left_val {
-                for p in &params[..split.min(params.len())] {
-                    child.define(p, &None, lv.clone());
-                }
+        // Argument-count validation (Kap raises on arity mismatch). Only enforced when the
+        // function has *named* parameters; default-arg dfns (`∇ foo { ⍺+⍵ }`) accept ⍺/⍵
+        // regardless of valence. `split` counts the *elements* expected on the left.
+        if !params.is_empty() {
+            let needed_left = split;
+            let needed_right = params.len() - split;
+            let have_left = match &left_val {
+                Some(v) => self.element_count(v),
+                None => 0,
+            };
+            let have_right = self.element_count(&right_val);
+            if have_left != needed_left || have_right != needed_right {
+                return Err(AplError::runtime(format!(
+                    "function called with wrong number of arguments: expected {} left and {} right, got {} left and {} right",
+                    needed_left, needed_right, have_left, have_right
+                )));
             }
         }
-        for p in &params[split.min(params.len())..] {
-            child.define(p, &None, right_val.clone());
+        // Bind named parameters. A multi-name group `(A;B)` destructures a vector argument
+        // element-wise; a single-name group `(A)` or bare `A` binds the whole argument.
+        // `split` may exceed `params.len()` for delegation-style dfns (e.g. `f ⇐ +` where
+        // `split=1` but `params=[]` — the left arg is exposed via `⍺`/`⍵`, not named
+        // params), so clamp to avoid an out-of-range slice.
+        let bind_split = split.min(params.len());
+        if bind_split > 0 {
+            if let Some(lv) = &left_val {
+                self.bind_param_group(&child, &params[..bind_split], lv);
+            }
+        }
+        if params.len() > bind_split {
+            self.bind_param_group(&child, &params[bind_split..], &right_val);
         }
         // Default `⍵`/`⍺` names (Kap's omega/alpha). `⍵` = right arg; `⍺` = left (if present).
         child.define("⍵", &None, right_val);
@@ -736,12 +840,152 @@ impl Engine {
                 body: Rc::new(body.clone()),
                 env: closure_env.clone(),
             };
-            child.define(name, &None, Rc::new(self_fn));
+            child.define(name, &None, Rc::new(self_fn.clone()));
+            // `⍓` (Kap's OUTER_CALL_SYMBOL) also refers to the enclosing function,
+            // so a dfn can recurse via `⍓` even when assigned anonymously (e.g. `foo ⇐ { … ⍓ … }`).
+            child.define("⍓", &None, Rc::new(self_fn));
         }
         self.eval_instr(body, &child)
     }
 
-    // --- helpers ---------------------------------------------------------------
+    /// Apply a user-defined *operator* (from `Instr::OpCall`). `op` names a `UserOp`
+    /// (resolved via the symbol table). `left_fn`/`right_fn` are the function operands
+    /// (already-parsed Instrs); they are wrapped as `UserFn` values and bound to the
+    /// operator's `op_left`/`op_right` names, so the body can invoke them via `⍞name`.
+    /// The ordinary data args (`⍺`/`⍵`, i.e. `left`/`right`) are bound to `left_params`/
+    /// `right_params` and exposed as `⍺`/`⍵`. Mirrors Kap's `UserDefinedOperatorFn`.
+    fn apply_user_op(
+        &self,
+        op: &Box<Instr>,
+        left_fn: &Box<Instr>,
+        right_fn: &Option<Box<Instr>>,
+        left: &Option<Box<Instr>>,
+        right: &Box<Instr>,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        // Resolve the operator name to its `APLValue::UserOp`.
+        let op_name = match op.as_ref() {
+            Instr::Symbol { name, .. } => name.clone(),
+            _ => return Err(AplError::runtime("operator must be a symbol".into())),
+        };
+        let uop = env
+            .lookup(&op_name, &None)
+            .ok_or_else(|| AplError::runtime(format!("undefined operator: {}", op_name)))?;
+        let (op_left, op_right, left_params, right_params, body, op_env) = match uop.as_ref() {
+            APLValue::UserOp {
+                op_left,
+                op_right,
+                left_params,
+                right_params,
+                body,
+                env: oenv,
+                ..
+            } => (
+                op_left.clone(),
+                op_right.clone(),
+                left_params.clone(),
+                right_params.clone(),
+                body.clone(),
+                oenv.clone(),
+            ),
+            _ => return Err(AplError::runtime(format!("{} is not an operator", op_name))),
+        };
+        // Build a child scope off the operator's closure env.
+        let op_env_for_fn = op_env.clone();
+        let child = Rc::new(Environment {
+            symbols: Default::default(),
+            parent: Some(op_env_for_fn),
+        });
+        // Wrap a function operand (`left_fn`/`right_fn`) as an `APLValue::UserFn` so the
+        // operator body can apply it via `⍞name`. The wrapper applies the original operand
+        // to its own `⍺`/`⍵` arguments: `body = (operand) ⍺ ⍵` expressed as
+        // `Apply { fn_expr: operand, left: ⍺, right: ⍵ }`. This way a primitive like `+`
+        // (which is *not* a bound symbol in the environment) still resolves through the
+        // engine's builtin dispatch when the wrapper is later applied.
+        let op_env_for_fn = op_env.clone();
+        let wrap_fn = |instr: &Instr| -> APLValue {
+            APLValue::UserFn {
+                params: vec![],
+                split: 1,
+                body: Rc::new(Instr::Apply {
+                    fn_expr: Box::new(instr.clone()),
+                    left: Some(Box::new(Instr::Symbol {
+                        name: "⍺".to_string(),
+                        namespace: None,
+                    })),
+                    right: Box::new(Instr::Symbol {
+                        name: "⍵".to_string(),
+                        namespace: None,
+                    }),
+                }),
+                env: op_env_for_fn.clone(),
+            }
+        };
+        if let Some(ol) = &op_left {
+            let fv = Rc::new(wrap_fn(left_fn));
+            child.define(ol, &None, fv);
+        }
+        if let Some(or) = &op_right {
+            let fv = match right_fn {
+                Some(rf) => Rc::new(wrap_fn(rf)),
+                None => Rc::new(APLValue::Null),
+            };
+            child.define(or, &None, fv);
+        }
+        // Evaluate the data args in the calling env; bind to left/right param groups and to
+        // `⍺`/`⍵` (ambivalent: `⍵` is the right arg, `⍺` the left if present).
+        let right_val = self.eval_instr(right, env)?.force(self)?;
+        let left_val = match left {
+            Some(l) => Some(self.eval_instr(l, env)?.force(self)?),
+            None => None,
+        };
+        let bind_split = left_params.len().min(1);
+        if bind_split > 0 && !left_params.is_empty() {
+            if let Some(lv) = &left_val {
+                self.bind_param_group(&child, &left_params[..bind_split], lv);
+            }
+        }
+        if left_params.len() > bind_split {
+            self.bind_param_group(&child, &left_params[bind_split..], &right_val);
+        }
+        if !right_params.is_empty() {
+            self.bind_param_group(&child, &right_params, &right_val);
+        }
+        child.define("⍵", &None, right_val);
+        if let Some(lv) = &left_val {
+            child.define("⍺", &None, lv.clone());
+        }
+        self.eval_instr(&body, &child)
+    }
+
+    /// (`(A;B;C)`), the argument must be a vector and each name gets one element
+    /// (Kap destructuring). A single-name group binds the whole argument.
+    fn bind_param_group(
+        &self,
+        env: &Rc<Environment>,
+        names: &[String],
+        arg: &APLValue,
+    ) {
+        if names.is_empty() {
+            return;
+        }
+        if names.len() == 1 {
+            env.define(&names[0], &None, Rc::new(arg.clone()));
+            return;
+        }
+        if let APLValue::Array(a) = arg {
+            let elems = a.elements();
+            for (i, n) in names.iter().enumerate() {
+                let v = elems.get(i).cloned().unwrap_or_else(|| Rc::new(APLValue::Null));
+                env.define(n, &None, v);
+            }
+        } else {
+            // Non-vector argument for a multi-name group: bind every name to the whole value.
+            for n in names {
+                env.define(n, &None, Rc::new(arg.clone()));
+            }
+        }
+    }
 
     fn num2(
         &self,
@@ -780,7 +1024,10 @@ impl Engine {
                     )));
                 }
                 for (i, e) in xa.elements().into_iter().enumerate() {
-                    if let (APLValue::Number(x), APLValue::Number(y)) = (e.as_ref(), ye[i].as_ref()) {
+                    // Bounds-guard each cell (a ragged/short vector must not panic on index).
+                    if let (APLValue::Number(x), Some(APLValue::Number(y))) =
+                        (e.as_ref(), ye.get(i).map(|y| y.as_ref()))
+                    {
                         out.push(Rc::new(APLValue::Number(f(x, y))));
                     }
                 }
@@ -1652,6 +1899,9 @@ impl Engine {
             APLValue::UserFn { .. } => {
                 Err(AplError::runtime("cannot use a function as an array element".into()))
             }
+            APLValue::UserOp { .. } => {
+                Err(AplError::runtime("cannot use an operator as an array element".into()))
+            }
             APLValue::Null => Ok(Instr::Literal(LiteralValue::Str(String::new()))),
             APLValue::Deferred { .. } => {
                 Err(AplError::runtime("cannot use a deferred value as an array element".into()))
@@ -1784,6 +2034,70 @@ impl Engine {
         match v {
             APLValue::Array(a) => a.element_count(),
             _ => 1,
+        }
+    }
+
+    /// `≡`: dyadic = deep match-equal (returns 1/0); monadic = nesting depth.
+    /// Mirrors Kap's `CompareFunction` (compare_functions.kt).
+    fn match_or_depth(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        match left_val {
+            None => {
+                let depth = Self::depth_of(right_val.force(self)?.as_ref());
+                Ok(Rc::new(APLValue::Number(KapNumber::Long(depth as i64))))
+            }
+            Some(l) => {
+                let eq =
+                    Self::deep_equal(l.force(self)?.as_ref(), right_val.force(self)?.as_ref());
+                Ok(Rc::new(APLValue::Number(KapNumber::Long(if eq { 1 } else { 0 }))))
+            }
+        }
+    }
+
+    /// Nesting depth: a scalar is 0; an array's depth is 1 + max(depth of elements),
+    /// with enclosed scalars counting as depth 1.
+    fn depth_of(v: &APLValue) -> usize {
+        match v {
+            APLValue::Array(a) => {
+                if a.dimensions.iter().product::<usize>() == 0 {
+                    return 1;
+                }
+                let mut max = 0;
+                for e in a.elements() {
+                    let d = Self::depth_of(e.as_ref());
+                    if d > max {
+                        max = d;
+                    }
+                }
+                max + 1
+            }
+            _ => 0,
+        }
+    }
+
+    /// Structural deep equality: same shape and element-wise equal.
+    fn deep_equal(a: &APLValue, b: &APLValue) -> bool {
+        match (a, b) {
+            (APLValue::Number(x), APLValue::Number(y)) => x.numeric_cmp(y).map(|o| o == Ordering::Equal).unwrap_or(false),
+            (APLValue::Char(x), APLValue::Char(y)) => x == y,
+            (APLValue::Str(x), APLValue::Str(y)) => x == y,
+            (APLValue::Null, APLValue::Null) => true,
+            (APLValue::Array(x), APLValue::Array(y)) => {
+                if x.dimensions != y.dimensions {
+                    return false;
+                }
+                let xe = x.elements();
+                let ye = y.elements();
+                xe.len() == ye.len()
+                    && xe
+                        .iter()
+                        .zip(ye.iter())
+                        .all(|(p, q)| Self::deep_equal(p.as_ref(), q.as_ref()))
+            }
+            _ => false,
         }
     }
 

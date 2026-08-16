@@ -39,11 +39,13 @@ use crate::AplError;
 pub fn parse(
     tokens: &[SpannedToken],
     known_functions: &[&str],
+    known_ops: &[&str],
 ) -> (Vec<Instr>, Vec<AplError>) {
     let mut p = Parser {
         toks: tokens,
         pos: 0,
         known_functions: known_functions.iter().map(|s| s.to_string()).collect(),
+        known_ops: known_ops.iter().map(|s| s.to_string()).collect(),
     };
     let mut stmts = Vec::new();
     let mut errors = Vec::new();
@@ -69,6 +71,10 @@ pub struct Parser<'a> {
     /// so a function body that references its own (or a mutually-earlier) name parses as
     /// an application rather than a strand. See `parse`.
     pub known_functions: Vec<String>,
+    /// Names currently bound to user-defined *operators* (defined via `∇ (x foo) a`).
+    /// Seeded/regrown like `known_functions` so an operator call (`X foo Y`) parses the
+    /// operator name as an operator rather than a stranded value.
+    pub known_ops: Vec<String>,
 }
 
 impl<'a> Parser<'a> {
@@ -85,6 +91,27 @@ impl<'a> Parser<'a> {
     /// Whether `name` denotes a known function (so it should parse as an operator / apply).
     fn is_known_fn(&self, name: &str) -> bool {
         self.known_functions.iter().any(|n| n == name)
+    }
+    /// Whether an RHS `Instr` is a function value (so `name ← <rhs>` should define a function).
+    fn is_function_value(&self, v: &Instr) -> bool {
+        match v {
+            Instr::Lambda { .. }
+            | Instr::Train { .. }
+            | Instr::Derived { .. }
+            | Instr::Block { .. } => true,
+            // a symbol that is a known/primitive function name also defines a function
+            Instr::Symbol { name, .. } => self.is_known_fn(name) || Self::is_primitive_op(name),
+            _ => false,
+        }
+    }
+    /// Extract `(name, namespace)` from a symbol token.
+    fn name_of(tok: &Token) -> (String, Option<String>) {
+        match tok {
+            Token::Literal(LiteralValue::Symbol { name, namespace }) => {
+                (name.clone(), namespace.clone())
+            }
+            _ => (String::new(), None),
+        }
     }
     fn skip_newlines(&mut self) {
         while let Some(t) = self.peek() {
@@ -352,6 +379,22 @@ impl<'a> Parser<'a> {
                         self.advance();
                         let value = self.parse_apply()?;
                         let target = instr_from_symbol(&name_tok.token);
+                        // A regular `←` assignment with a function-valued RHS (`{…}`, `λ`,
+                        // train, derived, or a known function name) defines that name as a
+                        // function — same as `⇐` — so that later uses (`g 5`) apply it rather
+                        // than stranding. Pure `←` would otherwise *evaluate* the block here,
+                        // which fails on `⍵`/`⍺` and never registers the name.
+                        if self.is_function_value(&value) {
+                            let (nm, ns) = Self::name_of(&name_tok.token);
+                            if !self.known_functions.iter().any(|x| x == &nm) {
+                                self.known_functions.push(nm.clone());
+                            }
+                            return Ok(Instr::FnAssign {
+                                name: nm,
+                                namespace: ns,
+                                value: Box::new(value),
+                            });
+                        }
                         return Ok(Instr::Assign {
                             target: Box::new(target),
                             value: Box::new(value),
@@ -391,6 +434,7 @@ impl<'a> Parser<'a> {
                 | Instr::Train { .. }
                 | Instr::Symbol { .. }
                 | Instr::Derived { .. }
+                | Instr::Block { .. }
         ) {
             return Err(self.err(&format!("'{} ⇐' requires a function on the right", name)));
         }
@@ -405,36 +449,117 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// `∇ (left) name (right) { body }` — traditional Kap function definition.
-    /// Left and right parameter lists may be parenthesised (`(A B C)` or `(A;B;C)`);
-    /// the right list may additionally be a single bare symbol (`∇ foo x { … }`);
-    /// either list may be omitted entirely (monadic `∇ foo { … }` using `⍵`/`⍺`).
+    /// `∇ name { body }` | `∇ (x;y) name (a;b) { body }` | `∇ x name y { body }`
+    /// Parses whitespace-separated components: a bare `Name` or a `( … )` group. Collects
+    /// them in order; then:
+    ///   * 1 component  -> name (monadic `⍺`/`⍵`)
+    ///   * 2 components -> name (1st), right-args (2nd)
+    ///   * 3 components -> left-args (1st), name (2nd), right-args (3rd)
     fn parse_fn_def(&mut self) -> Result<Instr, AplError> {
         self.advance(); // consume ∇
-        self.skip_newlines();
-        let left_params = self.parse_fn_params_opt(false)?;
-        self.skip_newlines();
-        // name: a symbol (user identifier) or an operator glyph such as `+`.
-        let (name, namespace) = match self.peek() {
-            Some(t) => match &t.token {
-                Token::Literal(LiteralValue::Symbol { name, namespace }) => {
-                    let n = name.clone();
-                    let ns = namespace.clone();
+        let mut components: Vec<Vec<String>> = Vec::new();
+        loop {
+            self.skip_newlines();
+            match self.peek() {
+                Some(t) if matches!(t.token, Token::OpenBrace) => break,
+                Some(t) if matches!(t.token, Token::Literal(LiteralValue::Symbol { .. })) => {
+                    if let Token::Literal(LiteralValue::Symbol { name, .. }) = &t.token {
+                        components.push(vec![name.clone()]);
+                    }
                     self.advance();
-                    (n, ns)
+                }
+                Some(t) if matches!(t.token, Token::OpenParen) => {
+                    self.advance();
+                    let mut params = Vec::new();
+                    loop {
+                        self.skip_newlines();
+                        match self.peek() {
+                            Some(t) if matches!(t.token, Token::CloseParen) => {
+                                self.advance();
+                                break;
+                            }
+                            Some(t)
+                                if matches!(t.token, Token::Literal(LiteralValue::Symbol { .. })) =>
+                            {
+                                if let Token::Literal(LiteralValue::Symbol { name, .. }) = &t.token {
+                                    params.push(name.clone());
+                                }
+                                self.advance();
+                            }
+                            Some(t)
+                                if matches!(t.token, Token::Comma)
+                                    || matches!(t.token, Token::ListSeparator) =>
+                            {
+                                self.advance();
+                            }
+                            _ => return Err(self.err("expected parameter name or ')'")),
+                        }
+                    }
+                    components.push(params);
                 }
                 _ => return Err(self.err("expected function name after ∇")),
-            },
-            None => return Err(self.err("expected function name after ∇")),
+            }
+            // After the name+params, a `{` begins the body. Stop collecting components
+            // once we see it (it's not part of the name spec).
+            if matches!(self.peek().map(|t| &t.token), Some(Token::OpenBrace)) {
+                break;
+            }
+        }
+        if components.is_empty() {
+            return Err(self.err("no function name specified"));
+        }
+        // Determine the *name component* and whether this is an operator definition
+        // (name component has >= 2 symbols, e.g. `(x foo)` or `(x foo y)`).
+        //   * 1 component            -> name only                                  (fn def)
+        //   * 2 components:
+        //       comp0.symbols.len()>=2 -> comp0 is the name component (operator/op args)
+        //                               right args = comp1
+        //       else                   -> name = comp0[0], right = comp1           (fn def)
+        //   * 3 components            -> left=comp0, nameComp=comp1, right=comp2    (fn or op)
+        // For an operator definition, the name component's symbols split as
+        //   [op_left, name, op_right?]  (op_right only when >= 3 symbols).
+        let (name, op_left, op_right, left_params, right_params): (
+            String,
+            Option<String>,
+            Option<String>,
+            Vec<String>,
+            Vec<String>,
+        ) = match components.len() {
+            1 => (components[0][0].clone(), None, None, vec![], vec![]),
+            2 => {
+                if components[0].len() >= 2 {
+                    let nc = &components[0];
+                    let op_left = Some(nc[0].clone());
+                    let name = nc[1].clone();
+                    let op_right = nc.get(2).cloned();
+                    (name, op_left, op_right, vec![], components[1].clone())
+                } else {
+                    (components[0][0].clone(), None, None, vec![], components[1].clone())
+                }
+            }
+            3 => {
+                let nc = &components[1];
+                if nc.len() >= 2 {
+                    let op_left = Some(nc[0].clone());
+                    let name = nc[1].clone();
+                    let op_right = nc.get(2).cloned();
+                    (name, op_left, op_right, components[0].clone(), components[2].clone())
+                } else {
+                    (nc[0].clone(), None, None, components[0].clone(), components[2].clone())
+                }
+            }
+            _ => return Err(self.err("invalid function definition format")),
         };
-        // Register the name as a known function *now* (before the body is parsed) so that a
-        // recursive reference (`fact N-1`) inside the body parses as an application rather
-        // than a value strand. (Kap functions are visible to their own bodies — recursion.)
-        if !self.known_functions.iter().any(|n| n == &name) {
+        let is_op = op_left.is_some();
+        // Register the name as a known function/operator *now* (before the body is parsed)
+        // so a recursive reference inside the body parses as an application.
+        if is_op {
+            if !self.known_ops.iter().any(|n| n == &name) {
+                self.known_ops.push(name.clone());
+            }
+        } else if !self.known_functions.iter().any(|n| n == &name) {
             self.known_functions.push(name.clone());
         }
-        self.skip_newlines();
-        let right_params = self.parse_fn_params_opt(true)?;
         self.skip_newlines();
         let body = self.parse_block_body()?; // expects `{ … }`
         // Validation (Kap semantics):
@@ -451,13 +576,24 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        Ok(Instr::UserFnDef {
-            name,
-            namespace,
-            left_params,
-            right_params,
-            body: Box::new(body),
-        })
+        if is_op {
+            Ok(Instr::UserOpDef {
+                name,
+                op_left,
+                op_right,
+                left_params,
+                right_params,
+                body: Box::new(body),
+            })
+        } else {
+            Ok(Instr::UserFnDef {
+                name,
+                namespace: None,
+                left_params,
+                right_params,
+                body: Box::new(body),
+            })
+        }
     }
 
     /// Parse an optional parameter list. Accepts a parenthesised, `;`- or `,`-separated
@@ -490,12 +626,28 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
+            // Bare (unparenthesised) symbols: `∇ x foo y { … }` has the name *between*
+            // the left and right param lists, so for the *left* list we must stop at the
+            // first symbol that is *not* part of the params — but Kap's grammar lets the
+            // name appear immediately. To disambiguate, only consume a bare left param
+            // when it is explicitly parenthesised (handled above); bare symbols after the
+            // name (right params) are consumed greedily up to the `{` body.
             Some(t) if allow_bare && matches!(t.token, Token::Literal(LiteralValue::Symbol { .. })) => {
-                // single unparenthesised right parameter, e.g. `∇ foo x { … }`
-                if let Token::Literal(LiteralValue::Symbol { name, .. }) = &t.token {
-                    params.push(name.clone());
+                // One or more unparenthesised *right* parameters, e.g. `∇ foo x y { … }`
+                // or `∇ x foo y { … }` (right params only — the left was empty/parenthesised).
+                loop {
+                    match self.peek() {
+                        Some(t)
+                            if matches!(t.token, Token::Literal(LiteralValue::Symbol { .. })) =>
+                        {
+                            if let Token::Literal(LiteralValue::Symbol { name, .. }) = &t.token {
+                                params.push(name.clone());
+                            }
+                            self.advance();
+                        }
+                        _ => break,
+                    }
                 }
-                self.advance();
             }
             _ => {}
         }
@@ -504,7 +656,47 @@ impl<'a> Parser<'a> {
 
     /// apply := (fn term) | (term fn term)*  — monadic `f x` or dyadic `a f b` / trains.
     fn parse_apply(&mut self) -> Result<Instr, AplError> {
-        let first = self.parse_primary()?;
+        let mut first = self.parse_primary()?;
+        // Operator-call detection (`X op Y` / `X op`). If `first` is a function atom and the
+        // next token is a *known user operator* (defined via `∇ (x op) a`), then `op` binds
+        // `first` as a function operand. For a 2-arg operator (`∇ (x op y) a`) a second
+        // function operand follows the operator name; for a 1-arg operator it does not.
+        let is_first_fn = matches!(
+            &first,
+            Instr::Train { .. }
+                | Instr::Lambda { .. }
+                | Instr::Derived { .. }
+                | Instr::Block { .. }
+        ) || match &first {
+            Instr::Symbol { name, .. } => {
+                Self::is_primitive_op(name) || self.is_known_fn(name) || self.known_ops.iter().any(|n| n == name)
+            }
+            _ => false,
+        };
+        if is_first_fn {
+            if let Some(Token::Literal(LiteralValue::Symbol { name: opname, .. })) = self.peek().map(|t| &t.token) {
+                if self.known_ops.iter().any(|n| n == opname) {
+                    let opname = opname.clone();
+                    self.advance();
+                    self.skip_newlines();
+                    // Right function operand (for a 2-arg operator). If the next token is a
+                    // function atom (not a data operand), it is the right function operand.
+                    let right_fn = if self.next_is_function_token() && !self.at_statement_boundary() {
+                        Some(Box::new(self.parse_primary()?))
+                    } else {
+                        None
+                    };
+                    // Adopt the combined operator as `first` and fall through to the normal
+                    // application logic below, which will consume any trailing data argument
+                    // (e.g. the `3` in `-foo+ 3`). Returning here would leave it unconsumed.
+                    first = Instr::OpCall {
+                        op: Box::new(Instr::Symbol { name: opname, namespace: None }),
+                        left_fn: Box::new(first),
+                        right_fn,
+                    };
+                }
+            }
+        }
         // A leading *function atom* that cannot be a value — a train, a lambda, or a
         // derived (adverb) operator — is a monadic/dyadic application `fn x` / `x fn y`
         // (e.g. `(f g) y`, `λ(x)x*2 5`, `+/ 1 2 3`). Bare symbols are handled below by the
@@ -512,7 +704,11 @@ impl<'a> Parser<'a> {
         // dyadic left operand (`x + 1`).
         if matches!(
             &first,
-            Instr::Train { .. } | Instr::Lambda { .. } | Instr::Derived { .. }
+            Instr::Train { .. }
+                | Instr::Lambda { .. }
+                | Instr::Derived { .. }
+                | Instr::Block { .. }
+                | Instr::OpCall { .. }
         ) {
             // A statement boundary ends the expression: the function stands alone.
             if self.at_statement_boundary() {
@@ -553,6 +749,22 @@ impl<'a> Parser<'a> {
                 return Ok(first);
             }
             let next = self.peek().map(|t| t.token.clone());
+            // Fork postfix `a « b » c` (e.g. `⊢ « ⊣ » ,`): when a function atom is
+            // immediately followed by `«`, parse the right-fork instead of treating the
+            // following token as an operand.
+            if matches!(next, Some(Token::LeftForkToken)) {
+                self.advance();
+                let b = self.parse_function_atom()?;
+                self.skip_newlines();
+                self.expect(Token::RightForkToken, "expected » in fork")?;
+                self.skip_newlines();
+                let c = self.parse_function_atom()?;
+                return Ok(Instr::Train {
+                    funcs: vec![first, b, c],
+                    reverse: false,
+                    compose: false,
+                });
+            }
             // A *value* operand (so a leading function applies to it monadically) is a
             // literal, or a non-primitive / non-adverb symbol (a variable or another
             // user function's name, e.g. `fact N-1` → `fact(N-1)`, `foo x` → `foo(x)`).
@@ -623,6 +835,30 @@ impl<'a> Parser<'a> {
                 });
             }
             // Fall through: treat `first` as the LEFT operand of a following dyadic op.
+        }
+        // Dyadic `L f R` where `first` is a *value* and the next token is a *function atom*
+        // (`{…}`, `λ`, a train, a parenthesised function, or a known/primitive/adverb
+        // symbol): bind `first` as the left argument and apply the function to the
+        // following right operand. This mirrors Kap's parser.kt `processFn`/`makeResultList`
+        // (the left operand is accumulated *before* the function is seen).
+        //   `4 foo 2`        -> ⍺=4, ⍵=2
+        //   `(10;11) foo (1;2)` -> dyadic, vector args
+        //   `4 {⍺+⍵} 3`      -> ⍺=4, ⍵=3
+        // The function is parsed as a *function expression* (not a value expression) so it
+        // does NOT greedily consume the right operand.
+        if !self.at_statement_boundary() {
+            self.skip_newlines();
+            if !self.at_statement_boundary() {
+                if self.next_is_function_token() {
+                    let func = self.parse_function_expr()?;
+                    let right = self.parse_apply()?;
+                    return Ok(Instr::Apply {
+                        fn_expr: Box::new(func),
+                        left: Some(Box::new(first)),
+                        right: Box::new(right),
+                    });
+                }
+            }
         }
         // Stranding: consecutive operands with no operator between them form a vector.
         // e.g. `1 2 3` -> [1 2 3]. Collect into `left` so a following dyadic operator
@@ -866,7 +1102,26 @@ impl<'a> Parser<'a> {
             "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"
                 | "↑" | "↓" | "⊂" | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥"
+                | "⊢" | "⊣" | "≡" | "⍓"
         )
+    }
+
+    /// Whether the *next* token begins a *function expression* (suitable for a dyadic
+    /// `L f R` or a train member). Mirrors Kap's parser.kt `processFn` detection of the
+    /// function position: a brace/lambda/paren/group, or a symbol naming a known function,
+    /// a primitive operator, or an adverb.
+    fn next_is_function_token(&self) -> bool {
+        match self.peek() {
+            Some(t) => match &t.token {
+                Token::OpenBrace | Token::LambdaToken | Token::OpenParen
+                | Token::ReverseComposeToken | Token::ComposeToken | Token::LeftForkToken => true,
+                Token::Literal(LiteralValue::Symbol { name, .. }) => {
+                    self.is_known_fn(name) || Self::is_primitive_op(name) || Self::is_adverb(name)
+                }
+                _ => false,
+            },
+            None => false,
+        }
     }
 
     /// Higher-order operators (adverbs) that take a *function* as one operand:
@@ -903,6 +1158,38 @@ impl<'a> Parser<'a> {
                         Err(_) => return None,
                     };
                     funcs.push(e);
+                    // Fork postfix: `a « b » c` (Kap's right-fork / `⊢«⊣»,` style).
+                    // The trailing `c` is optional: `a « b »` with nothing after `»`
+                    // is a 2-train (atop) `[a, b]`; `a « b » c` is a 3-fork.
+                    if let Some(Token::LeftForkToken) = self.peek().map(|t| &t.token) {
+                        self.advance();
+                        let b = match self.parse_function_atom() {
+                            Ok(b) => b,
+                            Err(_) => return None,
+                        };
+                        self.expect(Token::RightForkToken, "expected » in fork").ok()?;
+                        self.skip_newlines();
+                        // Optional third function. A `)` (end of group) or any
+                        // non-function-atom token means this is a 2-train `[a, b]`.
+                        let is_func_start = match self.peek().map(|t| &t.token) {
+                            Some(Token::Literal(LiteralValue::Symbol { .. }))
+                            | Some(Token::Comma)
+                            | Some(Token::OpenParen)
+                            | Some(Token::LambdaToken)
+                            | Some(Token::LeftForkToken) => true,
+                            _ => false,
+                        };
+                        if is_func_start {
+                            let c = match self.parse_function_atom() {
+                                Ok(c) => c,
+                                Err(_) => return None,
+                            };
+                            funcs.push(b);
+                            funcs.push(c);
+                        } else {
+                            funcs.push(b);
+                        }
+                    }
                 }
             }
         }
@@ -1013,6 +1300,28 @@ impl<'a> Parser<'a> {
                 let namespace = namespace.clone();
                 self.advance();
                 Ok(Instr::Symbol { name, namespace })
+            }
+            Token::ApplyToken => {
+                // Kap's `⍞name`: a *dynamic* function reference. Unlike a plain symbol
+                // reference (which strands into a vector when not applied), `⍞name` always
+                // means "fetch the value bound to `name` *as a function* and apply it".
+                self.advance();
+                self.skip_newlines();
+                match self.peek() {
+                    Some(t) if matches!(
+                        t.token,
+                        Token::Literal(LiteralValue::Symbol { .. })
+                    ) => {
+                        let tok = t.token.clone();
+                        self.advance();
+                        if let Token::Literal(LiteralValue::Symbol { name, namespace }) = tok {
+                            Ok(Instr::DynamicRef { name, namespace })
+                        } else {
+                            unreachable!()
+                        }
+                    }
+                    _ => Err(self.err("expected a function name after ⍞")),
+                }
             }
             Token::Literal(lv) => {
                 let lv = lv.clone();

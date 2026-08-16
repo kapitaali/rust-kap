@@ -63,6 +63,19 @@ pub enum APLValue {
         body: AplRef<ast::Instr>,
         env: AplRef<Environment>,
     },
+    /// A user-defined *operator*: a function defined with function-operands, e.g.
+    /// `∇ (x foo) a { 10 ⍞x a }`. `op_left`/`op_right` are the names bound to the
+    /// function-operands supplied at the *call site* (`+foo 2` → op_left=`+`;
+    /// `-foo+ 3` → op_left=`-`, op_right=`+`). `left_params`/`right_params` are the
+    /// ordinary data arguments. `arity` = number of function-operands (1 or 2).
+    UserOp {
+        op_left: Option<String>,
+        op_right: Option<String>,
+        left_params: Vec<String>,
+        right_params: Vec<String>,
+        body: AplRef<ast::Instr>,
+        env: AplRef<Environment>,
+    },
 }
 
 impl APLValue {
@@ -86,6 +99,7 @@ impl APLValue {
             }
             APLValue::Deferred { .. } => "<deferred>".to_string(),
             APLValue::UserFn { .. } => "<function>".to_string(),
+            APLValue::UserOp { .. } => "<operator>".to_string(),
         }
     }
 }
