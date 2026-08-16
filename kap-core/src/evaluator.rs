@@ -239,9 +239,17 @@ impl Engine {
                 left,
                 right,
             } => self.eval_apply(fn_expr, left, right, env),
-            Instr::Derived { .. } => Err(AplError::runtime(
-                "derived function used without an argument".into(),
-            )),
+            Instr::Derived { func, .. } => {
+                self.eval_apply(func, &None, &Box::new(Instr::Empty), env)
+            }
+            Instr::Train { funcs, reverse, compose } => self.apply_train(
+                funcs,
+                *reverse,
+                *compose,
+                &None,
+                &Box::new(Instr::Empty),
+                env,
+            ),
             Instr::Block { body } => self.eval_block(body, env),
             Instr::If {
                 cond,
@@ -325,6 +333,16 @@ impl Engine {
                         params: vec![],
                         split: 0,
                         body: Rc::new(Instr::Block { body: body.clone() }),
+                        env: env.clone(),
+                    }),
+                    // A derived function (`×/`) or a train (`⊢«⊣»`) is itself already a
+                    // function; storing it directly (split=0) lets `apply_user_fn` route it
+                    // through `eval_apply` with the call's data args. (Wrapping it in an `⍺ ⍵`
+                    // delegation would force a spurious left operand onto reduce/scan.)
+                    Instr::Derived { .. } | Instr::Train { .. } => Rc::new(APLValue::UserFn {
+                        params: vec![],
+                        split: 0,
+                        body: Rc::new(*value.clone()),
                         env: env.clone(),
                     }),
                     _ => {
@@ -476,6 +494,46 @@ impl Engine {
                 }));
                 return self.eval_block(body, &child);
             }
+            // `⍞name`: a dynamic function reference. Resolve `name` to its value (a
+            // function) and apply it. Mirrors Kap's DynamicFunctionDescriptor.
+            Instr::DynamicRef { name, namespace } => {
+                let v = env
+                    .lookup(name, namespace)
+                    .ok_or_else(|| AplError::runtime(format!("undefined symbol: {}", name)))?;
+                match v.as_ref() {
+                    APLValue::UserFn { params, split, body, env: fenv } => {
+                        return self.apply_user_fn(
+                            params,
+                            *split,
+                            body.as_ref(),
+                            left,
+                            right,
+                            fenv,
+                            Some(name),
+                        );
+                    }
+                    APLValue::UserOp { .. } => {
+                        return Err(AplError::runtime(format!(
+                            "{} is an operator, not a function",
+                            name
+                        )));
+                    }
+                    other => {
+                        let desc = match other {
+                            APLValue::Number(_) => "number",
+                            APLValue::Array(_) => "array",
+                            APLValue::Str(_) => "string",
+                            APLValue::Char(_) => "char",
+                            APLValue::Null => "null",
+                            _ => "non-function value",
+                        };
+                        return Err(AplError::runtime(format!(
+                            "{} is not a function (got {})",
+                            name, desc
+                        )));
+                    }
+                }
+            }
             // Operator call with function operands, e.g. `+foo 2` / `-foo+ 3`. `op` names a
             // user-defined operator (resolved to `APLValue::UserOp`); `left_fn`/`right_fn`
             // are the function operands bound to its `op_left`/`op_right`. The combined
@@ -510,6 +568,11 @@ impl Engine {
         // Dyadic 3-train (fork):       x (A B C) y = (x A y) B (x C y).
         if let Instr::Train { funcs, reverse, compose } = fn_expr {
             return self.apply_train(funcs, *reverse, *compose, left, right, env);
+        }
+        // --- User-defined / native operators called with explicit data args ---
+        // e.g. `10 +foo 2` parses as `Apply{fn: OpCall{op:foo, left_fn:+}, left:10, right:2}`.
+        if let Instr::OpCall { op, left_fn, right_fn } = fn_expr {
+            return self.apply_user_op(op, left_fn, right_fn, left, right, env);
         }
         let name = match fn_name {
             Some(ref n) => n.clone(),
@@ -845,7 +908,15 @@ impl Engine {
             // so a dfn can recurse via `⍓` even when assigned anonymously (e.g. `foo ⇐ { … ⍓ … }`).
             child.define("⍓", &None, Rc::new(self_fn));
         }
-        self.eval_instr(body, &child)
+        // A function body that *is* a derived function (`×/`) or a train (`⊢«⊣»`) is itself
+        // a function; apply it to the call's data args (`left`/`right`) rather than evaluating
+        // it standalone (which would drop the operand — e.g. `foo ⇐ ×/ ⋄ foo 1 2 3`).
+        match body {
+            Instr::Derived { .. } | Instr::Train { .. } => {
+                self.eval_apply(body, left, right, &child)
+            }
+            _ => self.eval_instr(body, &child),
+        }
     }
 
     /// Apply a user-defined *operator* (from `Instr::OpCall`). `op` names a `UserOp`
@@ -890,11 +961,11 @@ impl Engine {
             ),
             _ => return Err(AplError::runtime(format!("{} is not an operator", op_name))),
         };
-        // Build a child scope off the operator's closure env.
-        let op_env_for_fn = op_env.clone();
+        // Build a child scope off the operator's closure env. This is the scope in which
+        // the operator *body* runs, so the data args (`a`, `⍵`, …) live here.
         let child = Rc::new(Environment {
             symbols: Default::default(),
-            parent: Some(op_env_for_fn),
+            parent: Some(op_env.clone()),
         });
         // Wrap a function operand (`left_fn`/`right_fn`) as an `APLValue::UserFn` so the
         // operator body can apply it via `⍞name`. The wrapper applies the original operand
@@ -902,7 +973,11 @@ impl Engine {
         // `Apply { fn_expr: operand, left: ⍺, right: ⍵ }`. This way a primitive like `+`
         // (which is *not* a bound symbol in the environment) still resolves through the
         // engine's builtin dispatch when the wrapper is later applied.
-        let op_env_for_fn = op_env.clone();
+        //
+        // Crucially, the wrapper's *closure* is the operator body scope (`child`), NOT the
+        // operator's own closure. The function operand is applied *within* the body, so its
+        // arguments (e.g. `a`, the operator's right data param) must resolve in `child`,
+        // where they are bound — not in the operator's definition-time closure.
         let wrap_fn = |instr: &Instr| -> APLValue {
             APLValue::UserFn {
                 params: vec![],
@@ -918,7 +993,7 @@ impl Engine {
                         namespace: None,
                     }),
                 }),
-                env: op_env_for_fn.clone(),
+                env: child.clone(),
             }
         };
         if let Some(ol) = &op_left {
@@ -951,7 +1026,7 @@ impl Engine {
         if !right_params.is_empty() {
             self.bind_param_group(&child, &right_params, &right_val);
         }
-        child.define("⍵", &None, right_val);
+        child.define("⍵", &None, right_val.clone());
         if let Some(lv) = &left_val {
             child.define("⍺", &None, lv.clone());
         }
@@ -1926,7 +2001,10 @@ impl Engine {
         self.eval_apply(fn_instr, &left_instr, &right_instr, env)
     }
 
-    /// Reduce `f/array`: fold left over the elements (`((a f b) f c) ...`).
+    /// Reduce `f/array`:
+    ///  * monadic (`f/array`, no left arg): fold the entire array to a single value.
+    ///  * dyadic (`N f/array`): sliding-window reduce of size `|N|`, producing
+    ///    `len-|N|+1` results (Kap's windowed reduce; `N` must satisfy `|N| ≤ len`).
     fn adverb_reduce(
         &self,
         fn_instr: &Instr,
@@ -1934,21 +2012,49 @@ impl Engine {
         right: &Box<Instr>,
         env: &AplRef<Environment>,
     ) -> Result<AplRef<APLValue>, AplError> {
-        if left.is_some() {
-            return Err(AplError::runtime("reduce / is monadic (use f/array)".into()));
-        }
         let data = self.eval_instr(right, env)?.force(self)?;
         let elems = self.flat_elements(&data);
-        match elems.split_first() {
-            Some((first, rest)) => {
-                let mut acc = first.clone();
-                for e in rest {
-                    acc = self.apply_fn_instr(fn_instr, Some(&acc), e, env)?;
-                }
-                Ok(acc)
-            }
-            None => Err(AplError::runtime("reduce /: empty array".into())),
+        if elems.is_empty() {
+            return Err(AplError::runtime("reduce /: empty array".into()));
         }
+        // Plain reduce (no left arg): fold the entire array to a single scalar value.
+        if left.is_none() {
+            let mut acc = elems[0].clone();
+            for e in &elems[1..] {
+                acc = self.apply_fn_instr(fn_instr, Some(&acc), e, env)?;
+            }
+            return Ok(acc);
+        }
+        // Windowed reduce (`N f/`): sliding window of size `|N|`, producing `len-|N|+1`
+        // results (Kap's windowed reduce; `|N|` must fit within the array length).
+        let lv = self.eval_instr(left.as_ref().unwrap(), env)?.force(self)?;
+        let n = match lv.as_ref() {
+            APLValue::Number(KapNumber::Long(v)) => *v,
+            APLValue::Number(_) => {
+                return Err(AplError::runtime("reduce /: window must be an integer".into()))
+            }
+            _ => return Err(AplError::runtime("reduce /: window must be a number".into())),
+        };
+        let window = n.unsigned_abs() as usize;
+        if window == 0 || window > elems.len() {
+            return Err(AplError::runtime(format!(
+                "reduce /: left argument too large. |A| ({}) must be ≤ the size of the reduced axis ({}) - 1",
+                window,
+                elems.len()
+            )));
+        }
+        let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(elems.len() - window + 1);
+        for i in 0..=(elems.len() - window) {
+            let mut acc = elems[i].clone();
+            for e in &elems[i + 1..i + window] {
+                acc = self.apply_fn_instr(fn_instr, Some(&acc), e, env)?;
+            }
+            out.push(acc);
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![out.len()],
+            ArrayData::Nested(out),
+        )))))
     }
 
     /// Scan `f\array`: like reduce but keep every intermediate accumulator

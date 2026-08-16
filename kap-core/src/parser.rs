@@ -422,9 +422,13 @@ impl<'a> Parser<'a> {
             _ => return Err(self.err("expected a symbol before ⇐")),
         };
         self.advance(); // consume ⇐
-        let value = self.parse_apply()?;
+        // The RHS is a *function expression*: a lambda, a named function, an operator
+        // (possibly with adverbs, e.g. `×/`), a train, or a parenthesised function group.
+        // Parse it as a function expression (not `parse_apply`, which would over-consume
+        // a trailing data operand) and store the resulting function value.
+        let value = self.parse_function_expr()?;
         // Validation: a primitive operator/function name cannot be reassigned to a function,
-        // and the RHS must be a function (lambda/train/symbol), not a value.
+        // and the RHS must be a function, not a value.
         if Self::is_primitive_op(&name) {
             return Err(self.err(&format!("cannot redefine primitive function '{}'", name)));
         }
@@ -657,6 +661,66 @@ impl<'a> Parser<'a> {
     /// apply := (fn term) | (term fn term)*  — monadic `f x` or dyadic `a f b` / trains.
     fn parse_apply(&mut self) -> Result<Instr, AplError> {
         let mut first = self.parse_primary()?;
+        // A *value* followed by `primitive_op known_op` is a dyadic operator call where the
+        // value is the operator's left DATA argument: `10 +foo 2` = `(+foo) applied to (10, 2)`.
+        // Detect `value primitive known_op` and restructure into `Apply[OpCall{…}, left: value, right: …]`
+        // so the value flows in as the operator's left data argument (not as the function operand).
+        {
+            let nxt = self.peek().map(|t| t.token.clone());
+            let is_prim = matches!(&nxt, Some(Token::Literal(LiteralValue::Symbol { name, .. })) if Self::is_primitive_op(name));
+            if is_prim {
+                let save = self.pos;
+                self.advance(); // peek past the primitive
+                let after = self.peek().map(|t| t.token.clone());
+                let is_op = matches!(
+                    after,
+                    Some(Token::Literal(LiteralValue::Symbol { name, .. })) if self.known_ops.iter().any(|n| n.as_str() == name)
+                );
+                self.pos = save;
+                if is_op {
+                    let data_left = first;
+                    // Capture the function operand (the primitive, e.g. `+`) BEFORE consuming it.
+                    let fn_operand = match self.peek().map(|t| t.token.clone()) {
+                        Some(Token::Literal(LiteralValue::Symbol { name, namespace })) => {
+                            Instr::Symbol { name: name.clone(), namespace: namespace.clone() }
+                        }
+                        _ => return Err(self.err("expected a function operand before the operator")),
+                    };
+                    self.advance(); // consume the function operand (primitive)
+                    let opname = match self.peek().map(|t| t.token.clone()) {
+                        Some(Token::Literal(LiteralValue::Symbol { name, .. })) => name.clone(),
+                        _ => return Err(self.err("expected an operator name after function operand")),
+                    };
+                    self.advance();
+                    self.skip_newlines();
+                    // Optional right function operand (for a 2-arg operator, e.g. `-foo+`).
+                    let right_fn = if self.next_is_function_token() && !self.at_statement_boundary() {
+                        Some(Box::new(self.parse_primary()?))
+                    } else {
+                        None
+                    };
+                    let opcall = Instr::OpCall {
+                        op: Box::new(Instr::Symbol { name: opname, namespace: None }),
+                        left_fn: Box::new(fn_operand),
+                        right_fn,
+                    };
+                    if self.at_statement_boundary() {
+                        return Ok(Instr::Apply {
+                            fn_expr: Box::new(opcall),
+                            left: Some(Box::new(data_left)),
+                            right: Box::new(Instr::Empty),
+                        });
+                    }
+                    self.skip_newlines();
+                    let right_operand = self.parse_apply()?;
+                    return Ok(Instr::Apply {
+                        fn_expr: Box::new(opcall),
+                        left: Some(Box::new(data_left)),
+                        right: Box::new(right_operand),
+                    });
+                }
+            }
+        }
         // Operator-call detection (`X op Y` / `X op`). If `first` is a function atom and the
         // next token is a *known user operator* (defined via `∇ (x op) a`), then `op` binds
         // `first` as a function operand. For a 2-arg operator (`∇ (x op y) a`) a second
@@ -709,6 +773,7 @@ impl<'a> Parser<'a> {
                 | Instr::Derived { .. }
                 | Instr::Block { .. }
                 | Instr::OpCall { .. }
+                | Instr::DynamicRef { .. }
         ) {
             // A statement boundary ends the expression: the function stands alone.
             if self.at_statement_boundary() {
@@ -1113,7 +1178,7 @@ impl<'a> Parser<'a> {
     fn next_is_function_token(&self) -> bool {
         match self.peek() {
             Some(t) => match &t.token {
-                Token::OpenBrace | Token::LambdaToken | Token::OpenParen
+                Token::OpenBrace | Token::LambdaToken | Token::OpenParen | Token::ApplyToken
                 | Token::ReverseComposeToken | Token::ComposeToken | Token::LeftForkToken => true,
                 Token::Literal(LiteralValue::Symbol { name, .. }) => {
                     self.is_known_fn(name) || Self::is_primitive_op(name) || Self::is_adverb(name)
@@ -1239,6 +1304,25 @@ impl<'a> Parser<'a> {
                 _ => {}
             }
         }
+        // A function atom optionally followed by an adverb (`/`, `¨`, `⍟`, `\\`) forms a
+        // *derived* function, e.g. `×/`, `+¨`, `×\\`. This mirrors the `f op` derived-function
+        // production in `parse_apply`, but here (function-expression position) no trailing
+        // data operand is consumed — the derived function stands alone (e.g. `foo ⇐ ×/`).
+        if let Some(t) = self.peek() {
+            let adv_name = match &t.token {
+                Token::Literal(LiteralValue::Symbol { name, .. }) if Self::is_adverb(name) => {
+                    Some(name.clone())
+                }
+                _ => None,
+            };
+            if let Some(adv) = adv_name {
+                self.advance();
+                return Ok(Instr::Derived {
+                    func: Box::new(left),
+                    op: Box::new(Instr::Symbol { name: adv, namespace: None }),
+                });
+            }
+        }
         Ok(left)
     }
 
@@ -1248,6 +1332,21 @@ impl<'a> Parser<'a> {
     fn parse_function_atom(&mut self) -> Result<Instr, AplError> {
         let t = self.peek().ok_or_else(|| self.err("expected a function in train"))?;
         match &t.token {
+            Token::ApplyToken => {
+                // `⍞name`: a dynamic function reference — the value bound to `name`
+                // is used as a function. Parse the following symbol into a `DynamicRef`.
+                self.advance();
+                let tok = self.peek().ok_or_else(|| self.err("expected a symbol after ⍞"))?;
+                match &tok.token {
+                    Token::Literal(LiteralValue::Symbol { name, namespace }) => {
+                        let name = name.clone();
+                        let namespace = namespace.clone();
+                        self.advance();
+                        Ok(Instr::DynamicRef { name, namespace })
+                    }
+                    _ => Err(self.err("expected a symbol after ⍞")),
+                }
+            }
             Token::Literal(LiteralValue::Symbol { name, namespace }) => {
                 let name = name.clone();
                 let namespace = namespace.clone();
@@ -1533,7 +1632,7 @@ mod tests {
 
     fn parse_one(src: &str) -> Instr {
         let toks = tokenise(src);
-        let (stmts, errs) = parse(&toks, &[]);
+        let (stmts, errs) = parse(&toks, &[], &[]);
         assert!(errs.is_empty(), "parse errors for {:?}: {:?}", src, errs);
         assert_eq!(stmts.len(), 1, "expected one statement for {:?}", src);
         stmts.into_iter().next().unwrap()

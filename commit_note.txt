@@ -35,12 +35,23 @@ hallucinated; removed.)
 - BUILD: should be green after prior fixes (let mut first in parse_apply; APLValue::UserOp has no
   `name` field — removed; added UserOp arms to truthy + array-element match; added OpCall arm to
   eval_instr). NEEDS A FRESH `cargo build` + conformance run to confirm.
-- `shortFormWithSimpleOperator`: `foo ⇐ ×/` must parse `×/` as `Instr::Derived` and apply as
-  multiply-reduce (`foo 1 2 3` → 6). Derived-function-as-⇐-RHS support still needed.
-- 5 SHOULD-FAIL cases currently do NOT error (they return values instead of parse errors):
-    dyadicDestructuringNoSemicolonBoth, dyadicDestructuringNoSemicolonLeft,
-    functionDefinitionWithExtraLeftArgumentsShouldFail, duplicatedArgumentsTest2,
-    parenMonadicDestructuringNoSemicolon. Need stricter parse-time validation.
+- `shortFormWithSimpleOperator` (`foo ⇐ ×/ ⋄ foo 1 2 3` → 6): **DONE**. `×/` now parses as
+  `Instr::Derived` in `parse_function_expr` (RHS of ⇐), stored directly as the fn body, and
+  applied via windowed reduce. `adverb_reduce` rewritten to support windowed reduce per Kotlin
+  semantics: monadic `foo 1 2 3` → scalar 6; dyadic `N foo arr` → sliding-window reduce of size
+  |N| (e.g. `3 foo 1 2 3 → ⟨6⟩`, `2 foo 0 2 3 → ⟨0 6⟩`, `5 foo 0 2 3` → "Left argument too
+  large" error — matches Kotlin exactly).
+- **Dyadic operator calls** (`10 +foo 2` → 12, `10 -foo+ 2` → 108): **DONE**. `parse_apply` now
+  detects `value primitive_op known_op` and emits `Apply{fn:OpCall{op,left_fn:+}, left:10, right:2}`
+  (the function operand is the primitive `+`, the data left arg is `10`). `eval_apply` gained an
+  `OpCall` fn_expr arm routing to `apply_user_op` with the explicit data args. All four named
+  operator cases + both extra dyadic cases (oneArgOperator{0,1}, twoArgOperator{0,1}) now pass.
+- All four originally-targeted cases PASS: oneArgOperator0 (12), twoArgOperator0 (107),
+  selfRecursion1 (11), shortFormWithSimpleOperator (6). Plus oneArgOperator1 (12) and
+  twoArgOperator1 (108).
+- Remaining (bonus scope, NOT blocking): `shortFormWith2Train`/`shortFormWith3Train` (train `⇐` RHS
+  like `f⇐⊢⊣`, `f⇐⊢«⊣»`) need `⊢`/`⊣` registered as known functions and fork-token train parsing
+  in that context; the 5 SHOULD-FAIL validation cases still return values instead of errors.
 - After green build + conformance, run the full CustomFunctionTest harness and report pass/fail.
 
 ## Goals
