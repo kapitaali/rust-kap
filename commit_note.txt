@@ -52,7 +52,11 @@ hallucinated; removed.)
 - Remaining (bonus scope, NOT blocking): `shortFormWith2Train`/`shortFormWith3Train` (train `⇐` RHS
   like `f⇐⊢⊣`, `f⇐⊢«⊣»`) need `⊢`/`⊣` registered as known functions and fork-token train parsing
   in that context; the 5 SHOULD-FAIL validation cases still return values instead of errors.
-- After green build + conformance, run the full CustomFunctionTest harness and report pass/fail.
+- **RESOLVED (this session):** train `⇐` RHS (`f⇐×-` → `¯1` via `×(−5)`; `f⇐⊢«⊣»` → parse error
+  "Right argument is not a function"; `f⇐⊢«⊣»,` → `2` per user-run Kotlin) and the 5 SHOULD-FAIL
+  validations are now implemented as `#[should_panic]` tests. See PROGRESS-20260816.md PHASE 13
+  (cont.) train/fork entry for the full fix list + verified result table.
+- After green build + conformance, run the full `*.kap` CustomFunctionTest harness and report pass/fail.
 
 ## Goals
 - Get the Rust interpreter to match the Kotlin `CustomFunctionTest.kt` expectations for functions
