@@ -335,30 +335,36 @@ impl Engine {
                         body: Rc::new(Instr::Block { body: body.clone() }),
                         env: env.clone(),
                     }),
-                    // A derived function (`×/`) or a train (`⊢«⊣»`) is itself already a
-                    // function; storing it directly (split=0) lets `apply_user_fn` route it
-                    // through `eval_apply` with the call's data args. But we must *close* it
-                    // by evaluating it in the current env so component functions (e.g. ⊢, ⊣)
-                    // resolve to primitives. Evaluate it as a standalone function value.
-                    Instr::Derived { .. } | Instr::Train { .. } => {
-                        // Evaluate the train/derived in this env to get a closed function value
-                        let closed = self.eval_instr(value, env)?;
-                        if let APLValue::UserFn { params, split, body, env: _ } = closed.as_ref() {
-                            Rc::new(APLValue::UserFn {
-                                params: params.clone(),
-                                split: *split,
-                                body: Rc::new((**body).clone()),
-                                env: env.clone(),
-                            })
-                        } else {
-                            // Should not happen; fallback to direct storage
-                            Rc::new(APLValue::UserFn {
-                                params: vec![],
-                                split: 0,
-                                body: Rc::new(*value.clone()),
-                                env: env.clone(),
-                            })
-                        }
+                    // A derived function (`×/`) or a train (`⊢«⊣»`, `×-`) is itself already a
+                    // function. Store it directly as the body (split=0) so `apply_user_fn`
+                    // routes it through `eval_apply` with the *call's* data arguments. We must
+                    // NOT evaluate it here — doing so would apply it to empty args at
+                    // definition time (e.g. `foo ⇐ ×-` would run `×(-)` and fail). Component
+                    // primitives (×, -, ⊢, ⊣, …) resolve at apply time via `eval_apply`'s
+                    // `fn_name` dispatch, which is ambivalent (monadic vs dyadic).
+                    Instr::Derived { .. } | Instr::Train { .. } => Rc::new(APLValue::UserFn {
+                        params: vec![],
+                        split: 0,
+                        body: Rc::new(*value.clone()),
+                        env: env.clone(),
+                    }),
+                    // Bare symbol RHS:
+                    //  * a primitive (`foo ⇐ -`) — store the symbol directly as the body;
+                    //    `apply_user_fn` routes it through `eval_apply`, which dispatches
+                    //    the primitive *ambivalently* (monadic `foo 5` = negate, dyadic
+                    //    `3 foo 1` = subtract). The old `⍺ - ⍵` delegation broke monadic
+                    //    calls because `⍺` is unbound when no left arg is supplied.
+                    //  * a user-function name (`foo ⇐ bar`) — delegate `⍺ bar ⍵` so `bar`
+                    //    is applied to the call's arguments (an alias). `eval_apply` also
+                    //    handles a bare user-symbol by looking it up and applying it, but
+                    //    the delegation preserves lexical closure of the defining scope.
+                    Instr::Symbol { name, .. } if Self::is_primitive_name(name) => {
+                        Rc::new(APLValue::UserFn {
+                            params: vec![],
+                            split: 0,
+                            body: Rc::new(*value.clone()),
+                            env: env.clone(),
+                        })
                     }
                     _ => {
                         let deleg = Instr::Apply {
@@ -848,6 +854,20 @@ impl Engine {
         matches!(e, Instr::Literal(_) | Instr::Array { .. } | Instr::Empty)
     }
 
+    /// Whether `name` is a Kap primitive function/operator wired up in `eval_apply`.
+    /// Mirrors the parser's `is_primitive_op` set; used by `FnAssign` so a bare
+    /// primitive symbol (`foo ⇐ -`) is stored as a directly-callable body rather than
+    /// a `⍺ - ⍵` delegation (which breaks monadic calls).
+    fn is_primitive_name(name: &str) -> bool {
+        matches!(
+            name,
+            "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"
+                | "↑" | "↓" | "⊂" | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
+                | "≤" | "≥" | "," | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥"
+                | "⊢" | "⊣" | "≡" | "⍓"
+        )
+    }
+
     /// Apply a user-defined lambda. `split` = number of leading params that are bound to
     /// the *left* (dyadic) argument; the remainder are bound to the right argument.
     /// For a monadic function `split == 0`. Builds a child scope from the closure env
@@ -923,11 +943,14 @@ impl Engine {
             // so a dfn can recurse via `⍓` even when assigned anonymously (e.g. `foo ⇐ { … ⍓ … }`).
             child.define("⍓", &None, Rc::new(self_fn));
         }
-        // A function body that *is* a derived function (`×/`) or a train (`⊢«⊣»`) is itself
-        // a function; apply it to the call's data args (`left`/`right`) rather than evaluating
-        // it standalone (which would drop the operand — e.g. `foo ⇐ ×/ ⋄ foo 1 2 3`).
+        // A function body that *is* a derived function (`×/`), a train (`⊢«⊣»`), or a
+        // bare primitive symbol (`-`, `⊢`, …) is itself a function; apply it to the
+        // call's data args (`left`/`right`) rather than evaluating it standalone (which
+        // would drop the operand — e.g. `foo ⇐ ×/ ⋄ foo 1 2 3`, or apply `-` ambivalently
+        // for `foo ⇐ -`). `eval_apply` dispatches primitives (and looks up user-fn names)
+        // correctly with the supplied left/right.
         match body {
-            Instr::Derived { .. } | Instr::Train { .. } => {
+            Instr::Derived { .. } | Instr::Train { .. } | Instr::Symbol { .. } => {
                 self.eval_apply(body, left, right, &child)
             }
             _ => self.eval_instr(body, &child),

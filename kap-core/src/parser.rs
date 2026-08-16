@@ -1304,6 +1304,31 @@ impl<'a> Parser<'a> {
                 _ => {}
             }
         }
+        // 2-train chaining: a function atom immediately followed by *another* function atom
+        // (and not an adverb, which is handled below as a derived function) forms a 2-train
+        // (atop). Mirrors Kap's parser.kt `processFn` building `Chain2(parsedFn, holder.fn)`
+        // when `parseValue` returns an `FnParseResult` for both. e.g. `×-` -> Train([×, -]),
+        // `÷⌈` -> Train([÷, ⌈]). The trailing operand (if any) is applied by the caller.
+        if let Some(t) = self.peek() {
+            let next_is_fn_atom = match &t.token {
+                Token::Literal(LiteralValue::Symbol { name, .. }) => !Self::is_adverb(name),
+                Token::OpenParen
+                | Token::LambdaToken
+                | Token::ApplyToken
+                | Token::ComposeToken
+                | Token::ReverseComposeToken
+                | Token::LeftForkToken => true,
+                _ => false,
+            };
+            if next_is_fn_atom {
+                let right = self.parse_function_atom()?;
+                return Ok(Instr::Train {
+                    funcs: vec![left, right],
+                    reverse: false,
+                    compose: false,
+                });
+            }
+        }
         // A function atom optionally followed by an adverb (`/`, `¨`, `⍟`, `\\`) forms a
         // *derived* function, e.g. `×/`, `+¨`, `×\\`. This mirrors the `f op` derived-function
         // production in `parse_apply`, but here (function-expression position) no trailing
