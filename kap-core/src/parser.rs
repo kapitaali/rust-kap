@@ -914,7 +914,18 @@ impl<'a> Parser<'a> {
         if !self.at_statement_boundary() {
             self.skip_newlines();
             if !self.at_statement_boundary() {
-                if self.next_is_function_token() {
+                // A parenthesised group is only a *function* in `L f R` position when its
+                // contents form a function train (e.g. `(+)`, `(×-)`, `(-⍛+)`). A value
+                // group like `(x y)` / `(4 5)` is a nested-array strand element, NOT a
+                // function — treating it as one mis-parses e.g. `(3 (4 5))` and errors
+                // "expected a function in train". So gate the OpenParen case on its being a
+                // paren operator; every other function token is unaffected.
+                let next_fn = self.next_is_function_token();
+                let paren_group_is_fn = match self.peek().map(|t| &t.token) {
+                    Some(Token::OpenParen) => self.next_is_paren_operator(),
+                    _ => true,
+                };
+                if next_fn && paren_group_is_fn {
                     let func = self.parse_function_expr()?;
                     let right = self.parse_apply()?;
                     return Ok(Instr::Apply {
