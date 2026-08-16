@@ -426,7 +426,7 @@ impl<'a> Parser<'a> {
         // (possibly with adverbs, e.g. `×/`), a train, or a parenthesised function group.
         // Parse it as a function expression (not `parse_apply`, which would over-consume
         // a trailing data operand) and store the resulting function value.
-        let value = self.parse_function_expr()?;
+        let value = self.parse_function_expr_impl(true)?;
         // Validation: a primitive operator/function name cannot be reassigned to a function,
         // and the RHS must be a function, not a value.
         if Self::is_primitive_op(&name) {
@@ -1225,8 +1225,9 @@ impl<'a> Parser<'a> {
                     funcs.push(e);
                     // Postfix compose/atop inside a parenthesised train: `a ∘ b` / `a ⍛ b`
                     // bind the just-pushed `a` to the next function atom `b` into a single
-                    // compose Train (compose=true). Mirrors the standalone parse_function_expr
-                    // compose handling, but here the left operand is already in `funcs`.
+                    // compose Train (compose=true). e.g. `(-⍛+)` -> ReverseCompose(-, +).
+                    // This mirrors the standalone `parse_function_expr` compose handling,
+                    // but here the left operand is already in `funcs`.
                     if let Some(tok) = self.peek() {
                         let reverse = match &tok.token {
                             Token::ComposeToken => Some(false),
@@ -1281,10 +1282,7 @@ impl<'a> Parser<'a> {
             }
         }
         // A train needs >= 2 members. Either all are functions, OR it is a 2-train
-        // left-bind `[value, function]` (e.g. `(10 +)`). A *single* member that is itself
-        // a function / derived / compose (e.g. `(-)`, `(-⍛+)`, `((×-))`) is a valid
-        // 1-member train — wrap it so it applies to the surrounding left/right args.
-        // Anything else (e.g. an array `(1 2)`, a group `(1+2)`) is *not* a train.
+        // left-bind `[value, function]` (e.g. `(10 +)`).
         let all_funcs = funcs.iter().all(Self::is_function_expr);
         let left_bind = funcs.len() == 2
             && matches!(funcs[0], Instr::Literal(_) | Instr::Array { .. } | Instr::Empty)
@@ -1292,6 +1290,9 @@ impl<'a> Parser<'a> {
         if funcs.len() >= 2 && (all_funcs || left_bind) {
             Some(Instr::Train { funcs, reverse: false, compose: false })
         } else if funcs.len() == 1 && Self::is_function_expr(&funcs[0]) {
+            // A single parenthesised function `(-)`, `(-⍛+)`, `((×-))` is a valid
+            // 1-member train — wrap it so it applies to the surrounding left/right args.
+            // Anything else (e.g. an array `(1 2)`, a value group `(1+2)`) is *not* a train.
             Some(Instr::Train { funcs, reverse: false, compose: false })
         } else {
             None
@@ -1300,7 +1301,17 @@ impl<'a> Parser<'a> {
 
     /// Parse a *function expression*: a function atom optionally followed by a compose
     /// operator (`∘` atop, `⍛` reverse-compose), or a fork postfix (`A « B » C`).
+    ///
+    /// `allow_train` gates 2-train chaining (`×-` -> Train([×, -])). It is **only** true
+    /// when parsing the RHS of `⇐` (function definition position), because there a bare
+    /// `f g` is genuinely a derived 2-train. In value-apply position (`3 ↑ ⍳10`, `3 < 5`)
+    /// the same `f g` pattern is a dyadic call `L f (g …)` and must NOT be chained — so
+    /// the public entry point passes `false`.
     fn parse_function_expr(&mut self) -> Result<Instr, AplError> {
+        self.parse_function_expr_impl(false)
+    }
+
+    fn parse_function_expr_impl(&mut self, allow_train: bool) -> Result<Instr, AplError> {
         let left = self.parse_function_atom()?;
         // Postfix compose:  f ∘ g  ->  Train([f, g], compose=true)        (atop)
         //                   f ⍛ g  ->  Train([f, g], reverse=true, compose=true)
@@ -1331,55 +1342,6 @@ impl<'a> Parser<'a> {
                 _ => {}
             }
         }
-        // A function atom optionally followed by a compose operator (`∘` or `⍛`)
-        // combines with the *following* function into a single derived function
-        // (Compose / ReverseCompose), NOT a train. e.g. `(-⍛+)` => ReverseCompose(-, +),
-        // `f ∘ g` => Compose(f, g). This must run before the 2-train chainer below,
-        // which otherwise would mis-parse the operator as a second train member.
-        if let Some(t) = self.peek() {
-            let compose_kind = match &t.token {
-                Token::ComposeToken => Some(false),
-                Token::ReverseComposeToken => Some(true),
-                _ => None,
-            };
-            if let Some(reverse) = compose_kind {
-                self.advance();
-                let right = self.parse_function_atom()?;
-                // A compose (`f ∘ g`) / reverse-compose (`f ⍛ g`) is a single derived
-                // function, represented internally as a Train with the `compose`/`reverse`
-                // flag set (see ast.rs Instr::Train). It is NOT a 2-train/atop.
-                return Ok(Instr::Train {
-                    funcs: vec![left, right],
-                    reverse,
-                    compose: true,
-                });
-            }
-        }
-        // 2-train chaining: a function atom immediately followed by *another* function atom
-        // (and not an adverb, which is handled below as a derived function) forms a 2-train
-        // (atop). Mirrors Kap's parser.kt `processFn` building `Chain2(parsedFn, holder.fn)`
-        // when `parseValue` returns an `FnParseResult` for both. e.g. `×-` -> Train([×, -]),
-        // `÷⌈` -> Train([÷, ⌈]). The trailing operand (if any) is applied by the caller.
-        // NOTE: compose operators (`∘`/`⍛`) are deliberately excluded here — they are
-        // handled in the block above as a single derived function, not a train member.
-        if let Some(t) = self.peek() {
-            let next_is_fn_atom = match &t.token {
-                Token::Literal(LiteralValue::Symbol { name, .. }) => !Self::is_adverb(name),
-                Token::OpenParen
-                | Token::LambdaToken
-                | Token::ApplyToken
-                | Token::LeftForkToken => true,
-                _ => false,
-            };
-            if next_is_fn_atom {
-                let right = self.parse_function_atom()?;
-                return Ok(Instr::Train {
-                    funcs: vec![left, right],
-                    reverse: false,
-                    compose: false,
-                });
-            }
-        }
         // A function atom optionally followed by an adverb (`/`, `¨`, `⍟`, `\\`) forms a
         // *derived* function, e.g. `×/`, `+¨`, `×\\`. This mirrors the `f op` derived-function
         // production in `parse_apply`, but here (function-expression position) no trailing
@@ -1397,6 +1359,34 @@ impl<'a> Parser<'a> {
                     func: Box::new(left),
                     op: Box::new(Instr::Symbol { name: adv, namespace: None }),
                 });
+            }
+        }
+        // 2-train chaining (atop): a function atom immediately followed by *another* function
+        // atom (not an adverb/compose handled above) forms a 2-train, e.g. `×-` ->
+        // Train([×, -]). This is gated behind `allow_train`: it is ONLY valid when parsing
+        // the RHS of `⇐` (function-definition position), where a bare `f g` is genuinely a
+        // derived 2-train. In value-apply position (`3 ↑ ⍳10`, `3 < 5`) the same `f g`
+        // pattern is a dyadic call `L f (g …)` and must NOT be chained — there `allow_train`
+        // is `false`, so we return the single `left` and let `parse_apply` handle the dyadic
+        // application. The guard also requires the next token to be a function atom (a
+        // primitive op, or a bracketed/lambda/dynamic/fork group) so we never chain on a
+        // value variable or operand.
+        if allow_train {
+            if let Some(t) = self.peek() {
+                let next_is_fn_atom = match &t.token {
+                    Token::Literal(LiteralValue::Symbol { name, .. }) => Self::is_primitive_op(name),
+                    Token::OpenParen | Token::LambdaToken | Token::ApplyToken
+                    | Token::LeftForkToken => true,
+                    _ => false,
+                };
+                if next_is_fn_atom {
+                    let right = self.parse_function_atom()?;
+                    return Ok(Instr::Train {
+                        funcs: vec![left, right],
+                        reverse: false,
+                        compose: false,
+                    });
+                }
             }
         }
         Ok(left)
@@ -1435,13 +1425,7 @@ impl<'a> Parser<'a> {
                 Ok(Instr::Symbol { name: ",".to_string(), namespace: None })
             }
             Token::OpenParen => {
-                // Nested train or group of functions. First try a >=2-member train
-                // `(f g h)`. If that doesn't pan out (e.g. a single parenthesised
-                // function `(-)`, or a derived operator `(×∘-)`), fall back to parsing
-                // the inner content as one *function atom* (a single function or a
-                // derived operator), wrapped in a 1-element train so it applies to the
-                // surrounding left/right arguments. Mirrors parse_primary's `(`) handling
-                // but uses a function atom here to avoid re-entering this arm recursively.
+                // Nested train or group of functions.
                 self.advance();
                 self.skip_newlines();
                 let save = self.pos;
@@ -1449,20 +1433,7 @@ impl<'a> Parser<'a> {
                     return Ok(train);
                 }
                 self.pos = save;
-                // Single function (e.g. `(-)`, `((×-))`) or derived operator `(×∘-)`.
-                let inner = self.parse_function_atom()?;
-                self.skip_newlines();
-                match self.peek() {
-                    Some(t) if matches!(t.token, Token::CloseParen) => {
-                        self.advance();
-                        Ok(Instr::Train {
-                            funcs: vec![inner],
-                            reverse: false,
-                            compose: false,
-                        })
-                    }
-                    _ => Err(self.err("expected ) to close function group")),
-                }
+                Err(self.err("expected a function in train"))
             }
             Token::Literal(lv) => {
                 // A literal value is a valid train member (enables left-bind e.g. `(10 +)`).
