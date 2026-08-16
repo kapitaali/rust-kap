@@ -337,14 +337,29 @@ impl Engine {
                     }),
                     // A derived function (`×/`) or a train (`⊢«⊣»`) is itself already a
                     // function; storing it directly (split=0) lets `apply_user_fn` route it
-                    // through `eval_apply` with the call's data args. (Wrapping it in an `⍺ ⍵`
-                    // delegation would force a spurious left operand onto reduce/scan.)
-                    Instr::Derived { .. } | Instr::Train { .. } => Rc::new(APLValue::UserFn {
-                        params: vec![],
-                        split: 0,
-                        body: Rc::new(*value.clone()),
-                        env: env.clone(),
-                    }),
+                    // through `eval_apply` with the call's data args. But we must *close* it
+                    // by evaluating it in the current env so component functions (e.g. ⊢, ⊣)
+                    // resolve to primitives. Evaluate it as a standalone function value.
+                    Instr::Derived { .. } | Instr::Train { .. } => {
+                        // Evaluate the train/derived in this env to get a closed function value
+                        let closed = self.eval_instr(value, env)?;
+                        if let APLValue::UserFn { params, split, body, env: _ } = closed.as_ref() {
+                            Rc::new(APLValue::UserFn {
+                                params: params.clone(),
+                                split: *split,
+                                body: Rc::new((**body).clone()),
+                                env: env.clone(),
+                            })
+                        } else {
+                            // Should not happen; fallback to direct storage
+                            Rc::new(APLValue::UserFn {
+                                params: vec![],
+                                split: 0,
+                                body: Rc::new(*value.clone()),
+                                env: env.clone(),
+                            })
+                        }
+                    }
                     _ => {
                         let deleg = Instr::Apply {
                             fn_expr: Box::new(*value.clone()),
