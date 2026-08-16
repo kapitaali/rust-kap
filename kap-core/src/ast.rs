@@ -64,6 +64,31 @@ pub enum Instr {
     /// - Fork `A « B » C` (3-train): monadic `(A y) B (C y)`; dyadic `(x A y) B (x C y)`.
     /// - Left-bind `[value, fn]` (2-train, first member a value): `(c f) y` = `f(c, y)`.
     Train { funcs: Vec<Instr>, reverse: bool, compose: bool },
+    /// A *user-defined function* definition: `∇ (leftargs) name (rightargs) { body }`.
+    /// `left_params`/`right_params` are the parameter names (possibly empty). `split` =
+    /// `left_params.len()` (the point at which the combined param list is divided into
+    /// the dyadic left and right argument bindings). `body` is the unevaluated expression.
+    /// The evaluator compiles this into an `APLValue::UserFn` capturing a closure env.
+    UserFnDef {
+        name: String,
+        namespace: Option<String>,
+        left_params: Vec<String>,
+        right_params: Vec<String>,
+        body: Box<Instr>,
+    },
+    /// An anonymous function *assignment* via `⇐`: `name ⇐ <fn-expr>`. The right side
+    /// is any function-valued expression (a lambda, a train, a builtin name, or another
+    /// named function). Compiled like `UserFnDef` but without a separate left/right split
+    /// other than what the function expression itself carries.
+    FnAssign { name: String, namespace: Option<String>, value: Box<Instr> },
+    /// A *guarded expression* (Kap's `:` operator): `cond : truthy ⋄ falsy`.
+    /// Evaluates `cond`; if truthful returns `truthy`, otherwise `falsy`. The `⋄` between
+    /// the two branches is mandatory. Low precedence — each side is a full expression.
+    Guard {
+        cond: Box<Instr>,
+        truthy: Box<Instr>,
+        falsy: Box<Instr>,
+    },
     /// A pre-evaluated runtime value wrapped as an expression (used internally to pass
     /// already-computed results back into `eval_apply`, e.g. by trains).
     Value(crate::AplRef<crate::APLValue>),

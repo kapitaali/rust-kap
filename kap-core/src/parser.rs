@@ -106,8 +106,16 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// statement := expr (⋄ expr)*  — here we parse one expression per call.
+    /// Parse a *guarded expression* `cond : truthy ⋄ falsy` (Kap's `:` operator).
+    /// Called from the main `parse_expr` after the base expression is parsed: if a `:` follows,
+    /// the truthy branch is parsed, then a mandatory `⋄`, then the falsy branch.
     fn parse_expr(&mut self) -> Result<Instr, AplError> {
+        // Traditional function definition `∇ ...` takes precedence.
+        if let Some(t) = self.peek() {
+            if matches!(t.token, Token::FnDefSym) {
+                return self.parse_fn_def();
+            }
+        }
         // Control-flow keywords are *syntactic* (not symbols): `if`/`while`/`when`.
         // Detect a leading keyword symbol and dispatch to the dedicated parser.
         if let Some(t) = self.peek() {
@@ -120,7 +128,27 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        self.parse_assign()
+        let base = self.parse_assign()?;
+        // Guarded expression: `base : truthy ⋄ falsy`.
+        if let Some(t) = self.peek() {
+            if matches!(t.token, Token::ColonSym) {
+                self.advance();
+                let truthy = self.parse_expr()?;
+                if let Some(s) = self.peek() {
+                    if matches!(s.token, Token::StatementSeparator) {
+                        self.advance();
+                        let falsy = self.parse_expr()?;
+                        return Ok(Instr::Guard {
+                            cond: Box::new(base),
+                            truthy: Box::new(truthy),
+                            falsy: Box::new(falsy),
+                        });
+                    }
+                }
+                return Err(self.err("expected ⋄ after guarded expression (cond : a ⋄ b)"));
+            }
+        }
+        Ok(base)
     }
 
     /// block := `{` statement* `}`  — a sequence of statements separated by ⋄/;/newline.
@@ -289,12 +317,114 @@ impl<'a> Parser<'a> {
                             value: Box::new(value),
                         });
                     }
+                    if matches!(n.token, Token::DynassignToken) {
+                        return self.parse_fn_assign(&name_tok.token);
+                    }
                 }
                 // not an assignment; rewind
                 self.pos = save;
             }
         }
         self.parse_apply()
+    }
+
+    /// Parse `name ⇐ <fn-expr>` — dynamic function assignment. This is a distinct
+    /// syntactic form from `←`: the RHS is a function-valued expression (lambda, train,
+    /// builtin name, or another named function) compiled into a `UserFn`.
+    fn parse_fn_assign(&mut self, name_tok: &Token) -> Result<Instr, AplError> {
+        let (name, namespace) = match name_tok {
+            Token::Literal(LiteralValue::Symbol { name, namespace }) => {
+                (name.clone(), namespace.clone())
+            }
+            _ => return Err(self.err("expected a symbol before ⇐")),
+        };
+        self.advance(); // consume ⇐
+        let value = self.parse_apply()?;
+        Ok(Instr::FnAssign {
+            name,
+            namespace,
+            value: Box::new(value),
+        })
+    }
+
+    /// `∇ (left) name (right) { body }` — traditional Kap function definition.
+    /// Left and right parameter lists may be parenthesised (`(A B C)` or `(A;B;C)`);
+    /// the right list may additionally be a single bare symbol (`∇ foo x { … }`);
+    /// either list may be omitted entirely (monadic `∇ foo { … }` using `⍵`/`⍺`).
+    fn parse_fn_def(&mut self) -> Result<Instr, AplError> {
+        self.advance(); // consume ∇
+        self.skip_newlines();
+        let left_params = self.parse_fn_params_opt(false)?;
+        self.skip_newlines();
+        // name: a symbol (user identifier) or an operator glyph such as `+`.
+        let (name, namespace) = match self.peek() {
+            Some(t) => match &t.token {
+                Token::Literal(LiteralValue::Symbol { name, namespace }) => {
+                    let n = name.clone();
+                    let ns = namespace.clone();
+                    self.advance();
+                    (n, ns)
+                }
+                _ => return Err(self.err("expected function name after ∇")),
+            },
+            None => return Err(self.err("expected function name after ∇")),
+        };
+        self.skip_newlines();
+        let right_params = self.parse_fn_params_opt(true)?;
+        self.skip_newlines();
+        let body = self.parse_block_body()?; // expects `{ … }`
+        Ok(Instr::UserFnDef {
+            name,
+            namespace,
+            left_params,
+            right_params,
+            body: Box::new(body),
+        })
+    }
+
+    /// Parse an optional parameter list. Accepts a parenthesised, `;`- or `,`-separated
+    /// list. When `allow_bare` is true, a single unparenthesised symbol is also accepted
+    /// (the right-parameter shorthand `∇ foo x { … }`). Left parameters are always
+    /// parenthesised, so the caller passes `allow_bare=false` for them to avoid greedily
+    /// consuming the function name as a parameter.
+    fn parse_fn_params_opt(&mut self, allow_bare: bool) -> Result<Vec<String>, AplError> {
+        let mut params = Vec::new();
+        match self.peek() {
+            Some(t) if matches!(t.token, Token::OpenParen) => {
+                self.advance();
+                loop {
+                    self.skip_newlines();
+                    match self.peek() {
+                        Some(t) if matches!(t.token, Token::CloseParen) => {
+                            self.advance();
+                            break;
+                        }
+                        Some(t) if matches!(t.token, Token::Literal(LiteralValue::Symbol { .. })) => {
+                            if let Token::Literal(LiteralValue::Symbol { name, .. }) = &t.token {
+                                params.push(name.clone());
+                            }
+                            self.advance();
+                        }
+                        Some(t)
+                            if matches!(t.token, Token::Comma)
+                                || matches!(t.token, Token::ListSeparator) =>
+                        {
+                            self.advance();
+                        }
+                        _ => return Err(self.err("expected parameter name or ')'")),
+                    }
+                }
+            }
+            Some(t) if allow_bare && matches!(t.token, Token::Literal(LiteralValue::Symbol { .. })) => {
+                // single unparenthesised right parameter, e.g. `∇ foo x { … }`
+                if let Token::Literal(LiteralValue::Symbol { name, .. }) = &t.token {
+                    params.push(name.clone());
+                }
+                self.advance();
+            }
+            _ => {}
+        }
+        Ok(params)
     }
 
     /// apply := (fn term) | (term fn term)*  — monadic `f x` or dyadic `a f b` / trains.
@@ -344,6 +474,11 @@ impl<'a> Parser<'a> {
                 return Ok(first);
             }
             let next = self.peek().map(|t| t.token.clone());
+            // A *value* operand (so a leading function applies to it monadically) is a
+            // literal, or a non-primitive / non-adverb symbol (a variable or another
+            // user function's name, e.g. `fact N-1` → `fact(N-1)`, `foo x` → `foo(x)`).
+            // A primitive-op symbol (`+`, `≤`, …) is NOT an operand: `N≤1` is dyadic, not
+            // `N` applied monadically to `≤1`.
             let next_is_operand_not_fn = match &next {
                 Some(t) => {
                     !matches!(t, Token::EndOfFile)
@@ -352,7 +487,17 @@ impl<'a> Parser<'a> {
                         && !matches!(t, Token::CloseParen)
                         && !matches!(t, Token::CloseBracket)
                         && !matches!(t, Token::ListSeparator)
-                        && !matches!(t, Token::Literal(LiteralValue::Symbol { .. }))
+                        // A primitive-op or adverb symbol is an *operator*, not a value
+                        // operand: `N≤1` is dyadic (`≤` binds), `+/` is reduce — neither is
+                        // a monadic application of the leading symbol to that symbol. Any
+                        // other symbol (a variable or a user-function name such as `N`,
+                        // `x`, `fact`) IS a value operand, so a leading function applies to
+                        // it monadically: `fact N-1` → `fact(N-1)`, `foo x` → `foo(x)`.
+                        && !matches!(
+                            t,
+                            Token::Literal(LiteralValue::Symbol { name, .. })
+                                if Self::is_primitive_op(name) || Self::is_adverb(name)
+                        )
                 }
                 None => false,
             };
@@ -602,17 +747,20 @@ impl<'a> Parser<'a> {
     /// dyadic parse for a leading symbol. A non-primitive (user) symbol is parsed as a
     /// variable/function reference instead. This is a heuristic — Kap resolves valence
     /// at runtime; the set is the primitives wired up in the evaluator.)
-    /// True when the next token ends the current statement at the top level:
-    /// a newline, a `⋄` separator, or end of input. Newlines inside parentheses/brackets
-    /// are NOT seen here — they are consumed by `parse_primary` internally. Breaking the
-    /// apply loops on a top-level newline keeps distinct statements separate (so a file's
-    /// `a ← 3 \n b ← 4` is two assignments, not `(a ← 3) b`).
+    /// True when the next token ends the current expression at this nesting level:
+    /// a newline, a `⋄` separator, end of input, or a *close* delimiter (`}`, `)`, `]`)
+    /// that belongs to an enclosing construct (a block, a parenthesised group, a bracket
+    /// index). Close delimiters always terminate an apply/strand expression — we must
+    /// never try to parse them as an operand or operator.
     fn at_statement_boundary(&self) -> bool {
         match self.peek() {
             Some(t) => {
                 matches!(t.token, Token::Newline)
                     || matches!(t.token, Token::StatementSeparator)
                     || matches!(t.token, Token::EndOfFile)
+                    || matches!(t.token, Token::CloseBrace)
+                    || matches!(t.token, Token::CloseParen)
+                    || matches!(t.token, Token::CloseBracket)
             }
             None => true,
         }

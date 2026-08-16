@@ -161,6 +161,10 @@ impl Engine {
             }
             Instr::Lambda { params, body } => Ok(Rc::new(APLValue::UserFn {
                 params: params.clone(),
+                // The last param is the right argument (⍵); any preceding params are
+                // left arguments (⍺). So `λ(a)` is monadic (split 0) and `λ(a b)` is
+                // dyadic (split 1), matching Kap dfn conventions.
+                split: params.len().saturating_sub(1),
                 body: Rc::new(*body.clone()),
                 env: env.clone(),
             })),
@@ -222,11 +226,86 @@ impl Engine {
                     "train used without arguments (apply it: (f g) x)".into(),
                 ))
             }
+            Instr::UserFnDef {
+                name,
+                namespace,
+                left_params,
+                right_params,
+                body,
+            } => {
+                // Combine left+right params; `split` separates the dyadic left bind.
+                let mut params = left_params.clone();
+                params.extend(right_params.iter().cloned());
+                let split = left_params.len();
+                let v = Rc::new(APLValue::UserFn {
+                    params,
+                    split,
+                    body: Rc::new(*body.clone()),
+                    env: env.clone(),
+                });
+                env.define(name, namespace, v.clone());
+                Ok(v)
+            }
+            Instr::FnAssign {
+                name,
+                namespace,
+                value,
+            } => {
+                // `name ⇐ <fn-expr>`: compile RHS to a UserFn. If it is already a
+                // lambda, store directly with split=0; otherwise wrap as a dyadic
+                // delegation `⍺ <rhs> ⍵` (split=1), so the new name is callable as
+                // `x name y` (and monadically only if the RHS supports it).
+                let v = match value.as_ref() {
+                    Instr::Lambda { params, body } => Rc::new(APLValue::UserFn {
+                        params: params.clone(),
+                        split: params.len().saturating_sub(1),
+                        body: Rc::new(*body.clone()),
+                        env: env.clone(),
+                    }),
+                    // A bare block `{ … }` is a function with no named parameters; its
+                    // body is the block itself (it may reference `⍵`/`⍺`).
+                    Instr::Block { body } => Rc::new(APLValue::UserFn {
+                        params: vec![],
+                        split: 0,
+                        body: Rc::new(Instr::Block { body: body.clone() }),
+                        env: env.clone(),
+                    }),
+                    _ => {
+                        let deleg = Instr::Apply {
+                            fn_expr: Box::new(*value.clone()),
+                            left: Some(Box::new(Instr::Symbol {
+                                name: "⍺".into(),
+                                namespace: None,
+                            })),
+                            right: Box::new(Instr::Symbol {
+                                name: "⍵".into(),
+                                namespace: None,
+                            }),
+                        };
+                        Rc::new(APLValue::UserFn {
+                            params: vec![],
+                            split: 1,
+                            body: Rc::new(deleg),
+                            env: env.clone(),
+                        })
+                    }
+                };
+                env.define(name, namespace, v.clone());
+                Ok(v)
+            }
             Instr::Value(v) => Ok(v.clone()),
             Instr::Index { array, selector } => {
                 let arr = self.eval_instr(array, env)?;
                 let sel = self.eval_instr(selector, env)?;
                 self.pick(&arr, &sel)
+            }
+            Instr::Guard { cond, truthy, falsy } => {
+                let c = self.eval_instr(cond, env)?.force(self)?;
+                if self.truthy(&c) {
+                    self.eval_instr(truthy, env)
+                } else {
+                    self.eval_instr(falsy, env)
+                }
             }
         }
     }
@@ -272,11 +351,15 @@ impl Engine {
             _ => None,
         };
         let lambda = match fn_expr {
-            Instr::Lambda { params, body } => Some((params.clone(), Rc::new((**body).clone()))),
+            Instr::Lambda { params, body } => Some((
+                params.clone(),
+                params.len().saturating_sub(1),
+                Rc::new((**body).clone()),
+            )),
             Instr::Symbol { name, namespace } => match env.lookup(name, namespace) {
                 Some(v) if matches!(v.as_ref(), APLValue::UserFn { .. }) => {
-                    if let APLValue::UserFn { params, body, env: _fenv } = v.as_ref() {
-                        Some((params.clone(), Rc::new((**body).clone())))
+                    if let APLValue::UserFn { params, split, body, env: _fenv } = v.as_ref() {
+                        Some((params.clone(), *split, Rc::new((**body).clone())))
                     } else {
                         None
                     }
@@ -285,8 +368,8 @@ impl Engine {
             },
             _ => None,
         };
-        if let Some((params, body)) = lambda {
-            return self.apply_user_fn(&params, &body, left, right, env);
+        if let Some((params, split, body)) = lambda {
+            return self.apply_user_fn(&params, split, &body, left, right, env);
         }
         // --- Derived functions from adverbs (e.g. `+/`, `×¨`) ---
         // `fn_expr` is an `Instr::Derived { func, op }`; `op` is the adverb name (`/`,
@@ -558,11 +641,14 @@ impl Engine {
         matches!(e, Instr::Literal(_) | Instr::Array { .. } | Instr::Empty)
     }
 
-    /// Apply a user-defined lambda. Dyadic: left=first param, right=second. Monadic:
-    /// right=first param. Builds a child scope from the closure env and binds params.
+    /// Apply a user-defined lambda. `split` = number of leading params that are bound to
+    /// the *left* (dyadic) argument; the remainder are bound to the right argument.
+    /// For a monadic function `split == 0`. Builds a child scope from the closure env
+    /// and binds params, also exposing `⍺` (left, if any) and `⍵` (right) as defaults.
     fn apply_user_fn(
         &self,
         params: &[String],
+        split: usize,
         body: &Instr,
         left: &Option<Box<Instr>>,
         right: &Box<Instr>,
@@ -574,16 +660,25 @@ impl Engine {
         });
         // Evaluate args in the *calling* env (Kap passes by value/sharing).
         let right_val = self.eval_instr(right, closure_env)?.force(self)?;
-        let mut i = 0;
-        if let Some(l) = left {
-            let left_val = self.eval_instr(l, closure_env)?.force(self)?;
-            if i < params.len() {
-                child.define(&params[i], &None, left_val);
-                i += 1;
+        // Bind named params: first `split` to the left arg, the rest to the right arg.
+        let left_val = match left {
+            Some(l) => Some(self.eval_instr(l, closure_env)?.force(self)?),
+            None => None,
+        };
+        if split > 0 {
+            if let Some(lv) = &left_val {
+                for p in &params[..split.min(params.len())] {
+                    child.define(p, &None, lv.clone());
+                }
             }
         }
-        if i < params.len() {
-            child.define(&params[i], &None, right_val);
+        for p in &params[split.min(params.len())..] {
+            child.define(p, &None, right_val.clone());
+        }
+        // Default `⍵`/`⍺` names (Kap's omega/alpha). `⍵` = right arg; `⍺` = left (if present).
+        child.define("⍵", &None, right_val);
+        if let Some(lv) = &left_val {
+            child.define("⍺", &None, lv.clone());
         }
         self.eval_instr(body, &child)
     }
@@ -1144,6 +1239,25 @@ impl Engine {
                     return Err(AplError::runtime(
                         "↑/↓ count has more elements than the array rank".into(),
                     ));
+                }
+                // Compute the final shape up front and reject runaway results
+                // (e.g. `1e6 1e6 ↑ small`) *before* slicing, so we never attempt to
+                // allocate an OOM-sized vector — `slice_axis` requests a `Vec`
+                // capacity of `outer * target * stride`, and for a padded multi-axis
+                // take that can be ~1e12 elements, which aborts the process.
+                let mut final_dims = dims.clone();
+                for axis in 0..rank {
+                    let spec = counts.get(axis).copied();
+                    let n = dims[axis];
+                    final_dims[axis] = match spec {
+                        None => n,
+                        Some(c) if take => c.unsigned_abs() as usize,
+                        Some(c) => n - n.min(c.unsigned_abs() as usize),
+                    };
+                }
+                let total: usize = final_dims.iter().product();
+                if total > 100_000_000 {
+                    return Err(AplError::runtime("take/drop result too large".into()));
                 }
                 let mut flat = a.elements();
                 for axis in 0..rank {

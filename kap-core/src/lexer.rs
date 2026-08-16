@@ -154,6 +154,7 @@ fn single_char_token(c: char) -> Option<Token> {
         ',' => Token::Comma,
         '∇' => Token::FnDefSym,
         '⇐' => Token::DynassignToken,
+        ':' => Token::ColonSym,
         '«' => Token::LeftForkToken,
         '»' => Token::RightForkToken,
         '∘' => Token::ComposeToken,

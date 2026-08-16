@@ -54,6 +54,7 @@ pub enum Token {
     ComposeToken,   // ∘  (atop / compose: f ∘ g)
     ReverseComposeToken, // ⍛  (reverse compose: f ⍛ g)
     DynassignToken, // ⇐
+    ColonSym,      // :  (guarded expression: cond : truthy ⋄ falsy)
     AndToken,    // and
     OrToken,     // or
     Comment,

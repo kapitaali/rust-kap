@@ -54,8 +54,15 @@ pub enum APLValue {
     Deferred { instr: AplRef<ast::Instr>, env: AplRef<Environment> },
     /// A user-defined function (lambda / tradfn). `params` are argument names; `body` is
     /// the unevaluated expression; `env` is the closure captured at definition time
-    /// (used to build a child scope when the function is applied).
-    UserFn { params: Vec<String>, body: AplRef<ast::Instr>, env: AplRef<Environment> },
+    /// (used to build a child scope when the function is applied). `split` = the number
+    /// of leading `params` that are bound to the *left* (dyadic) argument; the remainder
+    /// are bound to the right argument. For a monadic function `split == 0`.
+    UserFn {
+        params: Vec<String>,
+        split: usize,
+        body: AplRef<ast::Instr>,
+        env: AplRef<Environment>,
+    },
 }
 
 impl APLValue {
