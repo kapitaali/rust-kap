@@ -467,20 +467,21 @@ impl<'a> Parser<'a> {
     ///   * 3 components -> left-args (1st), name (2nd), right-args (3rd)
     fn parse_fn_def(&mut self) -> Result<Instr, AplError> {
         self.advance(); // consume ∇
-        let mut components: Vec<Vec<String>> = Vec::new();
+        let mut components: Vec<(Vec<String>, bool)> = Vec::new();
         loop {
             self.skip_newlines();
             match self.peek() {
                 Some(t) if matches!(t.token, Token::OpenBrace) => break,
                 Some(t) if matches!(t.token, Token::Literal(LiteralValue::Symbol { .. })) => {
                     if let Token::Literal(LiteralValue::Symbol { name, .. }) = &t.token {
-                        components.push(vec![name.clone()]);
+                        components.push((vec![name.clone()], false));
                     }
                     self.advance();
                 }
                 Some(t) if matches!(t.token, Token::OpenParen) => {
                     self.advance();
                     let mut params = Vec::new();
+                    let mut used_sep = false;
                     loop {
                         self.skip_newlines();
                         match self.peek() {
@@ -500,12 +501,13 @@ impl<'a> Parser<'a> {
                                 if matches!(t.token, Token::Comma)
                                     || matches!(t.token, Token::ListSeparator) =>
                             {
+                                used_sep = true;
                                 self.advance();
                             }
-                            _ => return Err(self.err("expected parameter name or ')'")),
+                            _ => return Err(self.err("expected a parameter name")),
                         }
                     }
-                    components.push(params);
+                    components.push((params, used_sep));
                 }
                 _ => return Err(self.err("expected function name after ∇")),
             }
@@ -535,32 +537,68 @@ impl<'a> Parser<'a> {
             Vec<String>,
             Vec<String>,
         ) = match components.len() {
-            1 => (components[0][0].clone(), None, None, vec![], vec![]),
+            1 => (components[0].0[0].clone(), None, None, vec![], vec![]),
             2 => {
-                if components[0].len() >= 2 {
-                    let nc = &components[0];
+                if components[0].0.len() >= 2 {
+                    let nc = &components[0].0;
                     let op_left = Some(nc[0].clone());
                     let name = nc[1].clone();
                     let op_right = nc.get(2).cloned();
-                    (name, op_left, op_right, vec![], components[1].clone())
+                    (name, op_left, op_right, vec![], components[1].0.clone())
                 } else {
-                    (components[0][0].clone(), None, None, vec![], components[1].clone())
+                    (components[0].0[0].clone(), None, None, vec![], components[1].0.clone())
                 }
             }
             3 => {
-                let nc = &components[1];
+                let nc = &components[1].0;
                 if nc.len() >= 2 {
                     let op_left = Some(nc[0].clone());
                     let name = nc[1].clone();
                     let op_right = nc.get(2).cloned();
-                    (name, op_left, op_right, components[0].clone(), components[2].clone())
+                    (name, op_left, op_right, components[0].0.clone(), components[2].0.clone())
                 } else {
-                    (nc[0].clone(), None, None, components[0].clone(), components[2].clone())
+                    (nc[0].clone(), None, None, components[0].0.clone(), components[2].0.clone())
                 }
             }
             _ => return Err(self.err("invalid function definition format")),
         };
         let is_op = op_left.is_some();
+        // --- Validation (Kap semantics; mirrors Kotlin ParseException cases) ---
+        // 1. A `;`/`,` separator is not allowed inside the *operator-name* component.
+        // 2. An operator name component may have at most 3 symbols (op_left, name, op_right).
+        // 3. A parameter group with multiple names must be separated by `;`/`,`.
+        // 4. Parameter names must be distinct across all groups.
+        if is_op {
+            let nc = if components.len() == 2 { &components[0] } else { &components[1] };
+            if nc.1 {
+                return Err(self.err("semicolon is not allowed in an operator name"));
+            }
+            if nc.0.len() > 3 {
+                return Err(self.err("too many arguments for an operator"));
+            }
+        }
+        for (i, (names, used_sep)) in components.iter().enumerate() {
+            // The name component of an operator (>= 2 symbols, e.g. `(x foo y)`) uses
+            // *spaces*, not `;` — it is exempt from the "multi-name must use ;" rule (that
+            // rule applies to parameter groups). Skip it here; its own checks are above.
+            let is_name_component = is_op && ((components.len() == 2 && i == 0) || i == 1);
+            if is_name_component {
+                continue;
+            }
+            if names.len() > 1 && !used_sep {
+                return Err(self.err("a parameter group with multiple names must use ; as a separator"));
+            }
+        }
+        {
+            let mut seen = std::collections::HashSet::new();
+            for (names, _) in &components {
+                for p in names {
+                    if !seen.insert(p.clone()) {
+                        return Err(self.err(&format!("duplicated argument name '{}'", p)));
+                    }
+                }
+            }
+        }
         // Register the name as a known function/operator *now* (before the body is parsed)
         // so a recursive reference inside the body parses as an application.
         if is_op {
@@ -952,6 +990,13 @@ impl<'a> Parser<'a> {
         // vector of 3 elements: the nested array `(1 2 3)`, `4`, `5`), NOT be flattened
         // into it. So we accumulate strand elements in a Vec and only build the result
         // `Instr::Array` once at the end — never pushing *into* an existing array element.
+        // A traditional function definition (`∇`) may only begin a statement. If one
+        // appears here (after a value/expression in the same statement, e.g. `1 ∇ foo (x) {…}`)
+        // it is a syntax error. Note: `∇` at the *start* of a statement is handled earlier
+        // by `parse_expr`, which dispatches to `parse_fn_def` before reaching this point.
+        if matches!(self.peek().map(|t| &t.token), Some(Token::FnDefSym)) {
+            return Err(self.err("function definition (∇) must start a new statement"));
+        }
         let mut strand: Option<Vec<Instr>> = None;
         let first = self.parse_index_suffix(first)?;
         let mut left = first;
