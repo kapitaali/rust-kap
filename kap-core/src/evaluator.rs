@@ -655,6 +655,29 @@ impl Engine {
                     Some(_) => self.num2(left_val, right_val, |a, b| a.sub(b), "-"),
                 }
             }
+            "⍕" | "format" => {
+                // Monadic format-to-string: render any value as a `Str`.
+                // Kap: ⍕8 => "8", ⍕@a => "a", ⍕"foo" => "foo", ⍕⍬ => "" (empty).
+                if let APLValue::Null = right_val.as_ref() {
+                    Ok(Rc::new(APLValue::Str(String::new())))
+                } else {
+                    Ok(Rc::new(APLValue::Str(right_val.format_value())))
+                }
+            }
+            "⍎" | "execute" => {
+                // Monadic execute-string: evaluate `s` as a Kap expression; the
+                // result must be a scalar number (Kotlin: `⍎"123"`=>123, `⍎"1/2"`=>1/2;
+                // `⍎"illegal"`/`⍎"1 2 3"` error).
+                let s = match right_val.as_ref() {
+                    APLValue::Str(s) => s.clone(),
+                    _ => return Err(AplError::runtime("⍎ requires a string argument".into())),
+                };
+                let val = self.eval_string_in_env(&s, env)?.force(self)?;
+                match val.as_ref() {
+                    APLValue::Number(_) => Ok(Rc::new(val.as_ref().clone())),
+                    _ => Err(AplError::runtime("execute result is not a number".into())),
+                }
+            }
             "÷" | "/" => match left_val {
                 None => self.scalar1(right_val, |x| x.recip(), "÷"),
                 Some(_) => self.num2(left_val, right_val, |a, b| a.div(b), "÷"),
