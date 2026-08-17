@@ -645,14 +645,27 @@ impl Engine {
                 // Ambivalent: monadic `+ x` = identity (return x); dyadic = add.
                 match left_val {
                     None => Ok(right_val),
-                    Some(_) => self.num2(left_val, right_val, |a, b| a.add(b), "+"),
+                    Some(ref lv) => {
+                        if let Some(r) = self.compute_char_op(lv.as_ref(), right_val.as_ref(), true)
+                        {
+                            return r;
+                        }
+                        self.num2(left_val, right_val, |a, b| a.add(b), "+")
+                    }
                 }
             }
             "-" => {
                 // Ambivalent: monadic `- x` = negate; dyadic = subtract.
                 match left_val {
                     None => self.negate(right_val),
-                    Some(_) => self.num2(left_val, right_val, |a, b| a.sub(b), "-"),
+                    Some(ref lv) => {
+                        if let Some(r) =
+                            self.compute_char_op(lv.as_ref(), right_val.as_ref(), false)
+                        {
+                            return r;
+                        }
+                        self.num2(left_val, right_val, |a, b| a.sub(b), "-")
+                    }
                 }
             }
             "⍕" | "format" => {
@@ -1190,6 +1203,123 @@ impl Engine {
                 env.define(n, &None, Rc::new(arg.clone()));
             }
         }
+    }
+
+    /// Collect the numeric operands of a char-math partner: a scalar `Number` becomes a
+    /// 1-element list; a numeric `Array` becomes its elements (non-numeric => `None`, so the
+    /// caller falls through to normal numeric handling).
+    fn numbers_of(v: &APLValue) -> Option<Vec<KapNumber>> {
+        match v {
+            APLValue::Number(n) => Some(vec![n.clone()]),
+            APLValue::Array(a) => {
+                let mut out = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    if let APLValue::Number(n) = e.as_ref() {
+                        out.push(n.clone());
+                    } else {
+                        return None;
+                    }
+                }
+                Some(out)
+            }
+            _ => None,
+        }
+    }
+
+    /// Element-wise codepoint shift of a string by a number (scalar or numeric array,
+    /// broadcast if the number side is length 1). `is_add` selects `+`/`-`.
+    fn char_shift(
+        s: &str,
+        nums: &[KapNumber],
+        is_add: bool,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let cps: Vec<i64> = s.chars().map(|c| c as i64).collect();
+        let n = if nums.len() == 1 {
+            vec![nums[0].clone(); cps.len()]
+        } else if nums.len() == cps.len() {
+            nums.to_vec()
+        } else {
+            return Err(AplError::runtime(
+                "character arithmetic: length mismatch".into(),
+            ));
+        };
+        let mut out = String::new();
+        for (i, cp) in cps.iter().enumerate() {
+            let num = &n[i];
+            if num.is_complex() {
+                return Err(AplError::runtime(
+                    "cannot add a complex number to a character".into(),
+                ));
+            }
+            let delta: i64 = num
+                .as_long()
+                .unwrap_or_else(|_| num.as_double() as i64); // doubles truncate toward zero
+            let new_cp = if is_add { cp + delta } else { cp - delta };
+            if !(0..=0x10FFFF).contains(&new_cp) {
+                return Err(AplError::runtime("character codepoint out of range".into()));
+            }
+            out.push(char::from_u32(new_cp as u32).unwrap_or('?'));
+        }
+        Ok(Rc::new(APLValue::Str(out)))
+    }
+
+    /// Element-wise codepoint difference of two equal-length strings -> numeric vector.
+    fn char_diff(a: &str, b: &str) -> Result<AplRef<APLValue>, AplError> {
+        let ca: Vec<i64> = a.chars().map(|c| c as i64).collect();
+        let cb: Vec<i64> = b.chars().map(|c| c as i64).collect();
+        if ca.len() != cb.len() {
+            return Err(AplError::runtime("character difference: length mismatch".into()));
+        }
+        let out: Vec<AplRef<APLValue>> = ca
+            .iter()
+            .zip(cb.iter())
+            .map(|(x, y)| Rc::new(APLValue::Number(KapNumber::Long(x - y))))
+            .collect();
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![out.len()],
+            ArrayData::Nested(out),
+        )))))
+    }
+
+    /// Char/string arithmetic dispatch for `+`/`-`. Returns `Some(result)` when the operands
+    /// are character-valued (so the caller should `return` it); `None` means "fall through to
+    /// ordinary numeric handling". Kap rules (mirrors StringsTest.kt):
+    ///  * a single `Char` may never do arithmetic (`@a + @A`, `@a - 98`, `±1j1` all error);
+    ///  * `Str + Number` and `Number + Str` => char shift (both directions);
+    ///  * `Str - Number` => char shift, but `Number - Str` => ERROR (int−char asymmetry);
+    ///  * `Str - Str` => element-wise codepoint difference (numeric vector); `Str + Str` => error.
+    fn compute_char_op(
+        &self,
+        left: &APLValue,
+        right: &APLValue,
+        is_add: bool,
+    ) -> Option<Result<AplRef<APLValue>, AplError>> {
+        // Single-character arithmetic is never allowed.
+        if matches!(left, APLValue::Char(_)) || matches!(right, APLValue::Char(_)) {
+            return Some(Err(AplError::runtime(
+                "arithmetic on a single character is not allowed".into(),
+            )));
+        }
+        // String - String => element-wise codepoint difference (numbers).
+        if let (APLValue::Str(a), APLValue::Str(b)) = (left, right) {
+            if is_add {
+                return Some(Err(AplError::runtime("cannot add two strings".into())));
+            }
+            return Some(Self::char_diff(a, b));
+        }
+        // Exactly one operand is a string; the other must be a number (scalar or numeric array).
+        let (s, nums, str_is_left) = match (left, right) {
+            (APLValue::Str(s), other) => (s.clone(), Self::numbers_of(other)?, true),
+            (other, APLValue::Str(s)) => (s.clone(), Self::numbers_of(other)?, false),
+            _ => return None,
+        };
+        // int - char asymmetry: subtracting a string from a number is forbidden.
+        if !is_add && !str_is_left {
+            return Some(Err(AplError::runtime(
+                "cannot subtract a character from a number".into(),
+            )));
+        }
+        Some(Self::char_shift(&s, &nums, is_add))
     }
 
     fn num2(
@@ -2975,5 +3105,40 @@ mod tests {
     #[test]
     fn eval_left_param_group_destructure() {
         assert_eq!(eval(r#"∇ (a0;a1) (x foo y) b { (a0;a1) } ⋄ (10;11) -foo+ 4"#), "(10 11)");
+    }
+
+    // --- Strings: character arithmetic (Kotlin StringsTest.kt) ---
+
+    #[test]
+    fn eval_char_plus_int_vector() {
+        assert_eq!(eval(r#""af" + 1 ¯1"#), "be");
+        assert_eq!(eval(r#"8 ¯1 + "af""#), "ie");
+        assert_eq!(eval(r#""abc" + 0.1 0.9 6.2"#), "abi");
+    }
+
+    #[test]
+    fn eval_char_minus_int_vector() {
+        assert_eq!(eval(r#""abj" - 0 ¯11 3"#), "amg");
+    }
+
+    #[test]
+    fn eval_char_difference() {
+        // "bBa" - "aAb" => codepoint diff. Kotlin's stored expectation is `(1 1 -1)` (ASCII
+        // minus) but Kap renders the negative sign as the overbar glyph, so we get `(1 1 ¯1)`.
+        // The value [-1] is identical; this is a display-glyph artifact, not a logic error.
+        assert_eq!(eval(r#""bBa" - "aAb""#), "(1 1 ¯1)");
+    }
+
+    #[test]
+    fn eval_single_char_arithmetic_is_forbidden() {
+        // Single-character arithmetic is never allowed in Kap.
+        let e = Engine::new();
+        assert!(e.eval_string(r#"@a + @A"#).is_err());
+        assert!(e.eval_string(r#"@a - 98"#).is_err());
+        assert!(e.eval_string(r#"@a + 1j1"#).is_err());
+        assert!(e.eval_string(r#"1j1 + @a"#).is_err());
+        assert!(e.eval_string(r#"@a - 1j1"#).is_err());
+        // int - char is forbidden (asymmetry: char - int is allowed).
+        assert!(e.eval_string(r#"98 200 - "aj""#).is_err());
     }
 }
