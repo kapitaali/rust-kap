@@ -498,8 +498,7 @@ impl<'a> Parser<'a> {
                                 self.advance();
                             }
                             Some(t)
-                                if matches!(t.token, Token::Comma)
-                                    || matches!(t.token, Token::ListSeparator) =>
+                                if matches!(t.token, Token::ListSeparator) =>
                             {
                                 used_sep = true;
                                 self.advance();
@@ -667,7 +666,7 @@ impl<'a> Parser<'a> {
                             }
                             self.advance();
                         }
-                        Some(t) if matches!(t.token, Token::Comma) || matches!(t.token, Token::ListSeparator) => {
+                        Some(t) if matches!(t.token, Token::ListSeparator) => {
                             self.advance();
                         }
                         _ => return Err(self.err("expected parameter name or ')'")),
@@ -1059,7 +1058,6 @@ impl<'a> Parser<'a> {
                     Token::OpenParen => paren_op,
                     Token::OpenBracket => true,
                     Token::LambdaToken => true,
-                    Token::Comma => true,
                     _ => false,
                 },
                 None => false,
@@ -1176,7 +1174,6 @@ impl<'a> Parser<'a> {
                     | Some(Token::ReverseComposeToken)
                     | Some(Token::LeftForkToken)
                     | Some(Token::RightForkToken)
-                    | Some(Token::Comma)
                     | Some(Token::OpenParen) => {
                         kinds.push(Kind::Func);
                         self.advance();
@@ -1355,7 +1352,6 @@ impl<'a> Parser<'a> {
                         // non-function-atom token means this is a 2-train `[a, b]`.
                         let is_func_start = match self.peek().map(|t| &t.token) {
                             Some(Token::Literal(LiteralValue::Symbol { .. }))
-                            | Some(Token::Comma)
                             | Some(Token::OpenParen)
                             | Some(Token::LambdaToken)
                             | Some(Token::LeftForkToken) => true,
@@ -1535,11 +1531,6 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Instr::Symbol { name, namespace })
             }
-            Token::Comma => {
-                // Catenate is a valid train member (e.g. `f , g`).
-                self.advance();
-                Ok(Instr::Symbol { name: ",".to_string(), namespace: None })
-            }
             Token::OpenParen => {
                 // Nested train or group of functions.
                 self.advance();
@@ -1695,14 +1686,6 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Instr::Empty)
             }
-            Token::Comma => {
-                // Catenate is a dyadic operator; represent it as a symbol named ",".
-                self.advance();
-                Ok(Instr::Symbol {
-                    name: ",".to_string(),
-                    namespace: None,
-                })
-            }
             Token::LambdaToken => {
                 // λ(params) body  — params are bare symbols (or a parenthesised list),
                 // body is the rest of the expression.
@@ -1722,12 +1705,16 @@ impl<'a> Parser<'a> {
                                 }
                                 Some(t) if matches!(t.token, Token::Literal(LiteralValue::Symbol { .. })) => {
                                     if let Token::Literal(LiteralValue::Symbol { name, .. }) = &t.token {
-                                        params.push(name.clone());
+                                        if name == "," {
+                                            // `,` is the catenate separator between params
+                                            self.advance();
+                                        } else {
+                                            params.push(name.clone());
+                                            self.advance();
+                                        }
+                                    } else {
+                                        unreachable!()
                                     }
-                                    self.advance();
-                                }
-                                Some(t) if matches!(t.token, Token::Comma) => {
-                                    self.advance();
                                 }
                                 _ => return Err(self.err("expected parameter name or ')'")),
                             }

@@ -152,7 +152,6 @@ fn single_char_token(c: char) -> Option<Token> {
         'λ' => Token::LambdaToken,
         '⍞' => Token::ApplyToken,
         ';' => Token::ListSeparator,
-        ',' => Token::Comma,
         '∇' => Token::FnDefSym,
         '⇐' => Token::DynassignToken,
         ':' => Token::ColonSym,

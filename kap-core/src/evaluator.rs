@@ -220,9 +220,17 @@ impl Engine {
             Instr::Literal(LiteralValue::Symbol { .. }) => Err(AplError::runtime("lone symbol literal".into())),
             Instr::Empty => Ok(Rc::new(APLValue::Null)),
             Instr::Symbol { name, namespace } => {
-                let found = env.lookup(name, namespace).ok_or_else(|| AplError::runtime(format!("undefined symbol: {}", name)))?;
+                let found = env
+                    .lookup(name, namespace)
+                    .ok_or_else(|| AplError::runtime(format!("undefined symbol: {}", name)))?;
                 // clone the inner value out of the shared ref
                 Ok(Rc::new(found.as_ref().clone()))
+            }
+            Instr::DynamicRef { name, namespace } => {
+                let found = env
+                    .lookup(name, namespace)
+                    .ok_or_else(|| AplError::runtime(format!("undefined symbol: {}", name)))?;
+                Ok(found)
             }
             Instr::OpCall { op, left_fn, right_fn } => {
                 // An operator call only appears as a *function*; route it through

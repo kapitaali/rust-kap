@@ -40,7 +40,6 @@ pub enum Token {
     LambdaToken,  // λ
     ApplyToken,   // ⍞
     ListSeparator,// ;
-    Comma,       // ,  (catenate / strand separator in Kap)
     Newline,
     NamespaceToken, // namespace(
     ImportToken,  // import(

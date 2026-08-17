@@ -219,6 +219,7 @@ pub fn is_symbol_start(c: char) -> bool {
     c.is_alphabetic() || c == '_' || c == '+' || c == '-' || c == '*' || c == '/' ||
     c == '=' || c == '<' || c == '>' || c == '?' || c == '!' || c == '%' || c == '^' ||
     c == '&' || c == '|' || c == '$' || c == '#' || c == '~' || c == '@' || c == '\\'
+        || c == ','
     // note: many APL glyphs are single-char symbols; handled by parser as bare tokens
 }
 
