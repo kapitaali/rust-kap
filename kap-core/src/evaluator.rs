@@ -13,6 +13,7 @@ use crate::lexer::tokenise;
 use crate::number::KapNumber;
 use crate::parser;
 use crate::token::LiteralValue;
+use unicode_segmentation::UnicodeSegmentation;
 use std::cmp::Ordering;
 use crate::{APLValue, AplError, AplRef, Engine, Environment};
 use std::rc::Rc;
@@ -152,6 +153,162 @@ impl APLValue {
             other => Ok(Rc::new(other.clone())),
         }
     }
+}
+
+/// Supported text encodings for `unicode:enc` / `unicode:dec`. Mirrors the subset of
+/// Real Kap's `Charset` mapping (UTF8/UTF16/UTF16LE/UTF16BE/UTF32).
+#[derive(Clone, Copy)]
+enum Charset {
+    Utf8,
+    Utf16,
+    Utf16Le,
+    Utf16Be,
+    Utf32,
+}
+
+impl Charset {
+    fn from_name(name: &str) -> Option<Charset> {
+        match name.to_uppercase().as_str() {
+            "UTF8" | "UTF-8" => Some(Charset::Utf8),
+            "UTF16" | "UTF-16" => Some(Charset::Utf16),
+            "UTF16LE" | "UTF-16LE" => Some(Charset::Utf16Le),
+            "UTF16BE" | "UTF-16BE" => Some(Charset::Utf16Be),
+            "UTF32" | "UTF-32" => Some(Charset::Utf32),
+            _ => None,
+        }
+    }
+}
+
+/// Encode `s` into bytes under `enc`. UTF-16/32 are emitted as unsigned code units
+/// (matching Real Kap's element-wise `APLArrayByte` of the raw code units).
+fn unicode_encode(s: &str, enc: Charset) -> Vec<u8> {
+    match enc {
+        Charset::Utf8 => s.as_bytes().to_vec(),
+        Charset::Utf16 | Charset::Utf16Be => {
+            let mut out = Vec::new();
+            for u in s.encode_utf16() {
+                out.extend_from_slice(&u.to_be_bytes());
+            }
+            out
+        }
+        Charset::Utf16Le => {
+            let mut out = Vec::new();
+            for u in s.encode_utf16() {
+                out.extend_from_slice(&u.to_le_bytes());
+            }
+            out
+        }
+        Charset::Utf32 => {
+            let mut out = Vec::new();
+            for c in s.chars() {
+                out.extend_from_slice(&(c as u32).to_be_bytes());
+            }
+            out
+        }
+    }
+}
+
+/// Decode `bytes` into a string under `enc` (lossy for invalid sequences, mirroring
+/// Real Kap's `decodeWithEncoding`, which replaces errors with the replacement char).
+fn unicode_decode(bytes: &[u8], enc: Charset) -> String {
+    match enc {
+        Charset::Utf8 => String::from_utf8_lossy(bytes).into_owned(),
+        Charset::Utf16 | Charset::Utf16Be => {
+            let mut units = Vec::with_capacity(bytes.len() / 2);
+            let mut i = 0;
+            while i + 1 < bytes.len() {
+                let u = u16::from_be_bytes([bytes[i], bytes[i + 1]]);
+                units.push(u);
+                i += 2;
+            }
+            String::from_utf16_lossy(&units)
+        }
+        Charset::Utf16Le => {
+            let mut units = Vec::with_capacity(bytes.len() / 2);
+            let mut i = 0;
+            while i + 1 < bytes.len() {
+                let u = u16::from_le_bytes([bytes[i], bytes[i + 1]]);
+                units.push(u);
+                i += 2;
+            }
+            String::from_utf16_lossy(&units)
+        }
+        Charset::Utf32 => {
+            let mut cps = Vec::with_capacity(bytes.len() / 4);
+            let mut i = 0;
+            while i + 3 < bytes.len() {
+                let u = u32::from_be_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
+                if let Some(c) = char::from_u32(u) {
+                    cps.push(c);
+                } else {
+                    cps.push(char::REPLACEMENT_CHARACTER);
+                }
+                i += 4;
+            }
+            cps.iter().collect()
+        }
+    }
+}
+
+/// Unicode name of a character, or `None` if it has no standard name. Best-effort
+/// mirror of Kotlin's `codepointToName` (Java `Character.getName`): covers ASCII
+/// letters/digits/punctuation and a broad set of controls; returns `None` otherwise.
+fn unicode_char_name(c: char) -> Option<String> {
+    // ASCII printable letters
+    if c.is_ascii_alphabetic() {
+        return Some(format!(
+            "LATIN {} LETTER {}",
+            if c.is_ascii_uppercase() { "CAPITAL" } else { "SMALL" },
+            c.to_ascii_uppercase()
+        ));
+    }
+    // Digits
+    if c.is_ascii_digit() {
+        let names = [
+            "ZERO", "ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN", "EIGHT", "NINE",
+        ];
+        if let Some(d) = c.to_digit(10) {
+            return Some(format!("DIGIT {}", names[d as usize]));
+        }
+    }
+    // Common ASCII punctuation / space
+    let named = match c {
+        ' ' => "SPACE",
+        '!' => "EXCLAMATION MARK",
+        '"' => "QUOTATION MARK",
+        '#' => "NUMBER SIGN",
+        '$' => "DOLLAR SIGN",
+        '%' => "PERCENT SIGN",
+        '&' => "AMPERSAND",
+        '\'' => "APOSTROPHE",
+        '(' => "LEFT PARENTHESIS",
+        ')' => "RIGHT PARENTHESIS",
+        '*' => "ASTERISK",
+        '+' => "PLUS SIGN",
+        ',' => "COMMA",
+        '-' => "HYPHEN-MINUS",
+        '.' => "FULL STOP",
+        '/' => "SOLIDUS",
+        ':' => "COLON",
+        ';' => "SEMICOLON",
+        '<' => "LESS-THAN SIGN",
+        '=' => "EQUALS SIGN",
+        '>' => "GREATER-THAN SIGN",
+        '?' => "QUESTION MARK",
+        '@' => "COMMERCIAL AT",
+        '[' => "LEFT SQUARE BRACKET",
+        '\\' => "REVERSE SOLIDUS",
+        ']' => "RIGHT SQUARE BRACKET",
+        '^' => "CIRCUMFLEX ACCENT",
+        '_' => "LOW LINE",
+        '`' => "GRAVE ACCENT",
+        '{' => "LEFT CURLY BRACKET",
+        '|' => "VERTICAL LINE",
+        '}' => "RIGHT CURLY BRACKET",
+        '~' => "TILDE",
+        _ => return None,
+    };
+    Some(named.to_string())
 }
 
 impl Engine {
@@ -716,6 +873,15 @@ impl Engine {
                 println!("{}", rendered);
                 Ok(right_val)
             }
+            // `unicode:*` — character / encoding utilities (Real Kap UnicodeModule).
+            "unicode:toCodepoints" => self.unicode_to_codepoints(right_val),
+            "unicode:fromCodepoints" => self.unicode_from_codepoints(right_val),
+            "unicode:toGraphemes" => self.unicode_to_graphemes(right_val),
+            "unicode:toLower" => self.unicode_case(right_val, false),
+            "unicode:toUpper" => self.unicode_case(right_val, true),
+            "unicode:toNames" => self.unicode_to_names(right_val),
+            "unicode:enc" => self.unicode_enc(left_val, right_val),
+            "unicode:dec" => self.unicode_dec(left_val, right_val),
             "÷" | "/" => match left_val {
                 None => self.scalar1(right_val, |x| x.recip(), "÷"),
                 Some(_) => self.num2(left_val, right_val, |a, b| a.div(b), "÷"),
@@ -1371,6 +1537,251 @@ impl Engine {
             "plain" => Ok(value.format_value()),
             other => Err(AplError::runtime(format!("invalid io:print style: {}", other))),
         }
+    }
+
+    // --- `unicode:*` builtins (Real Kap UnicodeModule) ---
+
+    /// `unicode:toCodepoints` — element-wise char → codepoint number.
+    fn unicode_to_codepoints(
+        &self,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        match right_val.as_ref() {
+            APLValue::Char(c) => {
+                Ok(Rc::new(APLValue::Number(KapNumber::Long(*c as i64))))
+            }
+            APLValue::Str(s) => {
+                let v: Vec<i64> = s.chars().map(|c| c as i64).collect();
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![v.len()],
+                    ArrayData::Long(v),
+                )))))
+            }
+            APLValue::Array(a) => {
+                let mut out = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    match e.as_ref() {
+                        APLValue::Char(c) => {
+                            out.push(Rc::new(APLValue::Number(KapNumber::Long(*c as i64))))
+                        }
+                        other => return Err(AplError::runtime(format!(
+                            "unicode:toCodepoints: not a char: {}",
+                            other.format_value()
+                        ))),
+                    }
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![out.len()],
+                    ArrayData::Nested(out),
+                )))))
+            }
+            other => Err(AplError::runtime(format!(
+                "unicode:toCodepoints: unsupported argument: {}",
+                other.format_value()
+            ))),
+        }
+    }
+
+    /// `unicode:fromCodepoints` — element-wise codepoint number → char.
+    fn unicode_from_codepoints(
+        &self,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let to_char = |n: &KapNumber| -> Result<char, AplError> {
+            if n.is_complex() {
+                return Err(AplError::runtime(
+                    "unicode:fromCodepoints: complex numbers can't be characters".into(),
+                ));
+            }
+            // Reject non-integers. `as_long` truncates Doubles (1.5 -> 1), so verify the
+            // real value has no fractional part before truncating.
+            let (re, _im) = n.as_complex();
+            if re.fract() != 0.0 {
+                return Err(AplError::runtime(format!(
+                    "unicode:fromCodepoints: invalid codepoint (not an integer): {}",
+                    n.as_double()
+                )));
+            }
+            let cp = n.as_long().map_err(|e| AplError::runtime(e))?;
+            char::from_u32(cp as u32).ok_or_else(|| {
+                AplError::runtime(format!("unicode:fromCodepoints: invalid codepoint: {}", cp))
+            })
+        };
+        match right_val.as_ref() {
+            APLValue::Number(n) => Ok(Rc::new(APLValue::Char(to_char(n)?))),
+            APLValue::Array(a) => {
+                let mut s = String::new();
+                for e in a.elements() {
+                    match e.as_ref() {
+                        APLValue::Number(n) => s.push(to_char(n)?),
+                        other => {
+                            return Err(AplError::runtime(format!(
+                                "unicode:fromCodepoints: not a number: {}",
+                                other.format_value()
+                            )))
+                        }
+                    }
+                }
+                Ok(Rc::new(APLValue::Str(s)))
+            }
+            other => Err(AplError::runtime(format!(
+                "unicode:fromCodepoints: unsupported argument: {}",
+                other.format_value()
+            ))),
+        }
+    }
+
+    /// `unicode:toGraphemes` — split a string into its grapheme clusters, each as a
+    /// one-element string. Mirrors Kotlin `GraphemesFunction` (APLString per cluster).
+    fn unicode_to_graphemes(
+        &self,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let s = match right_val.as_ref() {
+            APLValue::Str(s) => s.clone(),
+            other => {
+                return Err(AplError::runtime(format!(
+                    "unicode:toGraphemes: expected a string, got: {}",
+                    other.format_value()
+                )))
+            }
+        };
+        let graphemes: Vec<AplRef<APLValue>> = s
+            .graphemes(true)
+            .map(|g| Rc::new(APLValue::Str(g.to_string())))
+            .collect();
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![graphemes.len()],
+            ArrayData::Nested(graphemes),
+        )))))
+    }
+
+    /// `unicode:toLower` / `unicode:toUpper` — case conversion of a string.
+    fn unicode_case(&self, right_val: AplRef<APLValue>, upper: bool) -> Result<AplRef<APLValue>, AplError> {
+        let s = match right_val.as_ref() {
+            APLValue::Str(s) => s.clone(),
+            other => {
+                return Err(AplError::runtime(format!(
+                    "unicode:to{}: expected a string, got: {}",
+                    if upper { "Upper" } else { "Lower" },
+                    other.format_value()
+                )))
+            }
+        };
+        let out = if upper { s.to_uppercase() } else { s.to_lowercase() };
+        Ok(Rc::new(APLValue::Str(out)))
+    }
+
+    /// `unicode:toNames` — Unicode name of a single character, or `⍬` if unnamed.
+    fn unicode_to_names(
+        &self,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let c = match right_val.as_ref() {
+            APLValue::Char(c) => *c,
+            other => {
+                return Err(AplError::runtime(format!(
+                    "unicode:toNames: expected a char, got: {}",
+                    other.format_value()
+                )))
+            }
+        };
+        match unicode_char_name(c) {
+            Some(name) => Ok(Rc::new(APLValue::Str(name))),
+            None => Ok(Rc::new(APLValue::Null)),
+        }
+    }
+
+    /// `unicode:enc` — encode a string into a vector of byte values in the given
+    /// charset (left arg, default UTF-8). Mirrors Kotlin `EncodeUnicodeFunction`.
+    fn unicode_enc(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let s = match right_val.as_ref() {
+            APLValue::Str(s) => s.clone(),
+            other => {
+                return Err(AplError::runtime(format!(
+                    "unicode:enc: expected a string, got: {}",
+                    other.format_value()
+                )))
+            }
+        };
+        let enc = match left_val {
+            None => Charset::Utf8,
+            Some(l) => self.unicode_charset(&l)?,
+        };
+        let bytes = unicode_encode(&s, enc);
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![bytes.len()],
+            ArrayData::Long(bytes.into_iter().map(|b| b as i64).collect()),
+        )))))
+    }
+
+    /// `unicode:dec` — decode a vector of byte values into a string in the given
+    /// charset (left arg, default UTF-8). Mirrors Kotlin `DecodeUnicodeFunction`.
+    fn unicode_dec(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let bytes: Vec<u8> = match right_val.as_ref() {
+            APLValue::Array(a) => {
+                let mut out = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    match e.as_ref() {
+                        APLValue::Number(n) => {
+                            let v = n.as_long().map_err(|e| AplError::runtime(e))?;
+                            if !(0..=255).contains(&v) {
+                                return Err(AplError::runtime(
+                                    "unicode:dec: byte values must be 0..255".into(),
+                                ));
+                            }
+                            out.push(v as u8);
+                        }
+                        other => {
+                            return Err(AplError::runtime(format!(
+                                "unicode:dec: not a byte: {}",
+                                other.format_value()
+                            )))
+                        }
+                    }
+                }
+                out
+            }
+            other => {
+                return Err(AplError::runtime(format!(
+                    "unicode:dec: expected a byte array, got: {}",
+                    other.format_value()
+                )))
+            }
+        };
+        let enc = match left_val {
+            None => Charset::Utf8,
+            Some(l) => self.unicode_charset(&l)?,
+        };
+        let s = unicode_decode(&bytes, enc);
+        Ok(Rc::new(APLValue::Str(s)))
+    }
+
+    /// Resolve a charset name from a left-arg symbol/string (`UTF8`, `UTF16`, …).
+    fn unicode_charset(&self, v: &APLValue) -> Result<Charset, AplError> {
+        let name = match v {
+            APLValue::Str(s) => s.clone(),
+            APLValue::Char(c) => {
+                let mut buf = [0u8; 4];
+                c.encode_utf8(&mut buf).to_string()
+            }
+            _ => {
+                return Err(AplError::runtime(
+                    "unicode: charset must be a name like UTF8/UTF16/UTF32".into(),
+                ))
+            }
+        };
+        Charset::from_name(&name).ok_or_else(|| {
+            AplError::runtime(format!("unicode: invalid encoding: {}", name))
+        })
     }
 
     fn num2(
@@ -3237,5 +3648,32 @@ mod tests {
         assert!(e.eval_string(r#"@a - 1j1"#).is_err());
         // int - char is forbidden (asymmetry: char - int is allowed).
         assert!(e.eval_string(r#"98 200 - "aj""#).is_err());
+    }
+
+    // --- Strings: `unicode:*` functions (Real Kap UnicodeModule) ---
+
+    #[test]
+    fn eval_unicode_builtins() {
+        // toCodepoints / fromCodepoints (char <-> codepoint).
+        assert_eq!(eval(r#"unicode:toCodepoints "ABC""#), "(65 66 67)");
+        assert_eq!(eval(r#"unicode:fromCodepoints 65 66 67"#), "ABC");
+        assert_eq!(eval(r#"unicode:toCodepoints @A"#), "65");
+        // toGraphemes: each cluster is its own string (PLAIN display => no quotes).
+        assert_eq!(eval(r#"unicode:toGraphemes "é""#), "(é)");
+        // case conversion (PLAIN display => no quotes via format_value).
+        assert_eq!(eval(r#"unicode:toLower "ABC""#), "abc");
+        assert_eq!(eval(r#"unicode:toUpper "abc""#), "ABC");
+        // toNames: Unicode name of a char, ⍬ when unnamed.
+        assert_eq!(eval(r#"unicode:toNames @A"#), "LATIN CAPITAL LETTER A");
+        assert_eq!(eval(r#"unicode:toNames @€"#), "null");
+        // enc/dec round-trip in UTF-8 (byte vector <-> string).
+        assert_eq!(eval(r#"unicode:enc "AB""#), "(65 66)");
+        assert_eq!(eval(r#"unicode:dec 65 66 67"#), "ABC");
+        // enc with explicit charset (left arg as a string).
+        assert_eq!(eval(r#""UTF16" unicode:enc "A""#), "(0 65)");
+        assert_eq!(eval(r#""UTF32" unicode:enc "A""#), "(0 0 0 65)");
+        // non-integers cannot be characters.
+        assert!(Engine::new().eval_string(r#"unicode:fromCodepoints 1.5"#).is_err());
+        assert!(Engine::new().eval_string(r#"unicode:fromCodepoints 0.5"#).is_err());
     }
 }
