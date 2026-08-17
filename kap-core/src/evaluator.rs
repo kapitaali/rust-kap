@@ -81,6 +81,29 @@ impl Environment {
             .insert((name.to_string(), ns.clone()), value);
     }
 
+    /// Assign to `name`, updating the *nearest existing binding* in the enclosing scope
+    /// chain (Kap's `←` semantics: like `set!`, it mutates the closest enclosing scope
+    /// that already defines `name`, falling back to defining it locally). This is what
+    /// makes a closure `n←n+1` update an outer `n←0` rather than shadowing it.
+    pub fn assign(&self, name: &str, ns: &Option<String>, value: AplRef<APLValue>) {
+        let key = (name.to_string(), ns.clone());
+        // 1. Find the *nearest* existing binding up the scope chain and update it
+        //    in place. This is what makes closure mutation work, e.g. `n←n+1`
+        //    inside a function body mutating an outer `n`.
+        let mut cur: Option<&Environment> = Some(self);
+        while let Some(e) = cur {
+            if e.symbols.borrow().contains_key(&key) {
+                e.symbols.borrow_mut().insert(key.clone(), value);
+                return;
+            }
+            cur = e.parent.as_deref();
+        }
+        // 2. No existing binding anywhere: define in the *innermost* scope (the
+        //    env the assignment was evaluated in), so a block-local `x←9` does
+        //    not leak into an enclosing scope.
+        self.symbols.borrow_mut().insert(key, value);
+    }
+
     /// Names of all symbols in this scope (and parents) that currently hold a
     /// user-defined or native function value. Used by the parser to distinguish a
     /// function symbol (which applies) from a value symbol (which strands).
@@ -228,7 +251,9 @@ impl Engine {
             Instr::Assign { target, value } => {
                 if let Instr::Symbol { name, namespace } = target.as_ref() {
                     let v = self.eval_instr(value, env)?;
-                    env.define(name, namespace, v.clone());
+                    // `←` updates the nearest enclosing binding (closure-safe), falling
+                    // back to defining locally when the name is new in this scope.
+                    env.assign(name, namespace, v.clone());
                     Ok(v)
                 } else {
                     Err(AplError::runtime("assignment target must be a symbol".into()))

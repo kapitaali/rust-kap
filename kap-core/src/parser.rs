@@ -422,16 +422,26 @@ impl<'a> Parser<'a> {
             _ => return Err(self.err("expected a symbol before ⇐")),
         };
         self.advance(); // consume ⇐
+        // A primitive operator/function name cannot be reassigned to a function.
+        if Self::is_primitive_op(&name) {
+            return Err(self.err(&format!("cannot redefine primitive function '{}'", name)));
+        }
+        // Register the name as a *known function* BEFORE parsing the RHS body, so a
+        // self-referential call inside the body (e.g. `foo ⇐ { … foo (⍵-1) … }`) parses
+        // the inner `foo (…)` as a monadic *application* rather than being stranded as a
+        // value (`[foo, …]`). Without this, the body is parsed while `foo` is still
+        // unknown, so recursion/closures that call themselves silently break. (Kotlin's
+        // UserFunctionDescriptor registration has the same effect — the defining name is
+        // in scope throughout its own body.)
+        if !self.known_functions.iter().any(|n| n == &name) {
+            self.known_functions.push(name.clone());
+        }
         // The RHS is a *function expression*: a lambda, a named function, an operator
         // (possibly with adverbs, e.g. `×/`), a train, or a parenthesised function group.
         // Parse it as a function expression (not `parse_apply`, which would over-consume
         // a trailing data operand) and store the resulting function value.
         let value = self.parse_function_expr_impl(true)?;
-        // Validation: a primitive operator/function name cannot be reassigned to a function,
-        // and the RHS must be a function, not a value.
-        if Self::is_primitive_op(&name) {
-            return Err(self.err(&format!("cannot redefine primitive function '{}'", name)));
-        }
+        // Validation: the RHS must be a function, not a value.
         if !matches!(
             value,
             Instr::Lambda { .. }
@@ -441,10 +451,6 @@ impl<'a> Parser<'a> {
                 | Instr::Block { .. }
         ) {
             return Err(self.err(&format!("'{} ⇐' requires a function on the right", name)));
-        }
-        // Register the name so a later body / mutual reference treats it as a function.
-        if !self.known_functions.iter().any(|n| n == &name) {
-            self.known_functions.push(name.clone());
         }
         Ok(Instr::FnAssign {
             name,
@@ -1486,6 +1492,12 @@ impl<'a> Parser<'a> {
                 let lv = lv.clone();
                 self.advance();
                 Ok(Instr::Literal(lv))
+            }
+            Token::OpenBrace => {
+                // A `{ … }` block used as a function expression (e.g. `foo ⇐ { … }`).
+                // `parse_block` consumes the opening `{` and returns `Instr::Block { body }`.
+                self.advance();
+                self.parse_block()
             }
             _ => Err(self.err("expected a function in train")),
         }

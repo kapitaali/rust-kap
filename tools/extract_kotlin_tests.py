@@ -112,13 +112,17 @@ def best_effort_expected(body: str):
     m = re.search(r'assertSimpleNumber\(\s*([+-]?\d+)\s*,', body)
     if m:
         return m.group(1)
-    # assert1DArray(arrayOf(a, b, ...), result) -> "[a b ...]"
+    # assert1DArray(arrayOf(a, b, ...), result) -> "(a b ...)"
+    # NOTE: Kap prints vectors with PARENTHESES (e.g. `(1 2)`), never brackets —
+    # brackets are reserved for indexing. The Kotlin assertion uses `[]` because
+    # that is *Kotlin* array syntax, not Kap's. Emit Kap-syntax so the conformance
+    # harness can compare apples to apples against our engine's `format_value`.
     m = re.search(r'assert1DArray\(\s*arrayOf\(([^)]*)\)\s*,', body)
     if m:
         parts = [p.strip() for p in m.group(1).split(',') if p.strip()]
         # numeric only
         if all(re.fullmatch(r'[+-]?\d+', p) for p in parts):
-            return '[' + ' '.join(parts) + ']'
+            return '(' + ' '.join(parts) + ')'
     return None
 
 
