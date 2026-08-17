@@ -76,6 +76,18 @@ fn classify(engine: &Engine, c: &Case) -> Outcome {
     // treated as "unsupported", never an abort of the whole suite.
     let res =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.eval_to_string(&c.expr)));
+    let errored = match &res {
+        Ok(Err(_)) | Err(_) => true,
+        Ok(Ok(_)) => false,
+    };
+    // `kind:"fails"` cases are Kotlin tests that are *expected to error* (parse/runtime
+    // failure). Erroring here is the CORRECT outcome (counted OK); only a case that runs
+    // to a value when Kotlin says it must fail is a genuine Mismatch. Without this, every
+    // `kind:"fails"` case was miscounted as UNSUPPORTED even though the engine behaves
+    // exactly like Kotlin.
+    if c.kind == "fails" {
+        return if errored { Outcome::Ok } else { Outcome::Mismatch };
+    }
     match res {
         Ok(Ok(got)) => {
             if let Some(exp) = &c.expected {
