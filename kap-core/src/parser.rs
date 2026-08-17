@@ -1106,8 +1106,25 @@ impl<'a> Parser<'a> {
                         self.advance();
                         self.skip_newlines();
                     }
-                    Some(Token::Literal(LiteralValue::Symbol { .. }))
-                    | Some(Token::LambdaToken)
+                    Some(Token::Literal(LiteralValue::Symbol { name, .. })) => {
+                        // A bare symbol is only a *function* member of a paren-train when it
+                        // is a definite function (primitive/known-fn/adverb). A value symbol
+                        // like `x` in `(⌷x)` makes the group `⌷ x` (a monadic application, a
+                        // value) — NOT a function train. Treating it as Func mis-strands
+                        // `(⌷x) (⌷y)` into an apply and errors.
+                        if Self::is_primitive_op(name)
+                            || self.is_known_fn(name)
+                            || Self::is_adverb(name)
+                            || matches!(name.as_str(), "⊢" | "⊣")
+                        {
+                            kinds.push(Kind::Func);
+                        } else {
+                            kinds.push(Kind::Value);
+                        }
+                        self.advance();
+                        self.skip_newlines();
+                    }
+                    Some(Token::LambdaToken)
                     | Some(Token::ComposeToken)
                     | Some(Token::ReverseComposeToken)
                     | Some(Token::LeftForkToken)
@@ -1804,6 +1821,21 @@ mod tests {
                 assert!(matches!(*value, Instr::Literal(_)));
             }
             other => panic!("expected Assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_two_disclose_groups_strand() {
+        // `(⌷x) (⌷y)` is two adjacent value groups (⌷x = disclose(x), a value), NOT a
+        // function train — they must strand into a 2-element vector, not be applied.
+        match parse_one("∇ foo { (⌷x) (⌷y) }") {
+            Instr::UserFnDef { .. } => {}
+            other => panic!("expected UserFnDef, got {:?}", other),
+        }
+        // A genuine 2-train of definite functions still parses as a train.
+        match parse_one("foo ⇐ (×-)") {
+            Instr::FnAssign { .. } => {}
+            other => panic!("expected FnAssign, got {:?}", other),
         }
     }
 
