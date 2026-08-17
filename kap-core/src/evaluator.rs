@@ -1827,16 +1827,52 @@ impl Engine {
         left_val: Option<AplRef<APLValue>>,
         right_val: AplRef<APLValue>,
     ) -> Result<AplRef<APLValue>, AplError> {
+        // Monadic `↑` ("First"): remove the leading axis and return the first
+        // *cell* as itself — for a vector this is the first element as a scalar
+        // (`↑1 2 3 4 5` -> 1, `↑"abcdef"` -> @a), for higher rank it is the first
+        // sub-cell, and empty right arguments (`↑⍬`) yield the default fill (0).
+        // Mirrors Real Kap's TakeAPLFunction.eval1ArgWithProto.
+        if left_val.is_none() {
+            let v = right_val.force(self)?;
+            return match v.as_ref() {
+                APLValue::Number(_) | APLValue::Char(_) => Ok(v),
+                APLValue::Null => Ok(Rc::new(APLValue::Number(KapNumber::Long(0)))),
+                APLValue::Str(s) => match s.chars().next() {
+                    Some(c) => Ok(Rc::new(APLValue::Char(c))),
+                    None => Ok(Rc::new(APLValue::Number(KapNumber::Long(0)))),
+                },
+                APLValue::Array(a) => {
+                    let dims = a.dimensions.clone();
+                    let elems = a.elements();
+                    if elems.is_empty() {
+                        // Empty array -> default fill (0).
+                        Ok(Rc::new(APLValue::Number(KapNumber::Long(0))))
+                    } else if dims.is_empty() || dims.len() == 1 {
+                        // 0-rank or 1-D: the first element *is* the first cell.
+                        Ok(elems[0].clone())
+                    } else {
+                        // Higher rank: the first cell is `product(dims[1..])`
+                        // elements with shape `dims[1..]`.
+                        let cell: usize = dims[1..].iter().product();
+                        let cell_dims = dims[1..].to_vec();
+                        let cell_elems = elems[..cell].to_vec();
+                        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                            cell_dims,
+                            ArrayData::Nested(cell_elems),
+                        )))))
+                    }
+                }
+                _ => Err(AplError::runtime(
+                    "↑ (first) not implemented for this value type".into(),
+                )),
+            };
+        }
         // Dyadic `↑`: `counts ↑ array`. Counts is a scalar or vector; each axis
         // count may be negative (take from the end). If `counts` is shorter than
         // the array rank the remaining axes are taken in full; if longer, it is an
         // error. A scalar right argument is reshaped to `|counts|` (padded with 0).
-        // Monadic `↑` (no left) takes 1 along the leading axis.
         // Reference: TakeTest.kt.
-        let counts = match left_val {
-            None => vec![1i64],
-            Some(l) => self.count_vector(l)?,
-        };
+        let counts = self.count_vector(left_val.unwrap())?;
         self.take_or_drop(true, &counts, right_val)
     }
 
@@ -2930,6 +2966,16 @@ mod tests {
     fn eval_take_drop() {
         assert_eq!(eval("3 ↑ ⍳10"), "(0 1 2)");
         assert_eq!(eval("3 ↓ ⍳10"), "(3 4 5 6 7 8 9)");
+    }
+
+    #[test]
+    fn eval_take_monadic_first() {
+        // Monadic `↑` returns the leading *cell* as a scalar (Real Kap "First").
+        assert_eq!(eval("↑1 2 3 4 5"), "1");
+        assert_eq!(eval("↑⍬"), "0");
+        assert_eq!(eval("↑6"), "6");
+        // Dyadic `↑` still returns an array shape.
+        assert_eq!(eval("1 ↑ 10"), "(10)");
     }
 
     #[test]
