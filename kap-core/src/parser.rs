@@ -506,6 +506,9 @@ impl<'a> Parser<'a> {
                             _ => return Err(self.err("expected a parameter name")),
                         }
                     }
+                    if params.is_empty() {
+                        return Err(self.err("empty parameter group in function definition"));
+                    }
                     components.push((params, used_sep));
                 }
                 _ => return Err(self.err("expected function name after ∇")),
@@ -1856,6 +1859,19 @@ mod tests {
             }
             other => panic!("expected Assign, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parse_empty_param_group_errors_not_panics() {
+        // `∇ (a;b) () (c;d) { … }` has an empty `()` parameter group, which is invalid
+        // (Kotlin errors with `Unexpected token: CloseParen`). The parser must return a
+        // parse error, not panic on an out-of-bounds index (regression: parser.rs:559).
+        let toks = tokenise("∇ (a;b) () (c;d) { a+b+c+d }");
+        let (_stmts, errs) = parse(&toks, &[], &[]);
+        assert!(
+            !errs.is_empty(),
+            "empty parameter group should produce a parse error, not panic"
+        );
     }
 
     #[test]
