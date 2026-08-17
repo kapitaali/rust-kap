@@ -119,12 +119,32 @@ impl APLValue {
     pub fn format_display(&self) -> String {
         match self {
             APLValue::Number(n) => n.format(true),
-            APLValue::Char(c) => c.to_string(),
+            // REPL / "pretty" form: a character is shown with an `@` prefix
+            // (Real Kap: `↑"abc"` prints `@a`, ` @a ` prints `@a`). The internal
+            // `format_value` (used by `⍕` and operator results) stays bare.
+            APLValue::Char(c) => format!("@{}", c),
             APLValue::Str(s) => format!("\"{}\"", escape_string(s)),
             APLValue::Null => "⍬".to_string(),
             APLValue::Array(a) => {
-                let parts: Vec<String> = a.elements().iter().map(|e| e.format_display()).collect();
-                format!("({})", parts.join(" "))
+                let elems = a.elements();
+                // A 1-D vector of characters is a "string value" in Real Kap and
+                // renders as a *quoted string* (`@a @b @c` -> "abc"), not as a
+                // parenthesised `@a @b @c` list. Only the scalar Char gets `@`.
+                if a.dimensions.len() == 1
+                    && elems.iter().all(|e| matches!(e.as_ref(), APLValue::Char(_)))
+                {
+                    let s: String = elems
+                        .iter()
+                        .map(|e| match e.as_ref() {
+                            APLValue::Char(c) => *c,
+                            _ => unreachable!(),
+                        })
+                        .collect();
+                    format!("\"{}\"", escape_string(&s))
+                } else {
+                    let parts: Vec<String> = elems.iter().map(|e| e.format_display()).collect();
+                    format!("({})", parts.join(" "))
+                }
             }
             APLValue::Deferred { .. } => "<deferred>".to_string(),
             APLValue::UserFn { .. } => "<function>".to_string(),
@@ -199,5 +219,38 @@ impl AplError {
     /// Build a runtime error from a message.
     pub fn runtime(msg: String) -> Self {
         AplError::Runtime(msg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::array::{ArrayData, KapArray};
+    use std::rc::Rc;
+
+    #[test]
+    fn format_display_char_scalar_has_at_prefix() {
+        // Real Kap REPL: char scalar shown with `@` prefix (not "pretty" bare).
+        assert_eq!(APLValue::Char('a').format_display(), "@a");
+        // Numeric / null unchanged by the display renderer.
+        assert_eq!(APLValue::Number(KapNumber::Long(1)).format_display(), "1");
+        assert_eq!(APLValue::Null.format_display(), "⍬");
+    }
+
+    #[test]
+    fn format_display_char_vector_is_quoted_string() {
+        // A 1-D char vector is a "string value": rendered as a quoted string,
+        // not as a parenthesised `@a @b @c` list.
+        let a = APLValue::Array(Rc::new(KapArray::new(
+            vec![3],
+            ArrayData::Char(vec!['a', 'b', 'c']),
+        )));
+        assert_eq!(a.format_display(), "\"abc\"");
+    }
+
+    #[test]
+    fn format_value_char_stays_bare() {
+        // The internal plain renderer (⍕, operator results) must NOT add `@`.
+        assert_eq!(APLValue::Char('a').format_value(), "a");
     }
 }
