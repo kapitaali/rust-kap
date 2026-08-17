@@ -1109,14 +1109,18 @@ impl Engine {
             Some(l) => Some(self.eval_instr(l, env)?.force(self)?),
             None => None,
         };
-        let bind_split = left_params.len().min(1);
-        if bind_split > 0 && !left_params.is_empty() {
+        // Bind the *left-param group* as a single unit to the left data arg, destructuring
+        // each name to one element when the group has multiple names (e.g. `∇ (a0;a1) …`
+        // called with left data `(10;11)` binds `a0=10, a1=11`). Previously we sliced the
+        // flat name list at 1, which bound only the first name to the whole vector and the
+        // rest to the right data — wrong for multi-name groups. When there is no left data
+        // (ambivalent call), the left group binds to the right data arg instead.
+        if !left_params.is_empty() {
             if let Some(lv) = &left_val {
-                self.bind_param_group(&child, &left_params[..bind_split], lv);
+                self.bind_param_group(&child, &left_params, lv);
+            } else {
+                self.bind_param_group(&child, &left_params, &right_val);
             }
-        }
-        if left_params.len() > bind_split {
-            self.bind_param_group(&child, &left_params[bind_split..], &right_val);
         }
         if !right_params.is_empty() {
             self.bind_param_group(&child, &right_params, &right_val);
@@ -2922,6 +2926,23 @@ mod tests {
     #[test]
     #[should_panic]
     fn parse_fork_inner_must_be_functions() {
-        eval("foo ⇐ «» ⋄ foo 1 2");
+        eval(r#"foo ⇐ «» ⋄ foo 1 2"#);
+    }
+
+    /// `∇ (a0;a1) ...` destructures a multi-element left arg into its names (Kotlin
+    /// `twoArgOperator2`). Left data `(10;11)` binds `a0=10, a1=11`, the right param `b`
+    /// binds the right data `4`, and `⍞x`/`⍞y` apply the function operands to explicit args.
+    #[test]
+    fn eval_two_arg_operator_with_destructured_left_params() {
+        assert_eq!(
+            eval(r#"∇ (a0;a1) (x foo y) b { 100 ⍞y a0 ⍞x a1 ⍞x b } ⋄ (10;11) -foo+ 4"#),
+            "103"
+        );
+    }
+
+    /// A multi-name left param group destructures the left data vector element-wise.
+    #[test]
+    fn eval_left_param_group_destructure() {
+        assert_eq!(eval(r#"∇ (a0;a1) (x foo y) b { (a0;a1) } ⋄ (10;11) -foo+ 4"#), "(10 11)");
     }
 }
