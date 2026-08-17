@@ -84,6 +84,12 @@ impl APLValue {
     }
 
     /// Render a value for display (REPL / tests). Mirrors Kap's value printing.
+    ///
+    /// This is the **plain** renderer: strings are shown *without* surrounding
+    /// double quotes. It is the canonical internal representation used by `⍕`
+    /// (format) and by operator results (so `⍕"foo"` => `foo`, `"af" + 1 ¯1`
+    /// => `be`). Keep this quote-free — see [`APLValue::format_display`] for the
+    /// REPL-style renderer that wraps strings in double quotes.
     pub fn format_value(&self) -> String {
         match self {
             APLValue::Number(n) => n.format(true),
@@ -102,7 +108,52 @@ impl APLValue {
             APLValue::UserOp { .. } => "<operator>".to_string(),
         }
     }
+
+    /// Render a value for the **REPL / file output** path — Real Kap conformance.
+    ///
+    /// Unlike [`APLValue::format_value`], this wraps string values in *double
+    /// quotes* and renders the null value as `⍬` (matching Real Kap's REPL:
+    /// typing `"foo bar"` prints `"foo bar"`, and `⊣ io:println "x"` shows `⍬`).
+    /// Arrays and numbers are rendered as in `format_value` (strings inside an
+    /// array are also quoted, so a vector of strings shows `( "a" "b" )`).
+    pub fn format_display(&self) -> String {
+        match self {
+            APLValue::Number(n) => n.format(true),
+            APLValue::Char(c) => c.to_string(),
+            APLValue::Str(s) => format!("\"{}\"", escape_string(s)),
+            APLValue::Null => "⍬".to_string(),
+            APLValue::Array(a) => {
+                let parts: Vec<String> = a.elements().iter().map(|e| e.format_display()).collect();
+                format!("({})", parts.join(" "))
+            }
+            APLValue::Deferred { .. } => "<deferred>".to_string(),
+            APLValue::UserFn { .. } => "<function>".to_string(),
+            APLValue::UserOp { .. } => "<operator>".to_string(),
+        }
+    }
 }
+
+/// Escape a string for REPL display: `\"` and `\` are backslash-escaped, and
+/// non-printable control characters are rendered as `\t`, `\n`, `\r`, or
+/// `\xNN`. Mirrors Real Kap's string quoting in the REPL result line.
+fn escape_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 
 /// Lexical environment. Symbols live behind a `RefCell` so assignment can mutate the
 /// shared `Rc<Environment>` in place (single-threaded, per D1). `parent` enables lexical

@@ -18,11 +18,12 @@ fn main() {
 
     match args.get(1) {
         Some(path) => {
-            // File mode: read, evaluate once, print the last value.
+            // File mode: read, evaluate once, print the last value (REPL-style
+            // display: strings are quoted, matching Real Kap).
             match std::fs::read_to_string(path) {
                 Ok(src) => match session.eval(&src) {
                     Ok(v) => {
-                        let out = v.format_value();
+                        let out = v.format_display();
                         if !out.is_empty() {
                             println!("{}", out);
                         }
@@ -87,7 +88,7 @@ fn repl(session: &Session) {
 fn run(session: &Session, src: &str) {
     match session.eval(src) {
         Ok(v) => {
-            let out = v.format_value();
+            let out = v.format_display();
             if !out.is_empty() {
                 println!("{}", out);
             }

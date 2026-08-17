@@ -506,7 +506,10 @@ impl Engine {
         // Resolve the function: a builtin name, a direct lambda, or a user function
         // bound to a symbol.
         let fn_name: Option<String> = match fn_expr {
-            Instr::Symbol { name, .. } => Some(name.clone()),
+            Instr::Symbol { name, namespace } => Some(match namespace {
+                Some(ns) => format!("{}:{}", ns, name),
+                None => name.clone(),
+            }),
             _ => None,
         };
         let lambda = match fn_expr {
@@ -690,6 +693,28 @@ impl Engine {
                     APLValue::Number(_) => Ok(Rc::new(val.as_ref().clone())),
                     _ => Err(AplError::runtime("execute result is not a number".into())),
                 }
+            }
+            // `io:print` / `io:println`: write the value's *plain* (unquoted) rendering
+            // to stdout and return the value unchanged. The REPL then displays the
+            // returned value with `format_display` (strings get quotes), so:
+            //   io:println "foo bar"  -> prints `foo bar`, then REPL shows `"foo bar"`.
+            // `style io:print` / `style io:println` (style = the string "pretty"/"read")
+            // switch to the quoted / readable rendering — mirrors Real Kap's `:pretty`.
+            "io:print" => {
+                let rendered = match left_val.as_ref() {
+                    None => right_val.format_value(),
+                    Some(style) => self.io_style_render(style.as_ref(), right_val.as_ref())?,
+                };
+                print!("{}", rendered);
+                Ok(right_val)
+            }
+            "io:println" => {
+                let rendered = match left_val.as_ref() {
+                    None => right_val.format_value(),
+                    Some(style) => self.io_style_render(style.as_ref(), right_val.as_ref())?,
+                };
+                println!("{}", rendered);
+                Ok(right_val)
             }
             "÷" | "/" => match left_val {
                 None => self.scalar1(right_val, |x| x.recip(), "÷"),
@@ -1320,6 +1345,32 @@ impl Engine {
             )));
         }
         Some(Self::char_shift(&s, &nums, is_add))
+    }
+
+    /// Render a value for `io:print`/`:pretty`/`:read` style selection. The default
+    /// (no style, or an unrecognised style) uses the *plain* (unquoted) form — the
+    /// same as `format_value`. The `"pretty"` style wraps strings in double quotes
+    /// (the REPL display form); `"read"` is currently equivalent to plain. Mirrors
+    /// Real Kap's `io:print :pretty` modifier.
+    fn io_style_render(
+        &self,
+        style: &APLValue,
+        value: &APLValue,
+    ) -> Result<String, AplError> {
+        let style_name = match style {
+            APLValue::Str(s) => s.as_str(),
+            APLValue::Char(c) => {
+                let mut buf = [0u8; 4];
+                return Ok(c.encode_utf8(&mut buf).to_string());
+            }
+            _ => return Err(AplError::runtime("io:print style must be a string".into())),
+        };
+        match style_name {
+            "pretty" => Ok(value.format_display()),
+            "read" => Ok(value.format_value()),
+            "plain" => Ok(value.format_value()),
+            other => Err(AplError::runtime(format!("invalid io:print style: {}", other))),
+        }
     }
 
     fn num2(

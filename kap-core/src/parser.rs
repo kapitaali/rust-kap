@@ -778,8 +778,12 @@ impl<'a> Parser<'a> {
                 | Instr::Derived { .. }
                 | Instr::Block { .. }
         ) || match &first {
-            Instr::Symbol { name, .. } => {
-                Self::is_primitive_op(name) || self.is_known_fn(name) || self.known_ops.iter().any(|n| n == name)
+            Instr::Symbol { name, namespace } => {
+                let qual = match namespace {
+                    Some(ns) => format!("{}:{}", ns, name),
+                    None => name.clone(),
+                };
+                Self::is_primitive_op(&qual) || self.is_known_fn(name) || self.known_ops.iter().any(|n| n == name)
             }
             _ => false,
         };
@@ -843,8 +847,12 @@ impl<'a> Parser<'a> {
         //     (`f 5`). When the next token is an OPERATOR (e.g. `x + 1`), a user symbol is NOT
         //     monadic — it is the LEFT operand of the dyadic operator, so we fall through.
         // Valence is ultimately resolved at runtime; this is a syntactic heuristic.
-        if let Instr::Symbol { name, .. } = &first {
-            let is_prim = Self::is_primitive_op(name);
+        if let Instr::Symbol { name, namespace } = &first {
+            let qual = match namespace {
+                Some(ns) => format!("{}:{}", ns, name),
+                None => name.clone(),
+            };
+            let is_prim = Self::is_primitive_op(&qual);
             // A leading symbol is a *function* (and thus eligible for monadic apply `f x`)
             // only if it is a primitive or a known (user/native) function. Otherwise it is a
             // value and must strand (`a c` -> (a c)) rather than apply (`a(c)`).
@@ -1212,8 +1220,12 @@ impl<'a> Parser<'a> {
             | Token::APLNullSym => true,
             // A bare symbol is a strand operand (so `a c` -> (a c)) UNLESS it names a
             // function — a function symbol in strand position is applied instead.
-            Token::Literal(LiteralValue::Symbol { name, .. }) => {
-                !Self::is_primitive_op(name) && !self.is_known_fn(name)
+            Token::Literal(LiteralValue::Symbol { name, namespace }) => {
+                let qual = match namespace {
+                    Some(ns) => format!("{}:{}", ns, name),
+                    None => name.clone(),
+                };
+                !Self::is_primitive_op(&qual) && !self.is_known_fn(name)
             }
             _ => false,
         }
@@ -1243,6 +1255,13 @@ impl<'a> Parser<'a> {
     }
 
     fn is_primitive_op(name: &str) -> bool {
+        // Namespaced builtins (e.g. `io:print`, `io:println`) are matched by their
+        // full `ns:name` form so the parser treats them as functions that apply to
+        // their argument. The bare-name arms below are for unqualified primitives.
+        if let Some((ns, base)) = name.split_once(':') {
+            return matches!(ns, "io")
+                && matches!(base, "print" | "println");
+        }
         matches!(
             name,
             "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"
@@ -1251,6 +1270,10 @@ impl<'a> Parser<'a> {
                 | "≤" | "≥" | "," | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥"
                 | "⊢" | "⊣" | "≡" | "⍓"
                 | "⍕" | "format" | "⍎" | "execute"
+                // `io:print` / `io:println` write the plain (unquoted) rendering of
+                // their argument to stdout and return the argument unchanged (Real
+                // Kap: `io:println "x"` prints `x` then the REPL shows `"x"`).
+                | "io:print" | "io:println"
         )
     }
 
