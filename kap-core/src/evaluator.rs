@@ -646,6 +646,7 @@ impl Engine {
             "↑" => self.take(left_val, right_val),
             "↓" => self.drop(left_val, right_val),
             "⊂" => self.enclose(right_val),
+            "⌷" | "reveal" | "disclose" => self.disclose(right_val),
             // --- more builtins (Phase 6) ---
             "⌈" | "ceil" => match left_val {
                 None => self.scalar1(right_val, |x| x.ceil(), "⌈"),
@@ -903,15 +904,32 @@ impl Engine {
         };
         // Argument-count validation (Kap raises on arity mismatch). Only enforced when the
         // function has *named* parameters; default-arg dfns (`∇ foo { ⍺+⍵ }`) accept ⍺/⍵
-        // regardless of valence. `split` counts the *elements* expected on the left.
+        // regardless of valence. `split` counts the *number of names* expected on the left.
+        //
+        // CRITICAL: a *single* parameter name binds the WHOLE argument value (even a vector),
+        // so its arity contribution is 1 — NOT the argument's element count. Only a
+        // *multi-name* group `(A;B)` destructures element-wise and thus requires the argument
+        // to have exactly that many elements. Concretely: `∇ foo x { … } ⋄ foo (1 2 3)` binds
+        // `x` to the whole 3-element vector (arity 1), whereas `∇ foo (a;b) { … } ⋄ foo (1;2)`
+        // destructures into `a`,`b` (arity 2). We cannot see group structure here (params is a
+        // flat name list), so the rule is: a parameter *count* of 1 ⇒ whole-value binding
+        // (have = 1); a count > 1 ⇒ destructuring (have = element count).
         if !params.is_empty() {
             let needed_left = split;
             let needed_right = params.len() - split;
-            let have_left = match &left_val {
-                Some(v) => self.element_count(v),
-                None => 0,
+            let have_left = if needed_left == 1 {
+                1
+            } else {
+                match &left_val {
+                    Some(v) => self.element_count(v),
+                    None => 0,
+                }
             };
-            let have_right = self.element_count(&right_val);
+            let have_right = if needed_right == 1 {
+                1
+            } else {
+                self.element_count(&right_val)
+            };
             if have_left != needed_left || have_right != needed_right {
                 return Err(AplError::runtime(format!(
                     "function called with wrong number of arguments: expected {} left and {} right, got {} left and {} right",
@@ -1773,6 +1791,70 @@ impl Engine {
         Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
             vec![1],
             ArrayData::Nested(vec![right_val]),
+        )))))
+    }
+
+    /// Kap's reveal/disclose (`⌷`): remove one level of boxing from a nested array.
+    /// - On a `Nested` array of scalars, return the elements as a plain (Simple) vector.
+    /// - On a `Nested` array of arrays, ravel (catenate) the elements' contents one level.
+    /// - On a Simple array or scalar, return it unchanged (identity).
+    fn disclose(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        let v = right_val.force(self)?;
+        let elems = match v.as_ref() {
+            APLValue::Array(a) => match &a.data {
+                ArrayData::Nested(e) => e.clone(),
+                _ => return Ok(Rc::new(v.as_ref().clone())), // Simple array: identity.
+            },
+            _ => return Ok(Rc::new(v.as_ref().clone())), // scalar/other: identity.
+        };
+        if elems.is_empty() {
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![0],
+                ArrayData::Nested(vec![]),
+            )))));
+        }
+        // All scalar elements -> build the most specific Simple vector we can.
+        let all_long = elems.iter().all(|e| matches!(e.as_ref(), APLValue::Number(KapNumber::Long(_))));
+        let all_double = elems.iter().all(|e| matches!(e.as_ref(), APLValue::Number(KapNumber::Double(_))));
+        let all_char = elems.iter().all(|e| matches!(e.as_ref(), APLValue::Char(_)));
+        if all_long {
+            let v: Vec<i64> = elems
+                .into_iter()
+                .map(|e| match e.as_ref() {
+                    APLValue::Number(KapNumber::Long(x)) => *x,
+                    _ => unreachable!(),
+                })
+                .collect();
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(vec![v.len()], ArrayData::Long(v))))));
+        }
+        if all_double {
+            let v: Vec<f64> = elems
+                .into_iter()
+                .map(|e| match e.as_ref() {
+                    APLValue::Number(KapNumber::Double(x)) => *x,
+                    _ => unreachable!(),
+                })
+                .collect();
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(vec![v.len()], ArrayData::Double(v))))));
+        }
+        if all_char {
+            let v: Vec<char> = elems
+                .into_iter()
+                .map(|e| match e.as_ref() {
+                    APLValue::Char(c) => *c,
+                    _ => unreachable!(),
+                })
+                .collect();
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(vec![v.len()], ArrayData::Char(v))))));
+        }
+        // Mixed / array elements: ravel one level into a Nested vector.
+        let mut out = Vec::new();
+        for e in &elems {
+            self.collect_elements(e, &mut out);
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![out.len()],
+            ArrayData::Nested(out),
         )))))
     }
 

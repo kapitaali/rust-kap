@@ -1176,7 +1176,8 @@ impl<'a> Parser<'a> {
         matches!(
             name,
             "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"
-                | "↑" | "↓" | "⊂" | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
+                | "↑" | "↓" | "⊂" | "⌷" | "reveal" | "disclose"
+                | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥"
                 | "⊢" | "⊣" | "≡" | "⍓"
         )
@@ -1186,10 +1187,22 @@ impl<'a> Parser<'a> {
     /// `L f R` or a train member). Mirrors Kap's parser.kt `processFn` detection of the
     /// function position: a brace/lambda/paren/group, or a symbol naming a known function,
     /// a primitive operator, or an adverb.
-    fn next_is_function_token(&self) -> bool {
+    fn next_is_function_token(&mut self) -> bool {
         match self.peek() {
             Some(t) => match &t.token {
-                Token::OpenBrace | Token::LambdaToken | Token::OpenParen | Token::ApplyToken
+                // A bare `(` group is a function operand *only* when its contents are a
+                // function expression (a train / derived fn / function name). A parenthesised
+                // *data* value like `(2;1)` or `(1 2 3)` must NOT be swallowed as a function
+                // operand — otherwise `x -foo (2;1)` would consume `(2;1)` as a right function
+                // operand and leave the operator's data-right arg empty. Use a guarded
+                // lookahead: try a train parse on the contents, restoring position on failure.
+                Token::OpenParen => {
+                    let save = self.pos;
+                    let is_fn = self.try_parse_train().is_some();
+                    self.pos = save;
+                    is_fn
+                }
+                Token::OpenBrace | Token::LambdaToken | Token::ApplyToken
                 | Token::ReverseComposeToken | Token::ComposeToken | Token::LeftForkToken => true,
                 Token::Literal(LiteralValue::Symbol { name, .. }) => {
                     self.is_known_fn(name) || Self::is_primitive_op(name) || Self::is_adverb(name)
@@ -1294,11 +1307,20 @@ impl<'a> Parser<'a> {
         }
         // A train needs >= 2 members. Either all are functions, OR it is a 2-train
         // left-bind `[value, function]` (e.g. `(10 +)`).
+        //
+        // A 2-member group that is *not* a left-bind must be a genuine function composition
+        // (atop) `f g`. That requires BOTH members to be *definite* functions — a primitive,
+        // a known function/operator, a lambda, a derived function, or a nested train. A bare
+        // variable symbol (e.g. `x` in `(⌷x)`) is NOT definite: at runtime it may hold a
+        // *value*, so `(⌷x)` must parse as the monadic application `⌷ x`, not the 2-train
+        // `⌷∘x` (which would treat `x` as a function and fail). Genuine function-variable
+        // trains like `(f g)` still work because `f`/`g` are registered as known functions.
         let all_funcs = funcs.iter().all(Self::is_function_expr);
         let left_bind = funcs.len() == 2
             && matches!(funcs[0], Instr::Literal(_) | Instr::Array { .. } | Instr::Empty)
             && matches!(funcs[1], Instr::Symbol { .. } | Instr::Derived { .. } | Instr::Lambda { .. } | Instr::Train { .. });
-        if funcs.len() >= 2 && (all_funcs || left_bind) {
+        let two_train = funcs.len() == 2 && funcs.iter().all(Self::is_definite_function);
+        if funcs.len() >= 2 && (all_funcs || left_bind) && (funcs.len() >= 3 || two_train || left_bind) {
             Some(Instr::Train { funcs, reverse: false, compose: false })
         } else if funcs.len() == 1 && Self::is_function_expr(&funcs[0]) {
             // A single parenthesised function `(-)`, `(-⍛+)`, `((×-))` is a valid
@@ -1307,6 +1329,19 @@ impl<'a> Parser<'a> {
             Some(Instr::Train { funcs, reverse: false, compose: false })
         } else {
             None
+        }
+    }
+
+    /// A *definite* function expression suitable for a 2-train (`f g` atop): a primitive
+    /// symbol, a known function/operator symbol, a lambda, a derived adverb, or a nested
+    /// train. Excludes bare variable symbols (which may hold a value at runtime) and literals.
+    fn is_definite_function(e: &Instr) -> bool {
+        match e {
+            Instr::Symbol { name, .. } => {
+                Self::is_primitive_op(name) || name == "⊢" || name == "⊣"
+            }
+            Instr::Derived { .. } | Instr::Lambda { .. } | Instr::Train { .. } => true,
+            _ => false,
         }
     }
 
