@@ -1057,32 +1057,38 @@ impl Engine {
             parent: Some(op_env.clone()),
         });
         // Wrap a function operand (`left_fn`/`right_fn`) as an `APLValue::UserFn` so the
-        // operator body can apply it via `⍞name`. The wrapper applies the original operand
-        // to its own `⍺`/`⍵` arguments: `body = (operand) ⍺ ⍵` expressed as
-        // `Apply { fn_expr: operand, left: ⍺, right: ⍵ }`. This way a primitive like `+`
-        // (which is *not* a bound symbol in the environment) still resolves through the
-        // engine's builtin dispatch when the wrapper is later applied.
+        // operator body can apply it — both via a bare reference (`x a0 b`) and via the
+        // dynamic-ref form (`⍞x a0 b`). The operand must be bound as the *raw* function,
+        // NOT pre-applied to the operator's `⍺`/`⍵`: `⍞x a0` means `x a0` (apply the operand
+        // to the explicit args), exactly like Kotlin Kap. The earlier `Apply { operand,
+        // left: ⍺, right: ⍵ }` wrapper wrongly turned `⍞x a0` into `(⍺ x) a0` = `⍺ x a0`,
+        // so `⍞x 5` under `3 -foo+ 4` returned `3 - 5 = -2` instead of `5`.
         //
-        // Crucially, the wrapper's *closure* is the operator body scope (`child`), NOT the
-        // operator's own closure. The function operand is applied *within* the body, so its
-        // arguments (e.g. `a`, the operator's right data param) must resolve in `child`,
-        // where they are bound — not in the operator's definition-time closure.
+        // A closure (Lambda/Block) operand is stored directly; a primitive/train operand is
+        // kept as its `Instr` body and routed through `eval_apply` at apply time. `split=1`
+        // gives standard ambivalent behaviour (`x a0` monadic, `a0 x b0` dyadic), matching
+        // `foo ⇐ ×-`-style delegation. The wrapper's *closure* is the operator body scope
+        // (`child`) so the body params (`a`, `b`, …) resolve there.
         let wrap_fn = |instr: &Instr| -> APLValue {
-            APLValue::UserFn {
-                params: vec![],
-                split: 1,
-                body: Rc::new(Instr::Apply {
-                    fn_expr: Box::new(instr.clone()),
-                    left: Some(Box::new(Instr::Symbol {
-                        name: "⍺".to_string(),
-                        namespace: None,
-                    })),
-                    right: Box::new(Instr::Symbol {
-                        name: "⍵".to_string(),
-                        namespace: None,
-                    }),
-                }),
-                env: child.clone(),
+            match instr {
+                Instr::Lambda { params, body } => APLValue::UserFn {
+                    params: params.clone(),
+                    split: params.len().saturating_sub(1),
+                    body: Rc::new(*body.clone()),
+                    env: child.clone(),
+                },
+                Instr::Block { body } => APLValue::UserFn {
+                    params: vec![],
+                    split: 0,
+                    body: Rc::new(Instr::Block { body: body.clone() }),
+                    env: child.clone(),
+                },
+                other => APLValue::UserFn {
+                    params: vec![],
+                    split: 1,
+                    body: Rc::new(other.clone()),
+                    env: child.clone(),
+                },
             }
         };
         if let Some(ol) = &op_left {

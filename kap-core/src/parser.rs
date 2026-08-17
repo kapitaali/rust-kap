@@ -959,11 +959,13 @@ impl<'a> Parser<'a> {
             // Stop at a statement boundary: newlines separate statements at the top
             // level, so `1 2 3` does not strand across into the next line's tokens.
             // Check BEFORE skipping newlines so we see the boundary.
-            if self.at_statement_boundary() {
+            // A `;` (ListSeparator) also separates — Kap uses it as a vector/argument
+            // separator, so `10;11` strands into `(10 11)` rather than being one unit.
+            if self.at_statement_boundary() || matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator)) {
                 break;
             }
             self.skip_newlines();
-            if self.at_statement_boundary() {
+            if self.at_statement_boundary() || matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator)) {
                 break;
             }
             let paren_op = self.next_is_paren_operator();
@@ -992,12 +994,12 @@ impl<'a> Parser<'a> {
         loop {
             // Stop at a statement boundary: `a + b` on its own line is not the left
             // operand of a dyadic operator starting the next statement. Check BEFORE
-            // skipping newlines so we see the boundary.
-            if self.at_statement_boundary() {
+            // skipping newlines so we see the boundary. A `;` also separates.
+            if self.at_statement_boundary() || matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator)) {
                 break;
             }
             self.skip_newlines();
-            if self.at_statement_boundary() {
+            if self.at_statement_boundary() || matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator)) {
                 break;
             }
             let paren_op = self.next_is_paren_operator();
