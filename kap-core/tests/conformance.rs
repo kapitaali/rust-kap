@@ -428,6 +428,15 @@ fn curated_kap_parity() {
             // Symbols compare by name+namespace via `≡` (deep_equal).
             ("'foo ≡ 'foo", "1"),
             ("'foo ≡ 'bar", "0"),
+            // Keyword-namespace symbols render as `:name` (Real Kap: `:hello :sir` →
+            // `(:hello :sir)`). They strand into a vector and are distinct from strings.
+            (":hello", ":hello"),
+            (":hello :sir", "(:hello :sir)"),
+            (":foo :bar :baz", "(:foo :bar :baz)"),
+            // `:NAME` is a keyword-symbol value, NOT a string (the prior `:keyword`→Str
+            // hack was wrong per Real Kap). Consumers accept it directly:
+            (":UTF16 unicode:enc \"A\"", "(254 255 0 65)"),
+            (":pretty io:print \"x\"", "\"x\""),
         ];
         for (expr, expected) in symbol_cases {
             match engine.eval_string(expr) {

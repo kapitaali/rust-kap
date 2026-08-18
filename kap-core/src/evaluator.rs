@@ -413,10 +413,14 @@ impl Engine {
             }
             Instr::Empty => Ok(Rc::new(APLValue::Null)),
             Instr::Symbol { name, namespace } => {
-                // A keyword-namespace symbol (`:UTF16`, `:pretty`, …) is a value, not a
-                // lookup in the ordinary environment — it carries its bare name as a string.
+                // A keyword-namespace symbol (`:UTF16`, `:pretty`, …) is a *value*
+                // symbol (interned, renders `:utf16`), not a lookup in the ordinary
+                // environment. It carries no bound value, so it is returned as-is.
                 if namespace.as_deref() == Some("keyword") {
-                    return Ok(Rc::new(APLValue::Str(name.clone())));
+                    return Ok(Rc::new(APLValue::Symbol {
+                        name: name.clone(),
+                        namespace: Some("keyword".to_string()),
+                    }));
                 }
                 let found = env
                     .lookup(name, namespace)
@@ -1650,6 +1654,14 @@ impl Engine {
                 let mut buf = [0u8; 4];
                 return Ok(c.encode_utf8(&mut buf).to_string());
             }
+            // A keyword-namespace symbol (`:pretty`, `:read`) is also a valid style.
+            APLValue::Symbol { name, namespace } => {
+                if namespace.as_deref() == Some("keyword") {
+                    name.as_str()
+                } else {
+                    return Err(AplError::runtime("io:print style must be a string".into()));
+                }
+            }
             _ => return Err(AplError::runtime("io:print style must be a string".into())),
         };
         match style_name {
@@ -1887,14 +1899,23 @@ impl Engine {
     }
 
     /// Resolve a charset name from a left-arg symbol/string (`UTF8`, `UTF16`, …).
-    /// A keyword-namespace symbol (`:UTF16`) is already converted to a `Str` by the
-    /// evaluator, so here it arrives as a plain string.
+    /// A keyword-namespace symbol (`:UTF16`) arrives here as a `Symbol`, and a bare
+    /// string arrives as `Str`. Both are accepted.
     fn unicode_charset(&self, v: &APLValue) -> Result<Charset, AplError> {
         let name = match v {
             APLValue::Str(s) => s.clone(),
             APLValue::Char(c) => {
                 let mut buf = [0u8; 4];
                 c.encode_utf8(&mut buf).to_string()
+            }
+            APLValue::Symbol { name, namespace } => {
+                if namespace.as_deref() == Some("keyword") {
+                    name.clone()
+                } else {
+                    return Err(AplError::runtime(
+                        "unicode: charset must be a name like UTF8/UTF16/UTF32".into(),
+                    ));
+                }
             }
             _ => {
                 return Err(AplError::runtime(
