@@ -9,7 +9,7 @@
 //!   D2 `num-bigint`/`num-rational` for numbers (no GMP yet).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 pub mod number;
@@ -90,6 +90,30 @@ pub enum APLValue {
 impl APLValue {
     pub fn is_null(&self) -> bool {
         matches!(self, APLValue::Null)
+    }
+
+    /// Kap class name for the `typeof` builtin (Kotlin `SystemClass` names:
+    /// `INTEGER`, `FLOAT`, `COMPLEX`, `RATIONAL`, `CHAR`, `ARRAY`, `SYMBOL`,
+    /// `LAMBDA_FN`, `LIST`, `MAP`, …). Returns the bare class name; the `typeof`
+    /// builtin wraps it in a `Symbol`.
+    pub fn class_name(&self) -> &'static str {
+        match self {
+            APLValue::Number(n) => match n {
+                KapNumber::Long(_) => "INTEGER",
+                KapNumber::Double(_) => "FLOAT",
+                KapNumber::BigInt(_) => "INTEGER",
+                KapNumber::Rational(_) => "RATIONAL",
+                KapNumber::Complex(_, _) => "COMPLEX",
+            },
+            APLValue::Char(_) => "CHAR",
+            APLValue::Str(_) => "STRING",
+            APLValue::Array(_) => "ARRAY",
+            APLValue::Null => "NULL",
+            APLValue::Deferred { .. } => "DEFERRED",
+            APLValue::UserFn { .. } => "LAMBDA_FN",
+            APLValue::UserOp { .. } => "OPERATOR",
+            APLValue::Symbol { .. } => "SYMBOL",
+        }
     }
 
     /// Render a value for display (REPL / tests). Mirrors Kap's value printing.
@@ -248,15 +272,167 @@ fn escape_string(s: &str) -> String {
 }
 
 
+/// Shared namespace registry. Lives behind an `Rc` so every `Environment` (root and all
+/// child lexical scopes) sees the same set of named namespaces and the current namespace.
+/// Mirrors Kotlin's `Engine.namespaces`/`currentNamespace` (the module-level symbol table),
+/// distinct from the per-scope lexical `Environment.symbols` table (which holds dfn params
+/// like `⍵`/`⍺` and block locals).
+#[derive(Debug, Default, Clone)]
+pub struct NamespaceRegistry {
+    /// The "current" namespace name. `None` = the implicit default namespace.
+    pub current: RefCell<Option<String>>,
+    /// `name -> (symbolName -> value)` for module-scope bindings, keyed by bare name within
+    /// each namespace. (Kotlin: `Namespace.localSymbols`.)
+    pub symbols: RefCell<HashMap<String, HashMap<String, AplRef<APLValue>>>>,
+    /// `name -> set of exported symbol names` (populated by `declare(:export …)`).
+    pub exports: RefCell<HashMap<String, HashSet<String>>>,
+    /// `name -> list of imported namespace names` (populated by `import(…)`).
+    pub imports: RefCell<HashMap<String, Vec<String>>>,
+}
+
+impl NamespaceRegistry {
+    /// The default namespace name used when `current` is `None`.
+    pub fn default_ns() -> String {
+        "default".to_string()
+    }
+    /// Resolve the *effective* current namespace name (never `None`).
+    pub fn current_ns(&self) -> String {
+        self.current.borrow().clone().unwrap_or_else(Self::default_ns)
+    }
+    /// Fetch (or lazily create) the symbol map for a namespace.
+    pub fn ns_symbols(&self, ns: &str) -> HashMap<String, AplRef<APLValue>> {
+        self.symbols
+            .borrow()
+            .get(ns)
+            .cloned()
+            .unwrap_or_default()
+    }
+    pub fn ns_define(&self, ns: &str, name: &str, val: AplRef<APLValue>) {
+        self.symbols
+            .borrow_mut()
+            .entry(ns.to_string())
+            .or_default()
+            .insert(name.to_string(), val);
+    }
+    pub fn ns_lookup(&self, ns: &str, name: &str) -> Option<AplRef<APLValue>> {
+        self.symbols
+            .borrow()
+            .get(ns)
+            .and_then(|m| m.get(name))
+            .cloned()
+    }
+    pub fn declare_export(&self, ns: &str, name: &str) {
+        self.exports
+            .borrow_mut()
+            .entry(ns.to_string())
+            .or_default()
+            .insert(name.to_string());
+    }
+    pub fn is_exported(&self, ns: &str, name: &str) -> bool {
+        self.exports
+            .borrow()
+            .get(ns)
+            .map(|s| s.contains(name))
+            .unwrap_or(false)
+    }
+    pub fn add_import(&self, ns: &str, imported: &str) {
+        self.imports
+            .borrow_mut()
+            .entry(ns.to_string())
+            .or_default()
+            .push(imported.to_string());
+    }
+    /// Resolve a *bare* (namespace-less) name in `current_ns`, honoring `import` fallbacks
+    /// then the default namespace (Kotlin `defaultNamespaceFallback`).
+    pub fn resolve_bare(&self, name: &str) -> Option<AplRef<APLValue>> {
+        let cur = self.current_ns();
+        if let Some(v) = self.ns_lookup(&cur, name) {
+            return Some(v);
+        }
+        // Walk imported namespaces (in import order).
+        if let Some(imps) = self.imports.borrow().get(&cur).cloned() {
+            for imp in imps {
+                if let Some(v) = self.ns_lookup(&imp, name) {
+                    return Some(v);
+                }
+            }
+        }
+        // Fall back to the default namespace.
+        if cur != Self::default_ns() {
+            if let Some(v) = self.ns_lookup(&Self::default_ns(), name) {
+                return Some(v);
+            }
+        }
+        None
+    }
+    /// Collect names bound to `UserFn` values across all namespaces (used by the parser's
+    /// `function_names()` so a user-defined function is recognized as applicable after a
+    /// separate `∇`/`⇐` statement).
+    pub fn collect_function_names(&self, out: &mut Vec<String>) {
+        for m in self.symbols.borrow().values() {
+            for (name, val) in m.iter() {
+                if matches!(val.as_ref(), APLValue::UserFn { .. }) && !out.contains(name) {
+                    out.push(name.clone());
+                }
+            }
+        }
+    }
+    /// Collect names bound to `UserOp` values across all namespaces (parser `operator_names`).
+    pub fn collect_operator_names(&self, out: &mut Vec<String>) {
+        for m in self.symbols.borrow().values() {
+            for (name, val) in m.iter() {
+                if matches!(val.as_ref(), APLValue::UserOp { .. }) && !out.contains(name) {
+                    out.push(name.clone());
+                }
+            }
+        }
+    }
+}
+
 /// Lexical environment. Symbols live behind a `RefCell` so assignment can mutate the
 /// shared `Rc<Environment>` in place (single-threaded, per D1). `parent` enables lexical
-/// scoping: a lookup walks outward until it finds the name.
+/// scoping: a lookup walks outward until it finds the name. `ns_registry` is the
+/// module-level namespace table, shared (via `Rc`) across all scopes.
 #[derive(Debug, Default, Clone)]
 pub struct Environment {
-    /// Symbols defined in this scope: key = (name, namespace). Values are shared refs.
+    /// Lexical (block-scope) bindings: key = (name, namespace). Values are shared refs.
+    /// Holds dfn params (`⍵`/`⍺`), block locals, and operator operands — NOT module symbols.
     pub symbols: RefCell<HashMap<(String, Option<String>), AplRef<APLValue>>>,
     /// Parent scope for lexical lookup.
     pub parent: Option<AplRef<Environment>>,
+    /// Shared namespace registry (module-level symbol table + import/export metadata).
+    pub ns_registry: Rc<NamespaceRegistry>,
+}
+
+impl Environment {
+    /// Build a child lexical scope that inherits the same shared namespace registry.
+    pub fn child(parent: &Rc<Environment>) -> Rc<Environment> {
+        Rc::new(Environment {
+            symbols: RefCell::new(HashMap::new()),
+            parent: Some(parent.clone()),
+            ns_registry: parent.ns_registry.clone(),
+        })
+    }
+
+    /// Is this the root (module-level) scope? Root scopes hold module bindings; child scopes
+    /// hold lexical (block-local) bindings.
+    pub fn is_root(&self) -> bool {
+        self.parent.is_none()
+    }
+
+    /// Whether `name` is bound *lexically* (in this scope chain), before consulting the
+    /// namespace table. Used to route `←` (assign vs. define) and to keep `⍵`/`⍺` lexical.
+    pub fn lexical_contains(&self, name: &str) -> bool {
+        let key = (name.to_string(), None);
+        let mut cur: Option<&Environment> = Some(self);
+        while let Some(e) = cur {
+            if e.symbols.borrow().contains_key(&key) {
+                return true;
+            }
+            cur = e.parent.as_ref().map(|p| p.as_ref());
+        }
+        false
+    }
 }
 
 /// Engine: holds namespaces, symbols, and the standard output sink.

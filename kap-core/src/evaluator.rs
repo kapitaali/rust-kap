@@ -62,35 +62,57 @@ fn strides(dims: &[usize]) -> Vec<usize> {
 
 
 impl Environment {
-    /// Look up a symbol, walking parent environments. Returns a shared ref to the value.
+    /// Look up a symbol. Resolution order (Kotlin `internSymbol`):
+    ///   1. Lexical scope (parent chain) — dfn params `⍵`/`⍺`, block locals.
+    ///   2. Module namespace table (shared `ns_registry`):
+    ///      - explicit `ns:name` → that namespace directly;
+    ///      - bare `name` → current namespace, then its imports, then `default`.
     pub fn lookup(&self, name: &str, ns: &Option<String>) -> Option<AplRef<APLValue>> {
-        let key = (name.to_string(), ns.clone());
-        if let Some(v) = self.symbols.borrow().get(&key) {
-            return Some(v.clone());
+        // 1. Lexical scope (dfn params, block locals) — checked first.
+        let lkey = (name.to_string(), ns.clone());
+        let mut cur: Option<&Environment> = Some(self);
+        while let Some(e) = cur {
+            if let Some(v) = e.symbols.borrow().get(&lkey) {
+                return Some(v.clone());
+            }
+            cur = e.parent.as_deref();
         }
-        if let Some(p) = &self.parent {
-            return p.lookup(name, ns);
+        // 2. Module namespace table.
+        let reg = &self.ns_registry;
+        match ns {
+            Some(nsname) => reg.ns_lookup(nsname, name),
+            None => reg.resolve_bare(name),
         }
-        None
     }
 
-    /// Define a symbol in this (innermost) environment. Mutates through `RefCell` so the
-    /// definition is visible to all shared `Rc<Environment>` handles (assignment persists).
+    /// Define a symbol. Routes to the namespace table when the binding is module-scoped
+    /// (qualified `ns:name`, or a bare name defined at the root), and to the lexical
+    /// scope when it is a block-local (bare name in a child scope, e.g. `⍵`/`⍺`).
     pub fn define(&self, name: &str, ns: &Option<String>, value: AplRef<APLValue>) {
-        self.symbols
-            .borrow_mut()
-            .insert((name.to_string(), ns.clone()), value);
+        match ns {
+            Some(nsname) => {
+                self.ns_registry.ns_define(nsname, name, value);
+            }
+            None => {
+                if self.is_root() {
+                    // Module-scope bare assignment → current/default namespace.
+                    let cur = self.ns_registry.current_ns();
+                    self.ns_registry.ns_define(&cur, name, value);
+                } else {
+                    // Block-local (lexical) bare binding.
+                    self.symbols
+                        .borrow_mut()
+                        .insert((name.to_string(), None), value);
+                }
+            }
+        }
     }
 
-    /// Assign to `name`, updating the *nearest existing binding* in the enclosing scope
-    /// chain (Kap's `←` semantics: like `set!`, it mutates the closest enclosing scope
-    /// that already defines `name`, falling back to defining it locally). This is what
-    /// makes a closure `n←n+1` update an outer `n←0` rather than shadowing it.
+    /// Assign to `name`, updating the *nearest existing binding* (Kap `←` semantics:
+    /// like `set!`). Mirrors `define`'s routing: lexical scope first, then namespace table.
     pub fn assign(&self, name: &str, ns: &Option<String>, value: AplRef<APLValue>) {
         let key = (name.to_string(), ns.clone());
-        // 1. Find the *nearest* existing binding up the scope chain and update it
-        //    in place. This is what makes closure mutation work, e.g. `n←n+1`
-        //    inside a function body mutating an outer `n`.
+        // 1. Nearest lexical binding up the scope chain.
         let mut cur: Option<&Environment> = Some(self);
         while let Some(e) = cur {
             if e.symbols.borrow().contains_key(&key) {
@@ -99,10 +121,24 @@ impl Environment {
             }
             cur = e.parent.as_deref();
         }
-        // 2. No existing binding anywhere: define in the *innermost* scope (the
-        //    env the assignment was evaluated in), so a block-local `x←9` does
-        //    not leak into an enclosing scope.
-        self.symbols.borrow_mut().insert(key, value);
+        // 2. Module namespace table (qualified or current/default for bare).
+        match ns {
+            Some(nsname) => {
+                self.ns_registry.ns_define(nsname, name, value);
+            }
+            None => {
+                let reg = &self.ns_registry;
+                let cur = reg.current_ns();
+                // If the current/default namespace already has it, update in place;
+                // otherwise define in the current namespace (root-level assignment).
+                if reg.ns_lookup(&cur, name).is_some() || self.is_root() {
+                    reg.ns_define(&cur, name, value);
+                } else {
+                    // Block-local assignment that has no prior binding: keep lexical.
+                    self.symbols.borrow_mut().insert((name.to_string(), None), value);
+                }
+            }
+        }
     }
 
     /// Names of all symbols in this scope (and parents) that currently hold a
@@ -119,6 +155,9 @@ impl Environment {
             }
             cur = env.parent.as_deref();
         }
+        // Also surface functions held in the namespace registry (current/default ns and
+        // its imports) — top-level bare `f ⇐ {…}` assignments now live there.
+        self.ns_registry.collect_function_names(&mut names);
         names
     }
 
@@ -136,6 +175,7 @@ impl Environment {
             }
             cur = env.parent.as_deref();
         }
+        self.ns_registry.collect_operator_names(&mut names);
         names
     }
 }
@@ -734,10 +774,7 @@ impl Engine {
             // A bare block `{ … }` applied as a function: bind `⍵` (right) / `⍺` (left) and
             // evaluate the block body in a fresh child scope. (`{ … } x` and `a { … } b`.)
             Instr::Block { body } => {
-                let child = Rc::new(Environment {
-                    symbols: Default::default(),
-                    parent: Some(env.clone()),
-                });
+                let child = Environment::child(&env);
                 let right_val = self.eval_instr(right, env)?.force(self)?;
                 if let Some(l) = left {
                     let lv = self.eval_instr(l, env)?.force(self)?;
@@ -1007,6 +1044,86 @@ impl Engine {
                 );
                 Ok(Rc::new(APLValue::Array(Rc::new(arr))))
             }
+            // `typeof` (monadic): returns a *symbol* naming the Kap class of the
+            // argument (Kotlin `TypeofFunction` → `classManager.nameForClass`).
+            // e.g. `typeof 10` → INTEGER, `typeof "x"` → STRING. The port renders
+            // a default-namespace symbol as `default:NAME` (see `format_value`).
+            "typeof" => {
+                let v = right_val.force(self)?;
+                let name = v.class_name().to_string();
+                Ok(Rc::new(APLValue::Symbol {
+                    name,
+                    namespace: None,
+                }))
+            }
+            // --- Namespace directives (Kotlin `namespace`/`import`/`declare`). ---
+            // `namespace("foo")` sets the current module namespace for subsequent
+            // top-level bindings/lookups. `import("foo")` makes `foo`'s *exported*
+            // symbols visible in the current namespace. `declare(:export a)` marks a
+            // symbol for export. These are runtime directives (in-memory only; `use`
+            // file-loading is deferred per the roadmap).
+            "namespace" => {
+                let name = match right_val.as_ref() {
+                    APLValue::Str(s) => s.clone(),
+                    APLValue::Symbol { name, .. } => name.clone(),
+                    other => {
+                        return Err(AplError::runtime(format!(
+                            "namespace requires a name, got: {}",
+                            other.format_value()
+                        )))
+                    }
+                };
+                env.ns_registry.current.replace(Some(name));
+                Ok(right_val)
+            }
+            "import" => {
+                let name = match right_val.as_ref() {
+                    APLValue::Str(s) => s.clone(),
+                    APLValue::Symbol { name, .. } => name.clone(),
+                    other => {
+                        return Err(AplError::runtime(format!(
+                            "import requires a namespace name, got: {}",
+                            other.format_value()
+                        )))
+                    }
+                };
+                let cur = env.ns_registry.current_ns();
+                env.ns_registry.add_import(&cur, &name);
+                Ok(right_val)
+            }
+            "declare" => {
+                // Argument is an array `[Symbol{export,keyword}, Symbol{name,ns}]`,
+                // i.e. `declare(:export a)`. Mark the second symbol's name exported in
+                // the current namespace.
+                let arr = match right_val.as_ref() {
+                    APLValue::Array(a) => a.clone(),
+                    other => {
+                        return Err(AplError::runtime(format!(
+                            "declare requires a [keyword symbol, symbol] pair, got: {}",
+                            other.format_value()
+                        )))
+                    }
+                };
+                let elems = arr.elements();
+                if elems.len() != 2 {
+                    return Err(AplError::runtime(format!(
+                        "declare requires exactly 2 elements, got: {}",
+                        elems.len()
+                    )));
+                }
+                let sym = match elems[1].as_ref() {
+                    APLValue::Symbol { name, .. } => name.clone(),
+                    other => {
+                        return Err(AplError::runtime(format!(
+                            "declare's second element must be a symbol, got: {}",
+                            other.format_value()
+                        )))
+                    }
+                };
+                let cur = env.ns_registry.current_ns();
+                env.ns_registry.declare_export(&cur, &sym);
+                Ok(right_val)
+            }
             "÷" | "/" => match left_val {
                 None => self.scalar1(right_val, |x| x.recip(), "÷"),
                 Some(_) => self.num2(left_val, right_val, |a, b| a.div(b), "÷"),
@@ -1258,7 +1375,7 @@ impl Engine {
             "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"
                 | "↑" | "↓" | "⊂" | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥"
-                | "⊢" | "⊣" | "≡" | "⍓"
+                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof"
         )
     }
 
@@ -1276,10 +1393,7 @@ impl Engine {
         closure_env: &AplRef<Environment>,
         self_name: Option<&str>,
     ) -> Result<AplRef<APLValue>, AplError> {
-        let child = Rc::new(Environment {
-            symbols: Default::default(),
-            parent: Some(closure_env.clone()),
-        });
+        let child = Environment::child(&closure_env);
         // Evaluate args in the *calling* env (Kap passes by value/sharing).
         let right_val = self.eval_instr(right, closure_env)?.force(self)?;
         // Bind named params: first `split` to the left arg, the rest to the right arg.
@@ -1412,10 +1526,7 @@ impl Engine {
         };
         // Build a child scope off the operator's closure env. This is the scope in which
         // the operator *body* runs, so the data args (`a`, `⍵`, …) live here.
-        let child = Rc::new(Environment {
-            symbols: Default::default(),
-            parent: Some(op_env.clone()),
-        });
+        let child = Environment::child(&op_env);
         // Wrap a function operand (`left_fn`/`right_fn`) as an `APLValue::UserFn` so the
         // operator body can apply it — both via a bare reference (`x a0 b`) and via the
         // dynamic-ref form (`⍞x a0 b`). The operand must be bound as the *raw* function,

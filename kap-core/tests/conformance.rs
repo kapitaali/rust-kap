@@ -454,6 +454,33 @@ fn curated_kap_parity() {
             }
         }
     }
+    // --- Types: `typeof` (Kotlin TypesTest.kt) returns a symbol naming the Kap class. ---
+    {
+        let type_cases: Vec<(&str, &str)> = vec![
+            ("typeof 10", "default:INTEGER"),
+            ("typeof 1.2", "default:FLOAT"),
+            ("typeof 1÷5", "default:RATIONAL"),
+            ("typeof \"x\"", "default:STRING"),
+            ("typeof @a", "default:CHAR"),
+            ("typeof 1 2 3", "default:ARRAY"),
+            ("typeof 'foo", "default:SYMBOL"),
+        ];
+        for (expr, expected) in type_cases {
+            match engine.eval_string(expr) {
+                Ok(v) => {
+                    let got = v.format_display();
+                    if &got != expected {
+                        failures.push(format!(
+                            "MISMATCH  {expr:?}  expected {expected:?} got {got:?}"
+                        ));
+                    }
+                }
+                Err(e) => {
+                    failures.push(format!("ERROR    {expr:?}  -> {e}"));
+                }
+            }
+        }
+    }
     for (expr, expected) in cases {
         // Render with `format_display` (REPL form: strings quoted, `⍬` for null, `@` for
         // char) to match Real Kap's reference output, not the bare `format_value` used by

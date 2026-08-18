@@ -164,10 +164,41 @@ pub fn tokenise(src: &str) -> Vec<SpannedToken> {
             // rejected by `lex_symbol` (non-alphanumeric), yielding an empty name.
             // In that case the symbol *is* just the single char `c`.
             let raw_name = if raw_name.is_empty() { c.to_string() } else { raw_name };
-            // namespace-qualified: foo:bar  (single ':' separator)
-            let (name, ns) = split_namespace(&raw_name);
             // Guard: always advance by >= 1 to avoid an infinite loop.
             let consumed = ni.saturating_sub(i).max(1);
+            // namespace-qualified: foo:bar  (single ':' separator)
+            // Invalid symbol names (Kotlin NamespaceTest.invalidSymbolNames):
+            //   * multiple ':' (e.g. `foo:bar:test`)  -> parse error
+            //   * trailing ':' (e.g. `bar:`)           -> parse error
+            let colon_count = raw_name.matches(':').count();
+            if colon_count > 1 {
+                out.push(SpannedToken {
+                    token: Token::Error(format!(
+                        "invalid symbol name '{}': at most one ':' namespace separator allowed",
+                        raw_name
+                    )),
+                    line: start_line,
+                    col: start_col,
+                });
+                i += consumed;
+                col += consumed;
+                continue;
+            }
+            let trailing_colon = raw_name.ends_with(':');
+            let (name, ns) = split_namespace(&raw_name);
+            if trailing_colon {
+                out.push(SpannedToken {
+                    token: Token::Error(format!(
+                        "invalid symbol name '{}': trailing ':' not allowed",
+                        raw_name
+                    )),
+                    line: start_line,
+                    col: start_col,
+                });
+                i += consumed;
+                col += consumed;
+                continue;
+            }
             out.push(SpannedToken {
                 token: Token::Literal(LiteralValue::Symbol { name, namespace: ns }),
                 line: start_line,
