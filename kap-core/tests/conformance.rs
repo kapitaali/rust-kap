@@ -328,10 +328,22 @@ fn curated_kap_parity() {
         ("unicode:toUpper \"abc\"", "\"ABC\""),
         ("unicode:toNames @A", "\"LATIN CAPITAL LETTER A\""),
         ("unicode:toNames @€", "⍬"),
-        ("\"UTF16\" unicode:enc \"A\"", "(0 65)"),
+        ("\"UTF16\" unicode:enc \"A\"", "(254 255 0 65)"),
+        ("\"UTF16BE\" unicode:enc \"A\"", "(0 65)"),
+        ("\"UTF16LE\" unicode:enc \"A\"", "(65 0)"),
         ("\"UTF32\" unicode:enc \"A\"", "(0 0 0 65)"),
         ("unicode:enc \"A\"", "(65)"),
+        ("\"UTF16\" unicode:dec 254 255 0 65", "\"A\""),
         ("\"UTF16\" unicode:dec 0 65", "\"A\""),
+        ("\"UTF16LE\" unicode:dec 65 0", "\"A\""),
+        ("\"UTF16BE\" unicode:dec 0 65", "\"A\""),
+        // Supplementary-plane literal (lexer surrogate-pair combination, Task 1)
+        ("\"𝒟\"", "\"𝒟\""),
+        ("unicode:toCodepoints \"𝒟\"", "(119967)"),
+        // s:trim* (namespace-builtin, Task 4)
+        ("s:trimLeft \"   hi\"", "\"hi\""),
+        ("s:trimRight \"hi   \"", "\"hi\""),
+        ("s:trim \"  hi  \"", "\"hi\""),
         // Character arithmetic (StringsTest.kt)
         ("\"abc\"+1", "\"bcd\""),
         ("1+\"abc\"", "\"bcd\""),

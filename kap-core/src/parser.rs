@@ -109,6 +109,7 @@ impl<'a> Parser<'a> {
                                 "toCodepoints" | "fromCodepoints" | "toGraphemes" | "toLower"
                                     | "toUpper" | "toNames" | "enc" | "dec"
                             ))
+                        || (ns == "s" && matches!(base, "trimLeft" | "trimRight" | "trim"))
                 }
                 None => false,
             }

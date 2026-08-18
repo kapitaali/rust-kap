@@ -8,8 +8,22 @@ use crate::KapNumber;
 use num_bigint::BigInt;
 use num_rational::BigRational;
 
+/// Read exactly four hex digits from `chars` (starting at index 0 of the slice)
+/// and return the resulting code point, or `None` if fewer than four hex digits.
+fn parse_hex4(chars: &[char]) -> Option<u32> {
+    if chars.len() < 4 {
+        return None;
+    }
+    let mut v = 0u32;
+    for k in 0..4 {
+        v = v * 16 + chars[k].to_digit(16)?;
+    }
+    Some(v)
+}
+
 /// Lex a character after `@`. Returns (char, next_index, next_col). Column tracking
-/// is approximate (counts chars). Supports `@\uXXXX`, `@\n`, `@\\LATIN...`, and plain.
+/// is approximate (counts chars). Supports `@\n`, `@\t`, `@\0`, `@\s`, `@e`, `@\\`,
+/// and `@\uXXXX` (including a surrogate pair `@\uD835\uDC9F` → one astral char).
 pub fn lex_char(chars: &[char], i: usize, _line: usize, col: usize) -> Option<(char, usize, usize)> {
     if i >= chars.len() {
         return None;
@@ -20,53 +34,107 @@ pub fn lex_char(chars: &[char], i: usize, _line: usize, col: usize) -> Option<(c
             return None;
         }
         let e = chars[i + 1];
-        let (ch, skip) = match e {
-            'n' => ('\n', 2),
-            'r' => ('\r', 2),
-            't' => ('\t', 2),
-            'e' => (0x1b as char, 2),
-            's' => (' ', 2),
-            '0' => ('\0', 2),
-            '\\' => ('\\', 2),
+        match e {
+            'n' => Some(('\n', i + 2, col + 2)),
+            'r' => Some(('\r', i + 2, col + 2)),
+            't' => Some(('\t', i + 2, col + 2)),
+            'e' => Some((0x1b as char, i + 2, col + 2)),
+            's' => Some((' ', i + 2, col + 2)),
+            '0' => Some(('\0', i + 2, col + 2)),
+            '\\' => Some(('\\', i + 2, col + 2)),
             'u' => {
-                // @\uXXXX
-                let hex: String = chars.get(i + 2..i + 6)?.iter().collect();
-                let code = u32::from_str_radix(&hex, 16).ok()?;
-                (char::from_u32(code)?, 6)
+                // @\uXXXX — may be a high surrogate followed by a low surrogate,
+                // which combine into a single astral code point (one `char`).
+                let code = parse_hex4(&chars[i + 2..])?;
+                if (0xD800..=0xDBFF).contains(&code) {
+                    let k = i + 6; // index just past the first `\uXXXX`
+                    if k + 1 < chars.len() && chars[k] == '\\' && chars[k + 1] == 'u' {
+                        let code2 = parse_hex4(&chars[k + 2..])?;
+                        if (0xDC00..=0xDFFF).contains(&code2) {
+                            let cp =
+                                0x10000 + ((code - 0xD800) << 10) + (code2 - 0xDC00);
+                            return char::from_u32(cp).map(|ch| (ch, k + 6, col + 6));
+                        }
+                    }
+                    // Lone surrogate (no valid pairing): Kap has no valid char for it.
+                    return None;
+                }
+                char::from_u32(code).map(|ch| (ch, i + 6, col + 6))
             }
-            _ => return None,
-        };
-        Some((ch, i + skip, col + skip))
+            _ => None,
+        }
     } else {
         Some((chars[i], i + 1, col + 1))
     }
 }
 
 /// Lex a string after the opening `"`. Returns (string, next_index, next_col).
+/// Supports `\\`, `\"`, `\n`, `\r`, and `\uXXXX`. A surrogate pair `\\uD835\\uDC9F`
+/// is combined into a single astral `char` (matching Java/Kotlin UTF-16 strings).
 pub fn lex_string(chars: &[char], i: usize) -> Result<(String, usize, usize), String> {
-    let mut s = String::new();
+    let mut out: Vec<char> = Vec::new();
     let mut j = i;
     while j < chars.len() {
         let c = chars[j];
         if c == '"' {
-            return Ok((s, j + 1, j + 2));
+            return Ok((out.into_iter().collect(), j + 1, j + 2));
         }
         if c == '\\' {
             if j + 1 >= chars.len() {
                 return Err("unterminated string escape".into());
             }
             let e = chars[j + 1];
-            let ch = match e {
-                '\\' => '\\',
-                '"' => '"',
-                'n' => '\n',
-                'r' => '\r',
+            match e {
+                '\\' => {
+                    out.push('\\');
+                    j += 2;
+                }
+                '"' => {
+                    out.push('"');
+                    j += 2;
+                }
+                'n' => {
+                    out.push('\n');
+                    j += 2;
+                }
+                'r' => {
+                    out.push('\r');
+                    j += 2;
+                }
+                'u' => {
+                    let code = parse_hex4(&chars[j + 2..])
+                        .ok_or_else(|| "invalid \\u escape in string".to_string())?;
+                    if (0xD800..=0xDBFF).contains(&code) {
+                        // high surrogate: look for a trailing `\uXXXX` low surrogate
+                        let k = j + 6;
+                        if k + 1 < chars.len() && chars[k] == '\\' && chars[k + 1] == 'u' {
+                            if let Some(code2) = parse_hex4(&chars[k + 2..]) {
+                                if (0xDC00..=0xDFFF).contains(&code2) {
+                                    let cp = 0x10000
+                                        + ((code - 0xD800) << 10)
+                                        + (code2 - 0xDC00);
+                                    if let Some(ch) = char::from_u32(cp) {
+                                        out.push(ch);
+                                        j = k + 6;
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                        // Lone surrogate with no valid pair: replacement char.
+                        out.push(char::REPLACEMENT_CHARACTER);
+                        j = j + 6;
+                    } else if let Some(ch) = char::from_u32(code) {
+                        out.push(ch);
+                        j = j + 6;
+                    } else {
+                        return Err("invalid \\u escape code point in string".into());
+                    }
+                }
                 _ => return Err(format!("invalid string escape: \\{}", e)),
-            };
-            s.push(ch);
-            j += 2;
+            }
         } else {
-            s.push(c);
+            out.push(c);
             j += 1;
         }
     }

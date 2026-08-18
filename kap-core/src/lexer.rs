@@ -89,6 +89,31 @@ pub fn tokenise(src: &str) -> Vec<SpannedToken> {
             }
             continue;
         }
+        // keyword-namespace symbol: `:NAME` (e.g. `:UTF16`, `:pretty`, `:read`).
+        // Kap's keyword namespace. Emitted as a symbol with namespace "keyword" so it
+        // strands/passes as a value (e.g. `:UTF16 unicode:dec 0xFE 0xFF …`). A bare
+        // `:` followed by a non-symbol char (space, digit, `(` …) stays `ColonSym`
+        // (used by the `cond : a ⋄ b` guard expression).
+        if c == ':' && i + 1 < chars.len() && is_symbol_start(chars[i + 1]) {
+            let (raw_name, ni) = lex_symbol(&chars, i + 1);
+            let name = if raw_name.is_empty() {
+                chars[i + 1].to_string()
+            } else {
+                raw_name
+            };
+            out.push(SpannedToken {
+                token: Token::Literal(LiteralValue::Symbol {
+                    name,
+                    namespace: Some("keyword".to_string()),
+                }),
+                line: start_line,
+                col: start_col,
+            });
+            let consumed = ni.saturating_sub(i).max(2);
+            i = ni.max(i + 2);
+            col += consumed;
+            continue;
+        }
         // single-char punctuation / symbols
         if let Some(tok) = single_char_token(c) {
             out.push(SpannedToken { token: tok, line: start_line, col: start_col });

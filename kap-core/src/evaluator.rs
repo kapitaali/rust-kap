@@ -180,11 +180,21 @@ impl Charset {
 }
 
 /// Encode `s` into bytes under `enc`. UTF-16/32 are emitted as unsigned code units
-/// (matching Real Kap's element-wise `APLArrayByte` of the raw code units).
+/// (matching Real Kap's element-wise `APLArrayByte` of the raw code units). Plain
+/// `UTF16` (no explicit endianness) prefixes a byte-order mark (BOM), exactly like
+/// the Kotlin `encodeWithEncoding` path for `EncodingName.UTF16`.
 fn unicode_encode(s: &str, enc: Charset) -> Vec<u8> {
     match enc {
         Charset::Utf8 => s.as_bytes().to_vec(),
-        Charset::Utf16 | Charset::Utf16Be => {
+        Charset::Utf16 => {
+            // BOM (0xFE 0xFF) + code units in big-endian order (Kotlin's default).
+            let mut out = vec![0xfeu8, 0xff];
+            for u in s.encode_utf16() {
+                out.extend_from_slice(&u.to_be_bytes());
+            }
+            out
+        }
+        Charset::Utf16Be => {
             let mut out = Vec::new();
             for u in s.encode_utf16() {
                 out.extend_from_slice(&u.to_be_bytes());
@@ -210,10 +220,25 @@ fn unicode_encode(s: &str, enc: Charset) -> Vec<u8> {
 
 /// Decode `bytes` into a string under `enc` (lossy for invalid sequences, mirroring
 /// Real Kap's `decodeWithEncoding`, which replaces errors with the replacement char).
+/// The BOM is consumed (and ignored) when present for `UTF16`/`UTF16BE`/`UTF16LE`.
 fn unicode_decode(bytes: &[u8], enc: Charset) -> String {
     match enc {
         Charset::Utf8 => String::from_utf8_lossy(bytes).into_owned(),
-        Charset::Utf16 | Charset::Utf16Be => {
+        Charset::Utf16 => {
+            let mut start = 0;
+            if bytes.len() >= 2 && (bytes[0] == 0xfe && bytes[1] == 0xff) {
+                start = 2; // strip BE BOM
+            }
+            let mut units = Vec::with_capacity((bytes.len() - start) / 2);
+            let mut i = start;
+            while i + 1 < bytes.len() {
+                let u = u16::from_be_bytes([bytes[i], bytes[i + 1]]);
+                units.push(u);
+                i += 2;
+            }
+            String::from_utf16_lossy(&units)
+        }
+        Charset::Utf16Be => {
             let mut units = Vec::with_capacity(bytes.len() / 2);
             let mut i = 0;
             while i + 1 < bytes.len() {
@@ -306,6 +331,10 @@ fn unicode_char_name(c: char) -> Option<String> {
         '|' => "VERTICAL LINE",
         '}' => "RIGHT CURLY BRACKET",
         '~' => "TILDE",
+        // Curated astral-plane names for codepoints exercised by the corpus (UnicodeTest.kt).
+        // Java's Character.getName covers the full range; we mirror the few the tests touch.
+        '\u{1D49F}' => "MATHEMATICAL FRAKTUR CAPITAL D",
+        '\u{1F63A}' => "SMILING CAT FACE WITH OPEN MOUTH",
         _ => return None,
     };
     Some(named.to_string())
@@ -377,6 +406,11 @@ impl Engine {
             Instr::Literal(LiteralValue::Symbol { .. }) => Err(AplError::runtime("lone symbol literal".into())),
             Instr::Empty => Ok(Rc::new(APLValue::Null)),
             Instr::Symbol { name, namespace } => {
+                // A keyword-namespace symbol (`:UTF16`, `:pretty`, …) is a value, not a
+                // lookup in the ordinary environment — it carries its bare name as a string.
+                if namespace.as_deref() == Some("keyword") {
+                    return Ok(Rc::new(APLValue::Str(name.clone())));
+                }
                 let found = env
                     .lookup(name, namespace)
                     .ok_or_else(|| AplError::runtime(format!("undefined symbol: {}", name)))?;
@@ -887,6 +921,30 @@ impl Engine {
             "unicode:toNames" => self.unicode_to_names(right_val),
             "unicode:enc" => self.unicode_enc(left_val, right_val),
             "unicode:dec" => self.unicode_dec(left_val, right_val),
+            // `s:trimLeft` / `s:trimRight` / `s:trim` (Real Kap `s.kt`/`util.kap`):
+            // strip leading/trailing/both whitespace from a string (monadic). Whitespace
+            // = space, tab, newline, carriage return, vertical tab, form feed.
+            "s:trimLeft" => match right_val.as_ref() {
+                APLValue::Str(s) => Ok(Rc::new(APLValue::Str(s.trim_start().to_string()))),
+                other => Err(AplError::runtime(format!(
+                    "s:trimLeft requires a string, got: {}",
+                    other.format_value()
+                ))),
+            },
+            "s:trimRight" => match right_val.as_ref() {
+                APLValue::Str(s) => Ok(Rc::new(APLValue::Str(s.trim_end().to_string()))),
+                other => Err(AplError::runtime(format!(
+                    "s:trimRight requires a string, got: {}",
+                    other.format_value()
+                ))),
+            },
+            "s:trim" => match right_val.as_ref() {
+                APLValue::Str(s) => Ok(Rc::new(APLValue::Str(s.trim().to_string()))),
+                other => Err(AplError::runtime(format!(
+                    "s:trim requires a string, got: {}",
+                    other.format_value()
+                ))),
+            },
             "÷" | "/" => match left_val {
                 None => self.scalar1(right_val, |x| x.recip(), "÷"),
                 Some(_) => self.num2(left_val, right_val, |a, b| a.div(b), "÷"),
@@ -1771,6 +1829,8 @@ impl Engine {
     }
 
     /// Resolve a charset name from a left-arg symbol/string (`UTF8`, `UTF16`, …).
+    /// A keyword-namespace symbol (`:UTF16`) is already converted to a `Str` by the
+    /// evaluator, so here it arrives as a plain string.
     fn unicode_charset(&self, v: &APLValue) -> Result<Charset, AplError> {
         let name = match v {
             APLValue::Str(s) => s.clone(),
@@ -1784,9 +1844,8 @@ impl Engine {
                 ))
             }
         };
-        Charset::from_name(&name).ok_or_else(|| {
-            AplError::runtime(format!("unicode: invalid encoding: {}", name))
-        })
+        Charset::from_name(&name)
+            .ok_or_else(|| AplError::runtime(format!("unicode: invalid encoding: {}", name)))
     }
 
     /// Dyadic `⍕` with format directives (Real Kap format.kt / FormatAPLFunction).
@@ -3946,9 +4005,12 @@ mod tests {
         // enc/dec round-trip in UTF-8 (byte vector <-> string).
         assert_eq!(eval(r#"unicode:enc "AB""#), "(65 66)");
         assert_eq!(eval(r#"unicode:dec 65 66 67"#), "ABC");
-        // enc with explicit charset (left arg as a string).
-        assert_eq!(eval(r#""UTF16" unicode:enc "A""#), "(0 65)");
+        // enc with explicit charset (left arg as a string). Plain UTF16 prefixes a BOM
+        // (0xFE 0xFF) like Kotlin's default; UTF32 is big-endian.
+        assert_eq!(eval(r#""UTF16" unicode:enc "A""#), "(254 255 0 65)");
         assert_eq!(eval(r#""UTF32" unicode:enc "A""#), "(0 0 0 65)");
+        // astral-plane characters have Unicode names too (curated subset).
+        assert_eq!(eval(r#"unicode:toNames @𝒟"#), "MATHEMATICAL FRAKTUR CAPITAL D");
         // non-integers cannot be characters.
         assert!(Engine::new().eval_string(r#"unicode:fromCodepoints 1.5"#).is_err());
         assert!(Engine::new().eval_string(r#"unicode:fromCodepoints 0.5"#).is_err());
