@@ -341,6 +341,18 @@ fn curated_kap_parity() {
         ("⍕@a", "\"a\""),
         ("⍕\"foo\"", "\"foo\""),
         ("⍕8", "\"8\""),
+        // Dyadic `⍕` format directives (Real Kap format.kt / FormatAPLFunction)
+        // Each `$s`/`$h` consumes ONE right-arg element; results are Str (quoted).
+        ("\"$s a $s b\"⍕(1 2)", "\"1 a 2 b\""),
+        ("\"$10s\"⍕\"abc\"", "\"       abc\""),
+        ("\"$h\"⍕\"a<b&c\"", "\"a&lt;b&amp;c\""),
+        ("\"f=$¯5s g=$5s\"⍕(1 2)", "\"f=1     g=    2\""),
+        ("\"$s\"⍕(2 2⍴⍳4)", "(\"0\" \"2\")"),
+        ("\"a$sfoo$sbar\"⍕(3 2⍴⍳6)", "(\"a0foo1bar\" \"a2foo3bar\" \"a4foo5bar\")"),
+        ("\"$9s\"⍕\"abcdef\"", "\"   abcdef\""),
+        ("\"$¯9s\"⍕\"abcdef\"", "\"abcdef   \""),
+        ("\"$h\"⍕\"x&y<z>\"", "\"x&amp;y&lt;z&gt;\""),
+        ("\"%s %s\"⍕(1 2)", "\"%s %s\""),
         ("⍎\"123\"", "123"),
         ("⍎\"1/2\"", "1r2"),
         // Indexing into a string (bracket indexing) — returns char scalars.

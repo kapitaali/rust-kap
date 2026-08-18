@@ -831,10 +831,15 @@ impl Engine {
             "⍕" | "format" => {
                 // Monadic format-to-string: render any value as a `Str`.
                 // Kap: ⍕8 => "8", ⍕@a => "a", ⍕"foo" => "foo", ⍕⍬ => "" (empty).
-                if let APLValue::Null = right_val.as_ref() {
-                    Ok(Rc::new(APLValue::Str(String::new())))
+                if left_val.is_none() {
+                    if let APLValue::Null = right_val.as_ref() {
+                        Ok(Rc::new(APLValue::Str(String::new())))
+                    } else {
+                        Ok(Rc::new(APLValue::Str(right_val.format_value())))
+                    }
                 } else {
-                    Ok(Rc::new(APLValue::Str(right_val.format_value())))
+                    // Dyadic format with directives: left is format string, right is args.
+                    self.format_with_directives(&left_val.unwrap().format_value(), right_val)
                 }
             }
             "⍎" | "execute" => {
@@ -1782,6 +1787,208 @@ impl Engine {
         Charset::from_name(&name).ok_or_else(|| {
             AplError::runtime(format!("unicode: invalid encoding: {}", name))
         })
+    }
+
+    /// Dyadic `⍕` with format directives (Real Kap format.kt / FormatAPLFunction).
+    /// Format directives: `$s` (string value), `$h` (HTML-escaped string), and
+    /// `$$` (literal `$`). An optional integer width precedes the directive letter:
+    /// e.g. `$10s` left-pads, `$¯5s` right-pads (Kap uses `¯` for the negative sign).
+    /// The right argument is arrayified; rank 1 yields a single formatted string,
+    /// rank N≥2 yields a nested array of strings with the last axis consumed per row.
+    fn format_with_directives(
+        &self,
+        fmt: &str,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        use std::rc::Rc;
+
+        // Parse the format string into segments. Mirrors Kotlin's FormatCompiler: a
+        // `$` introduces a directive; a second `$` is a literal `$`. Only `s` and `h`
+        // are valid directive letters; anything else is a parse error.
+        #[derive(Debug, Clone)]
+        enum FmtPart {
+            Lit(String),
+            Dir { spec: String, kind: char },
+        }
+        let mut parts = Vec::new();
+        let chars: Vec<char> = fmt.chars().collect();
+        let mut i = 0usize;
+        let mut lit = String::new();
+        while i < chars.len() {
+            let c = chars[i];
+            if c == '$' {
+                if i + 1 >= chars.len() {
+                    return Err(AplError::runtime(
+                        "End of string while parsing format specifier".into(),
+                    ));
+                }
+                if !lit.is_empty() {
+                    parts.push(FmtPart::Lit(lit.clone()));
+                    lit = String::new();
+                }
+                let code = chars[i + 1];
+                i += 2;
+                if code == '$' {
+                    // `$$` -> literal '$'
+                    lit.push('$');
+                } else {
+                    // `code` is either the first spec char (if non-letter) or the
+                    // directive letter itself (if a letter). Accumulate spec chars
+                    // until a letter is reached; that letter is the directive kind
+                    // (Kotlin FormatCompiler.processDirective).
+                    let mut spec = String::new();
+                    let mut kind = code;
+                    if !code.is_ascii_alphabetic() {
+                        spec.push(code);
+                        while i < chars.len() && !chars[i].is_ascii_alphabetic() {
+                            spec.push(chars[i]);
+                            i += 1;
+                        }
+                        if i >= chars.len() {
+                            return Err(AplError::runtime(
+                                "End of string while parsing format specifier".into(),
+                            ));
+                        }
+                        kind = chars[i];
+                        i += 1;
+                    }
+                    if kind != 's' && kind != 'h' {
+                        return Err(AplError::runtime(format!(
+                            "Undefined directive: '{}'",
+                            kind
+                        )));
+                    }
+                    if kind == 'h' && !spec.is_empty() {
+                        return Err(AplError::runtime(
+                            "'h' directive does not accept arguments".into(),
+                        ));
+                    }
+                    parts.push(FmtPart::Dir { spec, kind });
+                }
+            } else {
+                lit.push(c);
+                i += 1;
+            }
+        }
+        if !lit.is_empty() {
+            parts.push(FmtPart::Lit(lit));
+        }
+
+        // Arrayify the right argument and split into row-major chunks. Each row consumes
+        // `row_width` elements (the last axis of the array).
+        let right = right_val.force(self)?;
+        let (flat, row_width, rank) = match right.as_ref() {
+            APLValue::Array(a) => {
+                let elems: Vec<AplRef<APLValue>> = a
+                    .elements()
+                    .iter()
+                    .map(|e| Rc::new(e.as_ref().clone()))
+                    .collect();
+                let dims = right.dimensions();
+                if dims.is_empty() {
+                    (vec![Rc::new(APLValue::Null)], 1, 0usize)
+                } else if dims.len() == 1 {
+                    (elems, dims[0], 1)
+                } else {
+                    let rw = dims[dims.len() - 1];
+                    (elems, rw, dims.len())
+                }
+            }
+            other => (vec![Rc::new(other.clone())], 1, 0),
+        };
+
+        // Parse a Kap integer spec (supports `¯` negative sign), per Kotlin parseBigInt.
+        let parse_spec = |spec: &str| -> Result<i64, AplError> {
+            let s = spec.trim();
+            if s.is_empty() {
+                return Ok(0);
+            }
+            let neg = s.starts_with('¯');
+            let digits_start = if neg {
+                s.char_indices().nth(1).map(|(i, _)| i).unwrap_or(s.len())
+            } else {
+                0
+            };
+            let digits = &s[digits_start..];
+            if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+                return Err(AplError::runtime(format!("invalid format padding: {}", spec)));
+            }
+            let n: i64 = digits.parse().unwrap_or(0);
+            Ok(if neg { -n } else { n })
+        };
+
+        // Render a single row (a slice of `flat` of length `row_width`).
+        let render_row = |row: &[AplRef<APLValue>]| -> Result<String, AplError> {
+            let mut arg_index = 0usize;
+            let mut out = String::new();
+            for part in &parts {
+                match part {
+                    FmtPart::Lit(s) => out.push_str(s),
+                    FmtPart::Dir { spec, kind } => {
+                        if arg_index >= row.len() {
+                            return Err(AplError::runtime(format!(
+                                "format: too few arguments (need {}, got {})",
+                                parts
+                                    .iter()
+                                    .filter(|p| matches!(p, FmtPart::Dir { .. }))
+                                    .count(),
+                                row.len()
+                            )));
+                        }
+                        let val = &row[arg_index];
+                        let rendered = match kind {
+                            's' => val.format_value(),
+                            'h' => {
+                                // HTML escape: & < > only (Kotlin HTML_SUBSTITUTION_MAP)
+                                val.format_value()
+                                    .replace('&', "&amp;")
+                                    .replace('<', "&lt;")
+                                    .replace('>', "&gt;")
+                            }
+                            _ => unreachable!(),
+                        };
+                        let width = parse_spec(spec)?;
+                        if width > 0 {
+                            let pad = (width as usize).saturating_sub(rendered.chars().count());
+                            out.push_str(&" ".repeat(pad));
+                            out.push_str(&rendered);
+                        } else if width < 0 {
+                            let pad = (width.unsigned_abs() as usize)
+                                .saturating_sub(rendered.chars().count());
+                            out.push_str(&rendered);
+                            out.push_str(&" ".repeat(pad));
+                        } else {
+                            out.push_str(&rendered);
+                        }
+                        arg_index += 1;
+                    }
+                }
+            }
+            Ok(out)
+        };
+
+        let result = if rank >= 2 {
+            // Higher rank: drop the last axis; one formatted string per row.
+            let num_rows = flat.len() / row_width;
+            let rows: Vec<AplRef<APLValue>> = (0..num_rows)
+                .map(|r| {
+                    let start = r * row_width;
+                    let end = start + row_width;
+                    let s = render_row(&flat[start..end])?;
+                    Ok(Rc::new(APLValue::Str(s)))
+                })
+                .collect::<Result<Vec<_>, AplError>>()?;
+            let new_dims = {
+                let mut d = right.dimensions();
+                d.pop();
+                d
+            };
+            APLValue::Array(Rc::new(KapArray::new(new_dims, ArrayData::Nested(rows))))
+        } else {
+            APLValue::Str(render_row(&flat)?)
+        };
+
+        Ok(Rc::new(result))
     }
 
     fn num2(
@@ -3745,5 +3952,43 @@ mod tests {
         // non-integers cannot be characters.
         assert!(Engine::new().eval_string(r#"unicode:fromCodepoints 1.5"#).is_err());
         assert!(Engine::new().eval_string(r#"unicode:fromCodepoints 0.5"#).is_err());
+    }
+
+    // --- Strings: dyadic `⍕` format directives (Real Kap format.kt) ---
+
+    // `format_display` (REPL form: nested strings stay quoted, e.g. `("0 1" "2 3")`)
+    // is the faithful renderer here; the shared `eval()` uses `format_value()` (the
+    // quote-free internal renderer) which collapses nested string arrays lossily.
+    fn eval_display(src: &str) -> String {
+        let e = Engine::new();
+        let v = e.eval_string(src).expect("eval failed");
+        v.format_display()
+    }
+
+    #[test]
+    fn eval_format_directives() {
+        // `$s` places a plain-rendered argument; one argument per directive.
+        // Results are Str values, so `format_display` quotes them.
+        assert_eq!(eval_display(r#""$s a $s b"⍕(1 2)"#), "\"1 a 2 b\"");
+        assert_eq!(eval_display(r#""$s a $s b"⍕"x" "y""#), "\"x a y b\"");
+        // `$s` with a rank-2 arg yields a nested array of per-row strings;
+        // each directive consumes one element per row (Kotlin FormatAPLFunction).
+        // Two `$s` in a row consume both elements of each 2-wide row.
+        assert_eq!(eval_display(r#""$s $s"⍕(2 2⍴⍳4)"#), "(\"0 1\" \"2 3\")");
+        assert_eq!(
+            eval_display(r#""a$sfoo$sbar"⍕(3 2⍴⍳6)"#),
+            "(\"a0foo1bar\" \"a2foo3bar\" \"a4foo5bar\")"
+        );
+        // Padding: positive width left-pads, negative (¯) right-pads.
+        assert_eq!(eval_display(r#""$10s"⍕"abc""#), "\"       abc\"");
+        assert_eq!(eval_display(r#""$¯5s"⍕1"#), "\"1    \"");
+        assert_eq!(eval_display(r#""$5s"⍕"x""#), "\"    x\"");
+        // `$h` HTML-escapes the argument (& → &amp;, < → &lt;, > → &gt;).
+        assert_eq!(eval_display(r#""$h"⍕"a<b&c""#), "\"a&lt;b&amp;c\"");
+        // `$$` is a literal `$`; a format string with no directives passes through.
+        assert_eq!(eval_display(r#""$$"⍕10"#), "\"$\"");
+        assert_eq!(eval_display(r#""no directives"⍕"ignored""#), "\"no directives\"");
+        // Left/right padding coexist in one pattern.
+        assert_eq!(eval_display(r#""f=$¯5s g=$5s"⍕(1 2)"#), "\"f=1     g=    2\"");
     }
 }
