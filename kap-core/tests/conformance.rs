@@ -412,6 +412,39 @@ fn curated_kap_parity() {
     ];
 
     let mut failures = Vec::new();
+    // --- Symbols (Kotlin SymbolTest.kt: ${ns}:${name} rendering + int: builtins) ---
+    {
+        let symbol_cases: Vec<(&str, &str)> = vec![
+            // A bare `'foo` literal is a symbol value in the default namespace.
+            ("'foo", "default:foo"),
+            // `int:symbolName` returns a 2-element vector [name, namespace] (Kap pair form).
+            ("int:symbolName 'foo", "(\"foo\" \"default\")"),
+            ("int:symbolName 'abc", "(\"abc\" \"default\")"),
+            // A parenthesised symbol value also round-trips through the paren-group path.
+            ("int:symbolName ('abc')", "(\"abc\" \"default\")"),
+            // `int:intern` (dyadic) builds a symbol: name is the right arg, namespace the left.
+            ("\"foo\" int:intern \"bar\"", "foo:bar"),
+            ("\"ns\" int:intern \"sym\"", "ns:sym"),
+            // Symbols compare by name+namespace via `≡` (deep_equal).
+            ("'foo ≡ 'foo", "1"),
+            ("'foo ≡ 'bar", "0"),
+        ];
+        for (expr, expected) in symbol_cases {
+            match engine.eval_string(expr) {
+                Ok(v) => {
+                    let got = v.format_display();
+                    if &got != expected {
+                        failures.push(format!(
+                            "MISMATCH  {expr:?}  expected {expected:?} got {got:?}"
+                        ));
+                    }
+                }
+                Err(e) => {
+                    failures.push(format!("ERROR    {expr:?}  -> {e}"));
+                }
+            }
+        }
+    }
     for (expr, expected) in cases {
         // Render with `format_display` (REPL form: strings quoted, `⍬` for null, `@` for
         // char) to match Real Kap's reference output, not the bare `format_value` used by

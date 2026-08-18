@@ -110,6 +110,7 @@ impl<'a> Parser<'a> {
                                     | "toUpper" | "toNames" | "enc" | "dec"
                             ))
                         || (ns == "s" && matches!(base, "trimLeft" | "trimRight" | "trim"))
+                        || (ns == "int" && matches!(base, "intern" | "symbolName"))
                 }
                 None => false,
             }
@@ -1204,6 +1205,13 @@ impl<'a> Parser<'a> {
                         self.advance();
                         self.skip_newlines();
                     }
+                    Some(Token::Literal(LiteralValue::SymbolValue { .. })) => {
+                        // A symbol *value* (`'abc`) is always a value member of a
+                        // paren-train — it is data, never a function.
+                        kinds.push(Kind::Value);
+                        self.advance();
+                        self.skip_newlines();
+                    }
                     Some(Token::LambdaToken)
                     | Some(Token::ComposeToken)
                     | Some(Token::ReverseComposeToken)
@@ -1578,6 +1586,11 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Instr::Symbol { name, namespace })
             }
+            Token::Literal(LiteralValue::SymbolValue { name }) => {
+                let name = name.clone();
+                self.advance();
+                Ok(Instr::SymbolValue { name })
+            }
             Token::OpenParen => {
                 // Nested train or group of functions.
                 self.advance();
@@ -1625,6 +1638,11 @@ impl<'a> Parser<'a> {
                 let namespace = namespace.clone();
                 self.advance();
                 Ok(Instr::Symbol { name, namespace })
+            }
+            Token::Literal(LiteralValue::SymbolValue { name }) => {
+                let name = name.clone();
+                self.advance();
+                Ok(Instr::SymbolValue { name })
             }
             Token::ApplyToken => {
                 // Kap's `⍞name`: a *dynamic* function reference. Unlike a plain symbol

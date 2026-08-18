@@ -76,6 +76,15 @@ pub enum APLValue {
         body: AplRef<ast::Instr>,
         env: AplRef<Environment>,
     },
+    /// A first-class **symbol** value (Kap `APLSymbol` wrapping a `Symbol`).
+    /// Created by the `'foo` literal and `int:intern`; read by `int:symbolName`.
+    /// `namespace` is `None` for the default namespace, `Some("keyword")` for the
+    /// `:foo` keyword form. Distinct from `Str` (symbols are interned, comparable
+    /// by name+namespace, and render as `ns:name`).
+    Symbol {
+        name: String,
+        namespace: Option<String>,
+    },
 }
 
 impl APLValue {
@@ -106,6 +115,11 @@ impl APLValue {
             APLValue::Deferred { .. } => "<deferred>".to_string(),
             APLValue::UserFn { .. } => "<function>".to_string(),
             APLValue::UserOp { .. } => "<operator>".to_string(),
+            APLValue::Symbol { name, namespace } => match namespace {
+                Some(ns) if ns == "keyword" => format!(":{}", name),
+                Some(ns) => format!("{}:{}", ns, name),
+                None => format!("default:{}", name),
+            },
         }
     }
 
@@ -150,6 +164,11 @@ impl APLValue {
             APLValue::Deferred { .. } => "<deferred>".to_string(),
             APLValue::UserFn { .. } => "<function>".to_string(),
             APLValue::UserOp { .. } => "<operator>".to_string(),
+            APLValue::Symbol { name, namespace } => match namespace {
+                Some(ns) if ns == "keyword" => format!(":{}", name),
+                Some(ns) => format!("{}:{}", ns, name),
+                None => format!("default:{}", name),
+            },
         }
     }
 

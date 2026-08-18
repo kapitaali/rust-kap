@@ -16,6 +16,9 @@ pub enum Instr {
     Literal(LiteralValue),
     /// A variable / function name reference. `namespace` is `Some` for `foo:bar`.
     Symbol { name: String, namespace: Option<String> },
+    /// A quoted **symbol value** literal (`'foo`): evaluates to `APLValue::Symbol`
+    /// (Kotlin `parser.kt` SymbolValue). Distinct from `Symbol` (a name reference).
+    SymbolValue { name: String },
     /// Monadic or dyadic function application: `f x` (monadic) or `a f b` (dyadic).
     /// `fn_expr` is the function (a Symbol or parenthesised expr); `left`/`right` are args.
     Apply {

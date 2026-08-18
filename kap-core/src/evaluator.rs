@@ -404,6 +404,13 @@ impl Engine {
             Instr::Literal(LiteralValue::Char(c)) => Ok(Rc::new(APLValue::Char(*c))),
             Instr::Literal(LiteralValue::Str(s)) => Ok(Rc::new(APLValue::Str(s.clone()))),
             Instr::Literal(LiteralValue::Symbol { .. }) => Err(AplError::runtime("lone symbol literal".into())),
+            Instr::Literal(LiteralValue::SymbolValue { .. }) => Err(AplError::runtime("lone symbol-value literal".into())),
+            Instr::SymbolValue { name } => {
+                Ok(Rc::new(APLValue::Symbol {
+                    name: name.clone(),
+                    namespace: None,
+                }))
+            }
             Instr::Empty => Ok(Rc::new(APLValue::Null)),
             Instr::Symbol { name, namespace } => {
                 // A keyword-namespace symbol (`:UTF16`, `:pretty`, …) is a value, not a
@@ -684,6 +691,7 @@ impl Engine {
             APLValue::UserFn { .. } => true,
             APLValue::UserOp { .. } => true,
             APLValue::Deferred { .. } => false,
+            APLValue::Symbol { .. } => true,
         }
     }
 
@@ -945,6 +953,56 @@ impl Engine {
                     other.format_value()
                 ))),
             },
+            // `int:intern` (dyadic): `"ns" int:intern "name"` -> Symbol{name, ns}.
+            // `int:symbolName` (monadic): `'foo:bar` -> `(bar foo)` vector of
+            // [name, namespace]. Mirrors Kotlin `symbol.kt`.
+            "int:intern" => {
+                let ns_name = match left_val.as_ref() {
+                    Some(v) => v.format_value(),
+                    None => "default".to_string(),
+                };
+                let name = match right_val.as_ref() {
+                    APLValue::Str(s) => s.clone(),
+                    APLValue::Char(c) => c.to_string(),
+                    other => {
+                        return Err(AplError::runtime(format!(
+                            "int:intern name must be a string/char, got: {}",
+                            other.format_value()
+                        )))
+                    }
+                };
+                let namespace = if ns_name == "keyword" {
+                    Some("keyword".to_string())
+                } else if ns_name == "default" {
+                    None
+                } else {
+                    Some(ns_name)
+                };
+                Ok(Rc::new(APLValue::Symbol { name, namespace }))
+            }
+            "int:symbolName" => {
+                let sym = match right_val.as_ref() {
+                    APLValue::Symbol { name, namespace } => (name.clone(), namespace.clone()),
+                    other => {
+                        return Err(AplError::runtime(format!(
+                            "int:symbolName requires a symbol, got: {}",
+                            other.format_value()
+                        )))
+                    }
+                };
+                let ns_name = match &sym.1 {
+                    Some(ns) => ns.clone(),
+                    None => "default".to_string(),
+                };
+                let arr = KapArray::new(
+                    vec![2],
+                    ArrayData::Nested(vec![
+                        Rc::new(APLValue::Str(sym.0)),
+                        Rc::new(APLValue::Str(ns_name)),
+                    ]),
+                );
+                Ok(Rc::new(APLValue::Array(Rc::new(arr))))
+            }
             "÷" | "/" => match left_val {
                 None => self.scalar1(right_val, |x| x.recip(), "÷"),
                 Some(_) => self.num2(left_val, right_val, |a, b| a.div(b), "÷"),
@@ -3122,6 +3180,9 @@ impl Engine {
             APLValue::Number(n) => Ok(Instr::Literal(LiteralValue::Number(n.clone()))),
             APLValue::Char(c) => Ok(Instr::Literal(LiteralValue::Char(*c))),
             APLValue::Str(s) => Ok(Instr::Literal(LiteralValue::Str(s.clone()))),
+            APLValue::Symbol { name, namespace } => Ok(Instr::SymbolValue {
+                name: name.clone(),
+            }),
             APLValue::Array(a) => {
                 let mut elems = Vec::with_capacity(a.element_count());
                 for e in a.elements() {
@@ -3349,6 +3410,9 @@ impl Engine {
             (APLValue::Char(x), APLValue::Char(y)) => x == y,
             (APLValue::Str(x), APLValue::Str(y)) => x == y,
             (APLValue::Null, APLValue::Null) => true,
+            (APLValue::Symbol { name: n1, namespace: ns1 }, APLValue::Symbol { name: n2, namespace: ns2 }) => {
+                n1 == n2 && ns1 == ns2
+            }
             (APLValue::Array(x), APLValue::Array(y)) => {
                 if x.dimensions != y.dimensions {
                     return false;

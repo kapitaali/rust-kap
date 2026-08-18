@@ -114,6 +114,30 @@ pub fn tokenise(src: &str) -> Vec<SpannedToken> {
             col += consumed;
             continue;
         }
+        // symbol literal: `'foo` -> a *symbol value* (distinct from a variable
+        // reference). Emitted as `LiteralValue::SymbolValue` so the parser builds an
+        // `Instr::SymbolValue` that evaluates to `APLValue::Symbol` (Kotlin SymbolValue).
+        if c == '\'' {
+            let mut j = i + 1;
+            let mut name = String::new();
+            while j < chars.len() && chars[j] != '\'' && !chars[j].is_whitespace() {
+                name.push(chars[j]);
+                j += 1;
+            }
+            // Consume the closing `'` if present.
+            if j < chars.len() && chars[j] == '\'' {
+                j += 1;
+            }
+            out.push(SpannedToken {
+                token: Token::Literal(LiteralValue::SymbolValue { name: name.clone() }),
+                line: start_line,
+                col: start_col,
+            });
+            let consumed = j.saturating_sub(i).max(1);
+            i = j;
+            col += consumed;
+            continue;
+        }
         // single-char punctuation / symbols
         if let Some(tok) = single_char_token(c) {
             out.push(SpannedToken { token: tok, line: start_line, col: start_col });

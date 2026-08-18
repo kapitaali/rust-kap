@@ -16,6 +16,9 @@ pub enum LiteralValue {
     Str(String),
     /// Symbol name, with optional explicit namespace (`foo:bar` -> name=bar, ns=foo).
     Symbol { name: String, namespace: Option<String> },
+    /// A quoted **symbol value** literal (`'foo`): evaluates to an `APLValue::Symbol`
+    /// rather than being a variable reference. (Kotlin: `parser.kt` SymbolValue.)
+    SymbolValue { name: String },
 }
 
 /// All Kap token kinds.
