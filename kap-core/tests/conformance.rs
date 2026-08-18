@@ -454,16 +454,17 @@ fn curated_kap_parity() {
             }
         }
     }
-    // --- Types: `typeof` (Kotlin TypesTest.kt) returns a symbol naming the Kap class. ---
+    // --- Types: `typeof` (Kotlin TypesTest.kt) returns a symbol in the `kap` namespace
+    //     naming the Kap class (lowercase, e.g. `kap:array`, `kap:symbol`). ---
     {
         let type_cases: Vec<(&str, &str)> = vec![
-            ("typeof 10", "default:INTEGER"),
-            ("typeof 1.2", "default:FLOAT"),
-            ("typeof 1÷5", "default:RATIONAL"),
-            ("typeof \"x\"", "default:STRING"),
-            ("typeof @a", "default:CHAR"),
-            ("typeof 1 2 3", "default:ARRAY"),
-            ("typeof 'foo", "default:SYMBOL"),
+            ("typeof 10", "kap:integer"),
+            ("typeof 1.2", "kap:float"),
+            ("typeof 1÷5", "kap:rational"),
+            ("typeof \"x\"", "kap:string"),
+            ("typeof @a", "kap:char"),
+            ("typeof 1 2 3", "kap:array"),
+            ("typeof 'foo", "kap:symbol"),
         ];
         for (expr, expected) in type_cases {
             match engine.eval_string(expr) {

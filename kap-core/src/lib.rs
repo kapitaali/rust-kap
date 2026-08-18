@@ -95,24 +95,25 @@ impl APLValue {
     /// Kap class name for the `typeof` builtin (Kotlin `SystemClass` names:
     /// `INTEGER`, `FLOAT`, `COMPLEX`, `RATIONAL`, `CHAR`, `ARRAY`, `SYMBOL`,
     /// `LAMBDA_FN`, `LIST`, `MAP`, …). Returns the bare class name; the `typeof`
-    /// builtin wraps it in a `Symbol`.
+    /// Kap class name for the `typeof` builtin (Kotlin `SystemClass` names, lowercase,
+    /// e.g. `integer`, `float`, `array`, `symbol`, `char`, `string`, `list`, `map`).
     pub fn class_name(&self) -> &'static str {
         match self {
             APLValue::Number(n) => match n {
-                KapNumber::Long(_) => "INTEGER",
-                KapNumber::Double(_) => "FLOAT",
-                KapNumber::BigInt(_) => "INTEGER",
-                KapNumber::Rational(_) => "RATIONAL",
-                KapNumber::Complex(_, _) => "COMPLEX",
+                KapNumber::Long(_) => "integer",
+                KapNumber::Double(_) => "float",
+                KapNumber::BigInt(_) => "integer",
+                KapNumber::Rational(_) => "rational",
+                KapNumber::Complex(_, _) => "complex",
             },
-            APLValue::Char(_) => "CHAR",
-            APLValue::Str(_) => "STRING",
-            APLValue::Array(_) => "ARRAY",
-            APLValue::Null => "NULL",
-            APLValue::Deferred { .. } => "DEFERRED",
-            APLValue::UserFn { .. } => "LAMBDA_FN",
-            APLValue::UserOp { .. } => "OPERATOR",
-            APLValue::Symbol { .. } => "SYMBOL",
+            APLValue::Char(_) => "char",
+            APLValue::Str(_) => "string",
+            APLValue::Array(_) => "array",
+            APLValue::Null => "null",
+            APLValue::Deferred { .. } => "deferred",
+            APLValue::UserFn { .. } => "lambda",
+            APLValue::UserOp { .. } => "operator",
+            APLValue::Symbol { .. } => "symbol",
         }
     }
 

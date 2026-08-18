@@ -1050,10 +1050,12 @@ impl Engine {
             // a default-namespace symbol as `default:NAME` (see `format_value`).
             "typeof" => {
                 let v = right_val.force(self)?;
+                // Real Kap returns the class name as a *symbol in the `kap` namespace*
+                // (lowercase, e.g. `kap:array`, `kap:symbol`).
                 let name = v.class_name().to_string();
                 Ok(Rc::new(APLValue::Symbol {
                     name,
-                    namespace: None,
+                    namespace: Some("kap".to_string()),
                 }))
             }
             // --- Namespace directives (Kotlin `namespace`/`import`/`declare`). ---
