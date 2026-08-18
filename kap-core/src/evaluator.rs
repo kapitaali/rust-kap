@@ -1190,6 +1190,16 @@ impl Engine {
             "∨" => self.bool2(left_val, right_val, |a, b| a | b, "∨"),
             "~" | "not" => self.scalar1(right_val, |x| x.not(), "~"),
             "∊" | "in" => self.membership(left_val, right_val),
+            // `∪` unique/union (Kotlin unique.kt): monadic → unique; dyadic → union.
+            "∪" | "unique" => match left_val {
+                None => self.unique(right_val),
+                Some(l) => self.union(l, right_val),
+            },
+            // `∩` intersection (Kotlin unique.kt IntersectionAPLFunction): dyadic.
+            "∩" | "intersection" => match left_val {
+                None => Err(AplError::runtime("∩ requires two args".into())),
+                Some(l) => self.intersection(l, right_val),
+            },
             "⍋" | "grade" => self.grade_up(right_val),
             "⊤" | "encode" => self.encode(left_val, right_val),
             "⊥" | "decode" => self.decode(left_val, right_val),
@@ -1377,7 +1387,7 @@ impl Engine {
             "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"
                 | "↑" | "↓" | "⊂" | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥"
-                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof"
+                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩"
         )
     }
 
@@ -3642,6 +3652,183 @@ impl Engine {
             vec![out.len()],
             ArrayData::Nested(out),
         )))))
+    }
+
+    /// `∪`: monadic unique. Faithful to Kotlin `UniqueFunction` (unique.kt).
+    /// - `⍬` → `⍬`.
+    /// - scalar → a length-1 vector (`∪ 1` → `(1)`).
+    /// - string → a string of its unique chars (order-preserving).
+    /// - vector → unique elements, first-seen order preserved.
+    /// Membership is keyed by `type_qualified_key` so `1` ≠ `1.0`.
+    fn unique(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        let r = right_val.force(self)?;
+        if r.is_null() {
+            return Ok(Rc::new(APLValue::Null));
+        }
+        if let APLValue::Str(s) = r.as_ref() {
+            let mut seen = std::collections::HashSet::new();
+            let mut out = String::new();
+            for c in s.chars() {
+                let key = Self::type_qualified_key(&APLValue::Char(c));
+                if seen.insert(key) {
+                    out.push(c);
+                }
+            }
+            return Ok(Rc::new(APLValue::Str(out)));
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut out: Vec<AplRef<APLValue>> = Vec::new();
+        for m in self.members_of(&r) {
+            let key = Self::type_qualified_key(m.as_ref());
+            if seen.insert(key) {
+                out.push(m);
+            }
+        }
+        if out.is_empty() {
+            return Ok(Rc::new(APLValue::Null));
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![out.len()],
+            ArrayData::Nested(out),
+        )))))
+    }
+
+    /// `∪`: dyadic union. Faithful to Kotlin `UniqueFunction.computeVectorResult`.
+    /// Preserves left's elements/order, appends right elements whose key is not
+    /// already present in the left. A `⍬` (Null) operand yields the other operand.
+    /// Strings concatenate char-wise (unique per char on the right side).
+    fn union(
+        &self,
+        left_val: AplRef<APLValue>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let l = left_val.force(self)?;
+        let r = right_val.force(self)?;
+        // Null operand → the other side, unchanged (Kotlin `emptyRightArgument`/`a`).
+        if l.is_null() {
+            return Ok(r.clone());
+        }
+        if r.is_null() {
+            return Ok(l.clone());
+        }
+        if let (APLValue::Str(s1), APLValue::Str(s2)) = (l.as_ref(), r.as_ref()) {
+            let mut seen = std::collections::HashSet::new();
+            let mut out = String::new();
+            for c in s1.chars() {
+                let key = Self::type_qualified_key(&APLValue::Char(c));
+                seen.insert(key);
+                out.push(c);
+            }
+            for c in s2.chars() {
+                let key = Self::type_qualified_key(&APLValue::Char(c));
+                if seen.insert(key) {
+                    out.push(c);
+                }
+            }
+            return Ok(Rc::new(APLValue::Str(out)));
+        }
+        let a = self.members_of(&l);
+        let b = self.members_of(&r);
+        let mut seen = std::collections::HashSet::new();
+        let mut out: Vec<AplRef<APLValue>> = Vec::new();
+        for m in &a {
+            let key = Self::type_qualified_key(m.as_ref());
+            seen.insert(key);
+            out.push(m.clone());
+        }
+        for m in &b {
+            let key = Self::type_qualified_key(m.as_ref());
+            if seen.insert(key) {
+                out.push(m.clone());
+            }
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![out.len()],
+            ArrayData::Nested(out),
+        )))))
+    }
+
+    /// `∩`: dyadic intersection. Faithful to Kotlin `IntersectionAPLFunction`.
+    /// Preserves the left argument's order and duplicates for matched elements.
+    /// A `⍬` (Null) operand yields `⍬`. Strings intersect char-wise.
+    fn intersection(
+        &self,
+        left_val: AplRef<APLValue>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let l = left_val.force(self)?;
+        let r = right_val.force(self)?;
+        if l.is_null() || r.is_null() {
+            return Ok(Rc::new(APLValue::Null));
+        }
+        if let (APLValue::Str(s1), APLValue::Str(s2)) = (l.as_ref(), r.as_ref()) {
+            let mut seen_b = std::collections::HashSet::new();
+            for c in s2.chars() {
+                seen_b.insert(Self::type_qualified_key(&APLValue::Char(c)));
+            }
+            let mut out = String::new();
+            for c in s1.chars() {
+                let key = Self::type_qualified_key(&APLValue::Char(c));
+                if seen_b.contains(&key) {
+                    out.push(c);
+                }
+            }
+            return Ok(Rc::new(APLValue::Str(out)));
+        }
+        let a = self.members_of(&l);
+        let b = self.members_of(&r);
+        let b_keys: std::collections::HashSet<String> =
+            b.iter().map(|m| Self::type_qualified_key(m.as_ref())).collect();
+        let mut out: Vec<AplRef<APLValue>> = Vec::new();
+        for m in &a {
+            let key = Self::type_qualified_key(m.as_ref());
+            if b_keys.contains(&key) {
+                out.push(m.clone());
+            }
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![out.len()],
+            ArrayData::Nested(out),
+        )))))
+    }
+
+    /// Flat members of a value for set operations: scalars → 1 element, strings →
+    /// chars, arrays → their (ravelled) elements, `⍬` → empty.
+    fn members_of(&self, v: &APLValue) -> Vec<AplRef<APLValue>> {
+        match v {
+            APLValue::Null => Vec::new(),
+            APLValue::Str(s) => s.chars().map(|c| Rc::new(APLValue::Char(c))).collect(),
+            APLValue::Array(a) => a.elements(),
+            other => vec![Rc::new(other.clone())],
+        }
+    }
+
+    /// Type-qualified membership key (mirrors Kotlin `makeTypeQualifiedKey`): two
+    /// values hash/eq the same only when both type AND value match, so `1` (Long)
+    /// and `1.0` (Double) are distinct keys.
+    fn type_qualified_key(v: &APLValue) -> String {
+        match v {
+            APLValue::Number(n) => match n {
+                KapNumber::Long(_) => format!("L:{}", n.format(false)),
+                KapNumber::Double(_) => format!("D:{}", n.format(false)),
+                KapNumber::BigInt(_) => format!("B:{}", n.format(false)),
+                KapNumber::Rational(_) => format!("R:{}", n.format(false)),
+                KapNumber::Complex(_, _) => format!("C:{}", n.format(false)),
+            },
+            APLValue::Char(c) => format!("c:{}", c),
+            APLValue::Str(s) => format!("s:{}", s),
+            APLValue::Null => "null".to_string(),
+            APLValue::Symbol { name, namespace } => format!("sym:{:?}:{}", namespace, name),
+            APLValue::Array(a) => {
+                let mut s = String::from("A:");
+                for e in a.elements() {
+                    s.push_str(&Self::type_qualified_key(e.as_ref()));
+                    s.push(',');
+                }
+                s
+            }
+            _ => format!("other:{}", v.format_value()),
+        }
     }
 
     /// Grade up `⍋ x`: 0-based indices that would sort `x` ascending.
