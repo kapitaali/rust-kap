@@ -130,7 +130,8 @@ impl APLValue {
                 // A 1-D vector of characters is a "string value" in Real Kap and
                 // renders as a *quoted string* (`@a @b @c` -> "abc"), not as a
                 // parenthesised `@a @b @c` list. Only the scalar Char gets `@`.
-                if a.dimensions.len() == 1
+                if !elems.is_empty()
+                    && a.dimensions.len() == 1
                     && elems.iter().all(|e| matches!(e.as_ref(), APLValue::Char(_)))
                 {
                     let s: String = elems
@@ -149,6 +150,59 @@ impl APLValue {
             APLValue::Deferred { .. } => "<deferred>".to_string(),
             APLValue::UserFn { .. } => "<function>".to_string(),
             APLValue::UserOp { .. } => "<operator>".to_string(),
+        }
+    }
+
+    // --- Array-shape accessors ---
+    // A `Str` is a rank-1 array (vector of its chars) in Kap, exactly matching
+    // Kotlin `APLBmpString.dimensions = dimensionsOfSize(content.length)`. These
+    // accessors let array primitives (rho/tally/reverse/transpose) treat `Str`
+    // uniformly with `Array` without restructuring the value (which would touch
+    // every `Str(...)` construction site). Scalars (Number/Char/Null) are rank 0.
+
+    /// Dimensions of the value. `Str` => `[len]`; scalars => `[]`; arrays => their dims.
+    pub fn dimensions(&self) -> Vec<usize> {
+        match self {
+            APLValue::Array(a) => a.dimensions.clone(),
+            APLValue::Str(s) => vec![s.chars().count()],
+            _ => vec![],
+        }
+    }
+
+    /// Rank of the value (`dimensions().len()`).
+    pub fn rank(&self) -> usize {
+        match self {
+            APLValue::Array(a) => a.dimensions.len(),
+            APLValue::Str(s) => {
+                if s.is_empty() {
+                    0
+                } else {
+                    1
+                }
+            }
+            _ => 0,
+        }
+    }
+
+    /// Total element count. `Str` => char count; scalars => 1; arrays => product of dims.
+    pub fn element_count(&self) -> usize {
+        match self {
+            APLValue::Array(a) => a.element_count(),
+            APLValue::Str(s) => s.chars().count(),
+            _ => 1,
+        }
+    }
+
+    /// Element at flat index `i`. For `Str`, returns the i-th character as a `Char`.
+    pub fn value_at(&self, i: usize) -> APLValue {
+        match self {
+            APLValue::Array(a) => a.elements().get(i).map(|e| e.as_ref().clone()).unwrap_or(APLValue::Null),
+            APLValue::Str(s) => s
+                .chars()
+                .nth(i)
+                .map(APLValue::Char)
+                .unwrap_or(APLValue::Null),
+            other => other.clone(),
         }
     }
 }

@@ -899,7 +899,7 @@ impl Engine {
             },
             "≢" | "tally" => self.tally(right_val),
             "⊃" | "first" => self.first(right_val),
-            "," => self.catenate(left_val, right_val),
+            "," | "⍪" => self.catenate(left_val, right_val),
             "⌽" | "rotateright" => self.reverse_horizontal(left_val, right_val),
             "⊖" | "rotateleft" => self.reverse_vertical(left_val, right_val),
             "⍉" => self.transpose(left_val, right_val),
@@ -1893,23 +1893,16 @@ impl Engine {
     }
 
     fn shape(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
-        match right_val.as_ref() {
-            APLValue::Array(a) => {
-                let shape: Vec<AplRef<APLValue>> = a
-                    .dimensions
-                    .iter()
-                    .map(|d| Rc::new(APLValue::Number(KapNumber::Long(*d as i64))))
-                    .collect();
-                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                    vec![shape.len()],
-                    ArrayData::Nested(shape),
-                )))))
-            }
-            _ => Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                vec![0],
-                ArrayData::Nested(vec![]),
-            ))))),
-        }
+        // A `Str` is a rank-1 array of its chars (Kotlin APLBmpString.dimensions).
+        let dims = right_val.dimensions();
+        let shape: Vec<AplRef<APLValue>> = dims
+            .iter()
+            .map(|d| Rc::new(APLValue::Number(KapNumber::Long(*d as i64))))
+            .collect();
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![shape.len()],
+            ArrayData::Nested(shape),
+        )))))
     }
 
     fn reshape(&self, left_val: AplRef<APLValue>, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
@@ -1935,6 +1928,11 @@ impl Engine {
                     return Err(AplError::runtime("reshape dimensions must be non-negative".into()));
                 }
                 dims.push(*v as usize);
+            }
+            APLValue::Str(s) => {
+                // A string as a reshape shape means its length as a single dimension
+                // (Kap: `"abc"⍴x` ≡ `(3)⍴x`).
+                dims.push(s.chars().count());
             }
             _ => return Err(AplError::runtime("reshape dimensions must be an array or integer".into())),
         }
@@ -1966,12 +1964,9 @@ impl Engine {
     }
 
     fn tally(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
-        match right_val.as_ref() {
-            APLValue::Array(a) => Ok(Rc::new(APLValue::Number(KapNumber::Long(
-                a.element_count() as i64,
-            )))),
-            _ => Ok(Rc::new(APLValue::Number(KapNumber::Long(1)))),
-        }
+        Ok(Rc::new(APLValue::Number(KapNumber::Long(
+            right_val.element_count() as i64,
+        ))))
     }
 
     fn first(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
@@ -1981,6 +1976,12 @@ impl Engine {
                 .into_iter()
                 .next()
                 .ok_or_else(|| AplError::runtime("⊃ of empty array".into())),
+            // A string is a rank-1 vector of chars; `⊃` returns its first character.
+            APLValue::Str(s) => s
+                .chars()
+                .next()
+                .map(|c| Rc::new(APLValue::Char(c)))
+                .ok_or_else(|| AplError::runtime("⊃ of empty string".into())),
             other => Ok(Rc::new(other.clone())),
         }
     }
@@ -1993,6 +1994,12 @@ impl Engine {
         let a = left_val.ok_or_else(|| {
             AplError::runtime(", needs two args".into())
         })?;
+        // Two strings concatenate into a string (Kotlin ConcatenateAPLFunction, BMP path).
+        if let (APLValue::Str(s1), APLValue::Str(s2)) = (a.as_ref(), right_val.as_ref()) {
+            let mut s = s1.clone();
+            s.push_str(s2);
+            return Ok(Rc::new(APLValue::Str(s)));
+        }
         let mut elems = Vec::new();
         self.collect_elements(&a, &mut elems);
         self.collect_elements(&right_val, &mut elems);
@@ -2043,6 +2050,45 @@ impl Engine {
     ) -> Result<AplRef<APLValue>, AplError> {
         let right = right_val.force(self)?;
         match right.as_ref() {
+            APLValue::Str(s) => {
+                // A string is a rank-1 vector of chars; reverse/rotate its characters.
+                let chars: Vec<char> = s.chars().collect();
+                let n = chars.len();
+                if n == 0 {
+                    return Ok(Rc::new(right.as_ref().clone()));
+                }
+                let axis = axis.unwrap_or(0);
+                if axis != 0 {
+                    return Err(AplError::runtime(
+                        "⌽/⊖ axis must be 0 for a string".into(),
+                    ));
+                }
+                let do_reverse = left_val.is_none();
+                let shift: i64 = match left_val {
+                    None => 0,
+                    Some(l) => {
+                        let lv = l.force(self)?;
+                        match lv.as_ref() {
+                            APLValue::Number(KapNumber::Long(x)) => *x,
+                            _ => {
+                                return Err(AplError::runtime(
+                                    "⌽/⊖ shift must be an integer".into(),
+                                ))
+                            }
+                        }
+                    }
+                };
+                let mut out: Vec<char> = vec!['\0'; n];
+                for (k, c) in chars.iter().enumerate() {
+                    let src = if do_reverse {
+                        n - 1 - k
+                    } else {
+                        (((k as i64) + shift).rem_euclid(n as i64)) as usize
+                    };
+                    out[k] = chars[src];
+                }
+                Ok(Rc::new(APLValue::Str(out.into_iter().collect())))
+            }
             APLValue::Number(_) | APLValue::Null => Ok(Rc::new(right.as_ref().clone())),
             APLValue::Array(a) => {
                 let dims = a.dimensions.clone();
@@ -2133,6 +2179,8 @@ impl Engine {
         // per `axes` (must be a permutation of 0..rank-1, else InvalidDimensions).
         let right = right_val.force(self)?;
         match right.as_ref() {
+            // A string is rank-1; transposing it is the identity (it stays a string).
+            APLValue::Str(_) => Ok(Rc::new(right.as_ref().clone())),
             APLValue::Number(_) | APLValue::Null => Ok(Rc::new(right.as_ref().clone())),
             APLValue::Array(a) => {
                 let dims = a.dimensions.clone();
@@ -2410,6 +2458,22 @@ impl Engine {
                 }
                 Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(dims, ArrayData::Nested(flat))))))
             }
+            APLValue::Str(s) => {
+                // A string is a rank-1 vector of chars; take/drop slices its characters.
+                let chars: Vec<char> = s.chars().collect();
+                let n = chars.len();
+                // Take/drop is monadic (single count) on a vector.
+                let c = counts.first().copied().unwrap_or(0);
+                let (keep, start) = if take {
+                    let k = (c.unsigned_abs() as usize).min(n);
+                    (k, 0)
+                } else {
+                    let drop = (c.unsigned_abs() as usize).min(n);
+                    (n - drop, drop)
+                };
+                let sliced: String = chars[start..start + keep].iter().collect();
+                Ok(Rc::new(APLValue::Str(sliced)))
+            }
             other => Err(AplError::runtime(
                 "↑/↓ not implemented for this value type".into(),
             )),
@@ -2592,12 +2656,18 @@ impl Engine {
             if matches!(index.as_ref(), APLValue::Null) {
                 return Ok(Rc::new(APLValue::Null));
             }
-            let target_elems = match target.as_ref() {
+            let target_elems: Vec<AplRef<APLValue>> = match target.as_ref() {
                 APLValue::Array(a) => a.elements(),
+                // A string is a rank-1 vector of its characters.
+                APLValue::Str(s) => s
+                    .chars()
+                    .map(|c| Rc::new(APLValue::Char(c)) as AplRef<APLValue>)
+                    .collect(),
                 _ => vec![Rc::new(target.as_ref().clone())],
             };
             let target_rank = match target.as_ref() {
                 APLValue::Array(a) => a.rank(),
+                APLValue::Str(_) => 1,
                 _ => 0,
             };
             if target_rank != 1 {

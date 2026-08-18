@@ -250,9 +250,9 @@ fn curated_kap_parity() {
         ),
         (
             "b ← 2 ⋄ when { (b=1){ \"one\" } (b=2){ \"two\" } (1){ \"other\" } }",
-            "two",
+            "\"two\"",
         ),
-        ("if (0) { 1 }", "null"),
+        ("if (0) { 1 }", "⍬"),
         // Adverbs (Phase 7)
         ("+/ 1 2 3 4", "10"),
         ("×/ 1 2 3 4", "24"),
@@ -293,12 +293,12 @@ fn curated_kap_parity() {
             "(100 100 102 102 100 100)",
         ),
         // Take / drop (↑ ↓) — multi-dimensional, per-axis, negative-from-end.
-        // Printer note: a length-1 result vector renders as `(x)` here (Kap
-        // discloses to scalar `x`); empty-from-scalar renders as `null`.
-        ("↑1 2 3 4", "(1)"),
-        ("↑6", "(6)"),
+        // NOTE: monadic `↑` returns the leading *cell* (scalar), not a 1-element array.
+        // (Real Kap: `↑1 2 3 4 5 → 1`.) These were `(1)`/`(6)` before the take-first fix.
+        ("↑1 2 3 4", "1"),
+        ("↑6", "6"),
         ("5 ↑ 10", "(10 0 0 0 0)"),
-        ("0 ↑ 10", "null"),
+        ("0 ↑ 10", "⍬"),
         ("1 ↑ 10", "(10)"),
         ("2 2 ↑ 10", "(10 0 0 0)"),
         ("2 2 1 3 ↑ 10", "(10 0 0 0 0 0 0 0 0 0 0 0)"),
@@ -307,17 +307,61 @@ fn curated_kap_parity() {
         ("1 ↑ 3 3 ⍴ ⍳9", "(0 1 2)"),
         ("3 ↑ 10 2 ⍴ ⍳20", "(0 1 2 3 4 5)"),
         ("4 ↑ 3 2 ⍴ ⍳20", "(0 1 2 3 4 5 0 0)"),
+        // --- Strings as rank-1 arrays (Kap APLBmpString.dimensions = [len]) ---
+        ("⍴\"abc\"", "(3)"),
+        ("⍴⍴\"abc\"", "(1)"),
+        ("≢\"abc\"", "3"),
+        ("⌽\"abc\"", "\"cba\""),
+        ("⍉\"abc\"", "\"abc\""),
+        ("\"foo\", \"bar\"", "\"foobar\""),
+        ("\"foo\"⍪\"bar\"", "\"foobar\""),
+        ("\"abc\"⍴⍳100", "(0 1 2)"),
+        ("1⌽\"abc\"", "\"bca\""),
+        ("\"abc\"⍪\"def\"", "\"abcdef\""),
+        // Comma of a string with a numeric vector strands into a mixed vector.
+        ("\"abc\"⍪1 2 3", "(\"abc\" 1 2 3)"),
+        // unicode:* namespace builtins (Kap unicode.kt)
+        ("unicode:toCodepoints \"ABC\"", "(65 66 67)"),
+        ("unicode:fromCodepoints 65 66 67", "\"ABC\""),
+        ("unicode:toGraphemes \"é\"", "(\"é\")"),
+        ("unicode:toLower \"ABC\"", "\"abc\""),
+        ("unicode:toUpper \"abc\"", "\"ABC\""),
+        ("unicode:toNames @A", "\"LATIN CAPITAL LETTER A\""),
+        ("unicode:toNames @€", "⍬"),
+        ("\"UTF16\" unicode:enc \"A\"", "(0 65)"),
+        ("\"UTF32\" unicode:enc \"A\"", "(0 0 0 65)"),
+        ("unicode:enc \"A\"", "(65)"),
+        ("\"UTF16\" unicode:dec 0 65", "\"A\""),
+        // Character arithmetic (StringsTest.kt)
+        ("\"abc\"+1", "\"bcd\""),
+        ("1+\"abc\"", "\"bcd\""),
+        ("\"af\"+1 ¯1", "\"be\""),
+        ("\"abj\"-0 ¯11 3", "\"amg\""),
+        ("\"bBa\"-\"aAb\"", "(1 1 ¯1)"),
+        ("⍕@a", "\"a\""),
+        ("⍕\"foo\"", "\"foo\""),
+        ("⍕8", "\"8\""),
+        ("⍎\"123\"", "123"),
+        ("⍎\"1/2\"", "1r2"),
+        // Indexing into a string (bracket indexing) — returns char scalars.
+        ("\"abcdef\"[2]", "@c"),
+        ("\"abcdef\"[0 2]", "\"ac\""),
+        ("⊃\"abcdef\"", "@a"),
+        // take/drop on a string (slices its characters)
+        ("↓\"abc\"", "\"bc\""),
+        ("2↓\"abcdef\"", "\"cdef\""),
+        ("3↑\"abc\"", "\"abc\""),
         ("¯2 ↑ 100 200 300 400 500 600 700 800 900 1000 1100 1200", "(1100 1200)"),
         ("4 ↑ 1 2", "(1 2 0 0)"),
         ("¯10 ↑ 1 2", "(0 0 0 0 0 0 0 0 1 2)"),
         ("↑⍬", "0"),
         ("↓1 2 3 4", "(2 3 4)"),
         ("↓10 + 1 2 3 4", "(12 13 14)"),
-        ("↓⍬", "null"),
+        ("↓⍬", "⍬"),
         ("↓ 3 3 ⍴ ⍳9", "(3 4 5 6 7 8)"),
         ("2 ↓ 100 200 300 400 500 600 700 800", "(300 400 500 600 700 800)"),
-        ("5 ↓ 10", "null"),
-        ("¯5 ↓ 10", "null"),
+        ("5 ↓ 10", "⍬"),
+        ("¯5 ↓ 10", "⍬"),
         ("0 ↓ 10", "(10)"),
         ("¯2 ↓ 1 2 3 4 5 6", "(1 2 3 4)"),
         ("1 ↓ 3 5 ⍴ ⍳100", "(5 6 7 8 9 10 11 12 13 14)"),
@@ -345,8 +389,12 @@ fn curated_kap_parity() {
 
     let mut failures = Vec::new();
     for (expr, expected) in cases {
-        match engine.eval_to_string(expr) {
-            Ok(got) => {
+        // Render with `format_display` (REPL form: strings quoted, `⍬` for null, `@` for
+        // char) to match Real Kap's reference output, not the bare `format_value` used by
+        // the broader `run_kotlin_conformance` harness.
+        match engine.eval_string(expr) {
+            Ok(v) => {
+                let got = v.format_display();
                 if &got != expected {
                     failures.push(format!(
                         "MISMATCH  {expr:?}  expected {expected:?} got {got:?}"
