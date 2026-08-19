@@ -1201,7 +1201,18 @@ impl Engine {
                 Some(l) => self.intersection(l, right_val),
             },
             "⍋" | "grade" => self.grade_up(right_val),
-            "⍸" | "where" => self.where_fn(right_val),
+            "⍸" | "where" => match left_val {
+                // Dyadic interval form `a ⍸ b` (and inverse `⍸˝`) are NOT implemented
+                // in this pass. Return a clean error so the conformance harness counts
+                // it as Unsupported rather than triggering a runaway allocation. A huge
+                // right element (e.g. `1e100`) saturates `as_long()` to i64::MAX and would
+                // otherwise ask the allocator for ~9 quintillion slots → abort (uncatchable
+                // by catch_unwind), killing the whole process before its report is printed.
+                Some(_) => Err(AplError::runtime(
+                    "dyadic ⍸ (interval form) is not implemented yet".into(),
+                )),
+                None => self.where_fn(right_val),
+            },
             "⊤" | "encode" => self.encode(left_val, right_val),
             "⊥" | "decode" => self.decode(left_val, right_val),
             // Identity (⊢): monadic → argument; dyadic → right argument.
@@ -3853,6 +3864,13 @@ impl Engine {
             if v == 0 {
                 return Ok(Rc::new(APLValue::Null));
             }
+            // Guard against runaway allocations: a Double right arg (e.g. `⍸ 1e100`)
+            // saturates `as_long()` to i64::MAX, and `vec![_; 9e18]` would abort the
+            // process (uncatchable by catch_unwind), killing the conformance harness
+            // before its report is written. Reject anything past a sane cap.
+            if v as usize > 100_000_000 {
+                return Err(AplError::runtime("where: result too large".into()));
+            }
             let out = vec![Rc::new(APLValue::Null); v as usize];
             return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
                 vec![out.len()],
@@ -3882,6 +3900,12 @@ impl Engine {
                 };
                 if n < 0 {
                     return Err(AplError::runtime("Negative value found in right argument".into()));
+                }
+                // Guard against runaway output: a Double element saturates `as_long()`
+                // to i64::MAX and the inner `for _ in 0..n` would loop effectively
+                // forever (and/or exhaust memory). Cap the accumulated result size.
+                if (out.len() as i64 + n) as usize > 100_000_000 {
+                    return Err(AplError::runtime("where: result too large".into()));
                 }
                 for _ in 0..n {
                     out.push(Rc::new(APLValue::Number(KapNumber::Long(i as i64))));
