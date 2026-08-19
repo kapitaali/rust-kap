@@ -15,6 +15,7 @@ use crate::parser;
 use crate::token::LiteralValue;
 use unicode_segmentation::UnicodeSegmentation;
 use std::cmp::Ordering;
+use libm::lgamma;
 use crate::{APLValue, AplError, AplRef, Engine, Environment};
 use std::rc::Rc;
 
@@ -1136,6 +1137,7 @@ impl Engine {
             ">" => self.cmp2(left_val, right_val, |o| o == Ordering::Greater, ">"),
             "≤" => self.cmp2(left_val, right_val, |o| o != Ordering::Greater, "≤"),
             "≥" => self.cmp2(left_val, right_val, |o| o != Ordering::Less, "≥"),
+            "cmp" => self.cmp_values(left_val, right_val, "cmp"),
             "⍳" | "iota" => self.iota(right_val),
             "⍴" | "rho" => match left_val {
                 None => self.shape(right_val),
@@ -1206,6 +1208,15 @@ impl Engine {
             "⍋" | "grade" => self.grade_up(right_val),
             "⍒" | "gradeDown" => self.grade_down(right_val),
             "∼" | "not" => self.logical_not(right_val),
+            "!" | "gamma" | "binomial" => self.factorial_binomial(left_val, right_val),
+            "…" | "range" => match left_val {
+                None => Err(AplError::runtime("…: Function cannot be called with one argument".into())),
+                Some(l) => self.range(l, right_val),
+            },
+            "⍷" | "find" => match left_val {
+                None => Err(AplError::runtime("⍷: Function cannot be called with one argument".into())),
+                Some(l) => self.find(l, right_val),
+            },
             "⍸" | "where" => match left_val {
                 // Dyadic interval form `a ⍸ b`: `a` = sorted boundaries (scalar or 1-D
                 // vector, strictly ascending, no duplicates), `b` = data. Result has the
@@ -1402,7 +1413,7 @@ impl Engine {
             "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"
                 | "↑" | "↓" | "⊂" | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥"
-                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼"
+                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼" | "!" | "…" | "⍷" | "cmp"
         )
     }
 
@@ -2358,6 +2369,38 @@ impl Engine {
         };
         // Kap booleans are 1 (true) / 0 (false).
         Ok(Rc::new(APLValue::Number(KapNumber::Long(if pred(ord) { 1 } else { 0 }))))
+    }
+
+    /// `cmp`: total-ordering comparison returning -1 (less), 0 (equal), or 1 (greater)
+    /// as an integer scalar, matching Kap's `CompareObjectsFunction`. Works on numbers
+    /// and characters (and strings by rank/shape). Dyadic only.
+    fn cmp_values(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+        sym: &str,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let a = left_val.ok_or_else(|| AplError::runtime(format!("{} needs two args", sym)))?;
+        let a = a.force(self)?;
+        let b = right_val.force(self)?;
+        let ord = match (a.as_ref(), b.as_ref()) {
+            (APLValue::Number(x), APLValue::Number(y)) => {
+                x.numeric_cmp(y).map_err(|e| AplError::runtime(e))?
+            }
+            (APLValue::Char(x), APLValue::Char(y)) => x.cmp(y),
+            _ => {
+                return Err(AplError::runtime(format!(
+                    "{} requires comparable scalars (numbers or chars)",
+                    sym
+                )))
+            }
+        };
+        let v = match ord {
+            Ordering::Less => -1i64,
+            Ordering::Equal => 0i64,
+            Ordering::Greater => 1i64,
+        };
+        Ok(Rc::new(APLValue::Number(KapNumber::Long(v))))
     }
 
     fn iota(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
@@ -4226,7 +4269,386 @@ impl Engine {
         )))))
     }
 
+    // --- factorial / binomial (! ) ---
+
+    /// `!` (factorial/gamma/binomial): monadic = gamma(n+1) = n!; dyadic = binomial.
+    /// Kap's `BinomialAPLFunction`: `a!b` = C(b, a) = gamma(1+b)/(gamma(1+a)*gamma(1+b-a)),
+    /// using Double gamma for non-integer / large args; Long path for small non-negative ints.
+    /// Dyadic returns 0.0 when a > b (per Kap's `doubleBinomial` case table).
+    fn factorial_binomial(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        // Dyadic: a ! b
+        if let Some(l) = left_val {
+            let a = l.force(self)?;
+            let b = right_val.force(self)?;
+            // Both scalar numbers.
+            match (a.as_ref(), b.as_ref()) {
+                (APLValue::Number(x), APLValue::Number(y)) => {
+                    Self::binomial_two_numbers(x, y)
+                }
+                _ => Err(AplError::runtime(
+                    "!: requires scalar numbers for both arguments".into(),
+                )),
+            }
+        } else {
+            // Monadic: ! b = gamma(b+1)
+            let b = right_val.force(self)?;
+            match b.as_ref() {
+                APLValue::Number(y) => {
+                    let d = y.as_double();
+                    // gamma(n+1) via lgamma
+                    let log_gamma = lgamma(d + 1.0);
+                    let v = log_gamma.exp();
+                    Ok(Rc::new(APLValue::Number(KapNumber::Double(v))))
+                }
+                _ => Err(AplError::runtime("!: requires a number".into())),
+            }
+        }
+    }
+
+    fn binomial_two_numbers(a: &KapNumber, b: &KapNumber) -> Result<AplRef<APLValue>, AplError> {
+        // Try the Long path: both non-negative ints, a <= b, within int range.
+        let a_long = a.as_long();
+        let b_long = b.as_long();
+        if let (Ok(x), Ok(y)) = (a_long, b_long) {
+            if x >= 0 && y >= 0 && y >= x && y <= i32::MAX as i64 {
+                let r = Self::long_binomial(y as i32, x as i32);
+                return Ok(Rc::new(APLValue::Number(KapNumber::Long(r as i64))));
+            }
+        }
+        // Double path: binomial(a, b) = gamma(1+b) / (gamma(1+a) * gamma(1+b-a))
+        let a_f = a.as_double();
+        let b_f = b.as_double();
+        // case table: a > b → 0.0
+        if a_f > b_f {
+            return Ok(Rc::new(APLValue::Number(KapNumber::Double(0.0))));
+        }
+        let log_gamma_1b = lgamma(b_f + 1.0);
+        let log_gamma_1a = lgamma(a_f + 1.0);
+        let log_gamma_1ba = lgamma(b_f - a_f + 1.0);
+        let log_result = log_gamma_1b - log_gamma_1a - log_gamma_1ba;
+        let v = log_result.exp();
+        Ok(Rc::new(APLValue::Number(KapNumber::Double(v))))
+    }
+
+    fn long_binomial(n: i32, k: i32) -> i32 {
+        if k < 0 || k > n {
+            return 0;
+        }
+        let mut k = k as i32;
+        if k > n / 2 {
+            k = n - k;
+        }
+        if k == 0 {
+            return 1;
+        }
+        let mut r: i64 = 1;
+        for i in 0..k {
+            r = r * (n as i64 - i as i64) / (i as i64 + 1);
+            // Saturate to i32::MAX if it overflows
+            if r > i32::MAX as i64 {
+                return i32::MAX;
+            }
+        }
+        r as i32
+    }
+
+    // --- range (… ) ---
+
+    /// `…` (range): dyadic only. Both args must be scalar or non-empty 1-D.
+    /// Last element of A, first element of B must both be integers or both chars.
+    /// Produces an inclusive integer/char sequence from A's last to B's first.
+    fn range(
+        &self,
+        left_val: AplRef<APLValue>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let a = left_val.force(self)?;
+        let b = right_val.force(self)?;
+        // Both must be 1-D (or scalar → rank-0, treated as 1-D of length 1).
+        let a_rank = a.rank();
+        let b_rank = b.rank();
+        // Kotlin: both must be scalar or non-empty 1-D.
+        if a_rank > 1 || b_rank > 1 {
+            return Err(AplError::runtime(
+                "…: Both arguments must be scalars or 1-dimensional arrays".into(),
+            ));
+        }
+        let a_len = a.element_count();
+        let b_len = b.element_count();
+        if a_len == 0 || b_len == 0 {
+            return Err(AplError::runtime(
+                "…: Both arguments must be non-empty".into(),
+            ));
+        }
+        // Last element of A, first element of B.
+        let a_last = a.value_at(a_len - 1);
+        let b_first = b.value_at(0);
+        // Determine the element type from the last A element and first B element.
+        match (&a_last, &b_first) {
+            (APLValue::Number(x), APLValue::Number(y)) => {
+                let x_long = x.as_long();
+                let y_long = y.as_long();
+                if let (Ok(xv), Ok(yv)) = (x_long, y_long) {
+                    // Integer range
+                    return self.range_long(xv, yv);
+                }
+                // Fall back to double range (will likely error in Kotlin if not integer)
+                return self.range_double(x.as_double(), y.as_double());
+            }
+            (APLValue::Char(xc), APLValue::Char(yc)) => {
+                return self.range_char(*xc, *yc);
+            }
+            _ => {
+                return Err(AplError::runtime(format!(
+                    "…: Range types not compatible. A={}, B={}",
+                    a_last.class_name(),
+                    b_first.class_name()
+                )));
+            }
+        }
+    }
+
+    fn range_long(&self, start: i64, end: i64) -> Result<AplRef<APLValue>, AplError> {
+        let n = (end - start).unsigned_abs() as usize + 1;
+        if n > 100_000_000 {
+            return Err(AplError::runtime("…: Resulting range too large".into()));
+        }
+        let step = if start <= end { 1i64 } else { -1i64 };
+        let out: Vec<AplRef<APLValue>> = (0..n)
+            .map(|i| Rc::new(APLValue::Number(KapNumber::Long(start + i as i64 * step))))
+            .collect();
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![n],
+            ArrayData::Nested(out),
+        )))))
+    }
+
+    fn range_double(&self, start: f64, end: f64) -> Result<AplRef<APLValue>, AplError> {
+        // Kap range for non-integers: raises "Range types not compatible".
+        Err(AplError::runtime(
+            "…: Range types not compatible".into(),
+        ))
+    }
+
+    fn range_char(&self, start: char, end: char) -> Result<AplRef<APLValue>, AplError> {
+        let si = start as i64;
+        let ei = end as i64;
+        let n = (ei - si).unsigned_abs() as usize + 1;
+        if n > 100_000_000 {
+            return Err(AplError::runtime("…: Resulting range too large".into()));
+        }
+        let step = if si <= ei { 1i64 } else { -1i64 };
+        let out: Vec<AplRef<APLValue>> = (0..n)
+            .map(|i| {
+                let c = char::from_u32((si + i as i64 * step) as u32).unwrap_or('\u{fffd}');
+                Rc::new(APLValue::Char(c))
+            })
+            .collect();
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![n],
+            ArrayData::Char(out.into_iter().map(|r| match r.as_ref() {
+                APLValue::Char(c) => *c,
+                _ => unreachable!(),
+            }).collect()),
+        )))))
+    }
+
+    // --- find (⍷ ) ---
+
+    /// `⍷` (find): dyadic only. Shape of result = shape of B (right arg).
+    /// Boolean 1 at each position where a subarray equal to A starts in B (windowed match).
+    /// Lower-rank A is prepended with 1s (trailing match); higher-rank A → all 0 (no error).
+    /// Uses cross-kind `compareEqualsTotalOrdering` for element comparison.
+    fn find(
+        &self,
+        left_val: AplRef<APLValue>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let a = left_val.force(self)?;
+        let b = right_val.force(self)?;
+
+        // Scalar B (rank 0): compare A and B, return 1 or 0.
+        if b.rank() == 0 {
+            let eq = a.total_cmp(&b).map(|o| o == Ordering::Equal).unwrap_or(false);
+            let v = if eq { 1i64 } else { 0i64 };
+            return Ok(Rc::new(APLValue::Number(KapNumber::Long(v))));
+        }
+
+        // Extract A and B dims + flat elements from the forced APLValues.
+        let (a_dims, a_elems): (Vec<usize>, Vec<AplRef<APLValue>>) = match a.as_ref() {
+            APLValue::Array(arr) => (arr.dimensions.clone(), arr.elements()),
+            APLValue::Str(s) => {
+                let cs: Vec<AplRef<APLValue>> = s
+                    .chars()
+                    .map(|c| Rc::new(APLValue::Char(c)))
+                    .collect();
+                (vec![cs.len()], cs)
+            }
+            other => (vec![], vec![Rc::new(other.clone())]),
+        };
+        let (b_dims, b_elems): (Vec<usize>, Vec<AplRef<APLValue>>) = match b.as_ref() {
+            APLValue::Array(arr) => (arr.dimensions.clone(), arr.elements()),
+            APLValue::Str(s) => {
+                let cs: Vec<AplRef<APLValue>> = s
+                    .chars()
+                    .map(|c| Rc::new(APLValue::Char(c)))
+                    .collect();
+                (vec![cs.len()], cs)
+            }
+            other => (vec![], vec![Rc::new(other.clone())]),
+        };
+
+        // A rank > B rank: no match possible → all zeros (shape of B).
+        if a_dims.len() > b_dims.len() {
+            let n: usize = b_dims.iter().product();
+            let out: Vec<AplRef<APLValue>> = (0..n)
+                .map(|_| Rc::new(APLValue::Number(KapNumber::Long(0))))
+                .collect();
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                b_dims.clone(),
+                ArrayData::Nested(out),
+            )))));
+        }
+
+        let a_rank = a_dims.len();
+        let b_rank = b_dims.len();
+        let dims_diff = b_rank - a_rank;
+
+        // Effective A dimensions: prepend 1s so A has the same rank as B.
+        let eff_a_dims: Vec<usize> = vec![1usize; dims_diff]
+            .into_iter()
+            .chain(a_dims.iter().copied())
+            .collect();
+
+        // Compute B multipliers (stride per axis) for flat-index ↔ coord conversion.
+        let b_mult: Vec<usize> = {
+            let mut m = Vec::with_capacity(b_rank);
+            let mut prod = 1usize;
+            for d in b_dims.iter().rev() {
+                m.push(prod);
+                prod *= d;
+            }
+            m.reverse();
+            m
+        };
+
+        // Compute effective A multipliers.
+        let a_mult: Vec<usize> = {
+            let mut m = Vec::with_capacity(b_rank);
+            let mut prod = 1usize;
+            for d in eff_a_dims.iter().rev() {
+                m.push(prod);
+                prod *= d;
+            }
+            m.reverse();
+            m
+        };
+
+        if a_elems.is_empty() {
+            // Empty A: no match → all zeros.
+            let n = b.element_count();
+            let out: Vec<AplRef<APLValue>> = (0..n)
+                .map(|_| Rc::new(APLValue::Number(KapNumber::Long(0))))
+                .collect();
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                b_dims,
+                ArrayData::Nested(out),
+            )))));
+        }
+
+        let a_size = a_elems.len();
+        let b_size = b.element_count();
+
+        let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(b_size);
+
+        for p in 0..b_size {
+            // B coordinate from flat index p.
+            let b_coord: Vec<usize> = {
+                let mut coord = Vec::with_capacity(b_rank);
+                let mut rem = p;
+                for &mult in b_mult.iter() {
+                    coord.push(rem / mult);
+                    rem %= mult;
+                }
+                coord
+            };
+
+            // Check window fits: for every B axis, the window starting at this
+            // coordinate with the padded A dims must stay within B. Prepended-1
+            // axes (dimensionsDiff) trivially satisfy this since eff_a_dims=1.
+            // This mirrors Kotlin's FindResultValue.opLong: it only bounds the
+            // *aligned* axes (coord[dimensionsDiff+i] + a_dims[i] <= b_dims[...]);
+            // the window start `p` already carries any prepended-axis coordinates,
+            // so we must NOT force those coordinates to 0.
+            let window_fits = b_coord
+                .iter()
+                .enumerate()
+                .all(|(i, &bc)| bc + eff_a_dims[i] <= b_dims[i]);
+
+            if !window_fits {
+                out.push(Rc::new(APLValue::Number(KapNumber::Long(0))));
+                continue;
+            }
+
+            // Check element-by-element match.
+            let mut match_found = true;
+            for (ai, a_elem) in a_elems.iter().enumerate() {
+                // A coordinate from flat index ai.
+                let a_coord: Vec<usize> = {
+                    let mut coord = Vec::with_capacity(b_rank);
+                    let mut rem = ai;
+                    for &mult in a_mult.iter() {
+                        coord.push(rem / mult);
+                        rem %= mult;
+                    }
+                    coord
+                };
+
+                // B coordinate = b_coord + a_coord.
+                let b_elem_coord: Vec<usize> = b_coord
+                    .iter()
+                    .zip(a_coord.iter())
+                    .map(|(&bc, &ac)| bc + ac)
+                    .collect();
+
+                // Convert B element coordinate to flat index.
+                let b_flat: usize = b_elem_coord
+                    .iter()
+                    .zip(b_mult.iter())
+                    .map(|(&coord, &mult)| coord * mult)
+                    .sum();
+
+                let b_elem = &b_elems[b_flat];
+                if a_elem
+                    .as_ref()
+                    .total_cmp(b_elem.as_ref())
+                    .map(|o| o == Ordering::Equal)
+                    .unwrap_or(false)
+                {
+                    // match
+                } else {
+                    match_found = false;
+                    break;
+                }
+            }
+
+            out.push(Rc::new(APLValue::Number(KapNumber::Long(
+                if match_found { 1 } else { 0 },
+            ))));
+        }
+
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            b_dims,
+            ArrayData::Nested(out),
+        )))))
+    }
+
     /// Encode `base ⊤ value`: represent `value` in the mixed radix given by `base`
+
     /// (a vector of radices, most significant first). Returns a vector.
     fn encode(
         &self,
