@@ -1201,6 +1201,7 @@ impl Engine {
                 Some(l) => self.intersection(l, right_val),
             },
             "⍋" | "grade" => self.grade_up(right_val),
+            "⍸" | "where" => self.where_fn(right_val),
             "⊤" | "encode" => self.encode(left_val, right_val),
             "⊥" | "decode" => self.decode(left_val, right_val),
             // Identity (⊢): monadic → argument; dyadic → right argument.
@@ -1387,7 +1388,7 @@ impl Engine {
             "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"
                 | "↑" | "↓" | "⊂" | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥"
-                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩"
+                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸"
         )
     }
 
@@ -3829,6 +3830,119 @@ impl Engine {
             }
             _ => format!("other:{}", v.format_value()),
         }
+    }
+
+    /// `⍸` (where): index/coordinate of nonzero elements. Faithful to Kotlin
+    /// `WhereAPLFunction` `eval1Arg`. NOT implemented: dyadic interval form
+    /// (`a ⍸ b`) and the inverse (`⍸˝`, needs the `˝` adverb).
+    /// - scalar `n`: length-n vector of Null (`⍸ 1` → `(⍬)`); negative → error.
+    /// - vector: indices (0-based) where the element is nonzero, repeated by its value.
+    /// - higher rank: coordinate vectors `[axis0 axis1 …]` for each nonzero element.
+    fn where_fn(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        let r = right_val.force(self)?;
+        // `⍸⍬` → `⍬` (Null). A Null right argument returns Null.
+        if matches!(r.as_ref(), APLValue::Null) {
+            return Ok(Rc::new(APLValue::Null));
+        }
+        if let APLValue::Number(n) = r.as_ref() {
+            let v = n.as_long().map_err(|e| AplError::runtime(e))?;
+            if v < 0 {
+                return Err(AplError::runtime("Negative value found in right argument".into()));
+            }
+            // `⍸ 0` → `⍬` (Null), not a length-0 vector.
+            if v == 0 {
+                return Ok(Rc::new(APLValue::Null));
+            }
+            let out = vec![Rc::new(APLValue::Null); v as usize];
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![out.len()],
+                ArrayData::Nested(out),
+            )))));
+        }
+        let dims = r.dimensions();
+        let rank = r.rank();
+        if rank == 0 {
+            return Err(AplError::runtime(
+                "Argument must be a number. Got a non-numeric scalar".into(),
+            ));
+        }
+        if rank == 1 {
+            let mut out: Vec<AplRef<APLValue>> = Vec::new();
+            let elems = match r.as_ref() {
+                APLValue::Array(a) => a.elements(),
+                _ => vec![Rc::new(r.as_ref().clone())],
+            };
+            for (i, e) in elems.iter().enumerate() {
+                let n = match e.as_ref() {
+                    APLValue::Number(x) => x.as_long().map_err(|e2| AplError::runtime(e2))?,
+                    other => return Err(AplError::runtime(format!(
+                        "where: expected a number, got {}",
+                        other.class_name()
+                    ))),
+                };
+                if n < 0 {
+                    return Err(AplError::runtime("Negative value found in right argument".into()));
+                }
+                for _ in 0..n {
+                    out.push(Rc::new(APLValue::Number(KapNumber::Long(i as i64))));
+                }
+            }
+            // `⍸ 0 0 0 0` → `⍬` (Null), not a length-0 vector.
+            if out.is_empty() {
+                return Ok(Rc::new(APLValue::Null));
+            }
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![out.len()],
+                ArrayData::Nested(out),
+            )))));
+        }
+        // Higher rank: produce coordinate vectors for each nonzero element.
+        let total: usize = dims.iter().product();
+        // Precompute stride multipliers so we can map a flat index to coordinates.
+        let mut mult = vec![1usize; rank];
+        let mut stride = 1usize;
+        for k in (0..rank).rev() {
+            mult[k] = stride;
+            stride *= dims[k];
+        }
+        let mut out: Vec<AplRef<APLValue>> = Vec::new();
+        for flat in 0..total {
+            let e = r.value_at(flat);
+            let n = match e {
+                APLValue::Number(x) => x.as_long().map_err(|e2| AplError::runtime(e2))?,
+                other => return Err(AplError::runtime(format!(
+                    "where: expected a number, got {}",
+                    other.class_name()
+                ))),
+            };
+            if n < 0 {
+                return Err(AplError::runtime("Negative value found in right argument".into()));
+            }
+            if n > 0 {
+                let mut coords = Vec::with_capacity(rank);
+                let mut rem = flat;
+                for k in 0..rank {
+                    coords.push(Rc::new(APLValue::Number(KapNumber::Long(
+                        (rem / mult[k]) as i64,
+                    ))));
+                    rem %= mult[k];
+                }
+                for _ in 0..n {
+                    out.push(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        vec![coords.len()],
+                        ArrayData::Nested(coords.clone()),
+                    )))));
+                }
+            }
+        }
+        // `⍸ 2 2⍴0 0 0 0` → `⍬` (Null) when no element is nonzero.
+        if out.is_empty() {
+            return Ok(Rc::new(APLValue::Null));
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![out.len()],
+            ArrayData::Nested(out),
+        )))))
     }
 
     /// Grade up `⍋ x`: 0-based indices that would sort `x` ascending.
