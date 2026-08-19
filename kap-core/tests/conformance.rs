@@ -402,6 +402,19 @@ fn curated_kap_parity() {
         ("⍸ 1", "(⍬)"),
         ("⍸ 3", "(⍬ ⍬ ⍬)"),
         ("⍸ 2 0 2", "(0 0 2 2)"),
+        // Phase 6 breadth: ⍒ grade-down (sibling of ⍋)
+        ("⍒ 3 1 4 1 5", "(4 2 0 1 3)"),
+        ("⍒ 2 2⍴3 1 4 1", "(1 0)"),
+        ("⍒ ⍬", "⍬"),
+        // Phase 6 breadth: ⍲ ⍱ nand/nor broadcast over booleans
+        ("1 0 1 ⍲ 0 1 0", "(1 1 1)"),
+        ("1 0 1 ⍱ 0 1 0", "(0 0 0)"),
+        ("0 0 1 ⍲ 0 1 0", "(1 1 1)"),
+        ("0 0 1 ⍱ 0 1 0", "(1 0 0)"),
+        ("1 ⍲ 0 0 1", "(1 1 0)"),
+        ("0 ⍱ 1 1 0", "(0 0 1)"),
+        // Phase 6 breadth: ∼ logical not (monadic, boolean)
+        ("∼ 0 1 0 1", "(1 0 1 0)"),
         // Dyadic `⍸` (interval form) — Kotlin IntervalTest.kt.
         ("2 5 10 ⍸ ¯1 0 2 3 4 5 6 10 11", "(0 0 1 1 1 2 2 3 3)"),
         ("4 ⍸ 1 2 3 4 5 6", "(0 0 0 1 1 1)"),

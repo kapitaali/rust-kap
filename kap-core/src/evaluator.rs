@@ -1188,7 +1188,10 @@ impl Engine {
             },
             "∧" => self.bool2(left_val, right_val, |a, b| a & b, "∧"),
             "∨" => self.bool2(left_val, right_val, |a, b| a | b, "∨"),
-            "~" | "not" => self.scalar1(right_val, |x| x.not(), "~"),
+            "⍲" => self.bool_broadcast(left_val, right_val, |x, y| !(x && y), "⍲"),
+            "⍱" => self.bool_broadcast(left_val, right_val, |x, y| !(x || y), "⍱"),
+            "∼" | "not" => self.logical_not(right_val),
+            "~" | "bitnot" => self.scalar1(right_val, |x| x.not(), "~"),
             "∊" | "in" => self.membership(left_val, right_val),
             // `∪` unique/union (Kotlin unique.kt): monadic → unique; dyadic → union.
             "∪" | "unique" => match left_val {
@@ -1201,6 +1204,8 @@ impl Engine {
                 Some(l) => self.intersection(l, right_val),
             },
             "⍋" | "grade" => self.grade_up(right_val),
+            "⍒" | "gradeDown" => self.grade_down(right_val),
+            "∼" | "not" => self.logical_not(right_val),
             "⍸" | "where" => match left_val {
                 // Dyadic interval form `a ⍸ b`: `a` = sorted boundaries (scalar or 1-D
                 // vector, strictly ascending, no duplicates), `b` = data. Result has the
@@ -1397,7 +1402,7 @@ impl Engine {
             "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"
                 | "↑" | "↓" | "⊂" | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥"
-                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸"
+                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼"
         )
     }
 
@@ -3625,6 +3630,60 @@ impl Engine {
         Ok(Rc::new(APLValue::Number(KapNumber::Long(if f(x, y) { 1 } else { 0 }))))
     }
 
+    /// Dyadic boolean with broadcasting (Kotlin `MathCombineAPLFunction`): element-wise
+    /// over arrays, scalar-extended, like `∧`/`∨`. `f` combines two booleans.
+    fn bool_broadcast(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+        f: impl Fn(bool, bool) -> bool + Copy,
+        sym: &str,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let l = left_val.ok_or_else(|| AplError::runtime(format!("{} needs two args", sym)))?;
+        let a = l.force(self)?;
+        let b = right_val.force(self)?;
+        let la = self.boolean_vector(&a, sym)?;
+        let lb = self.boolean_vector(&b, sym)?;
+        if la.len() == 1 && lb.len() == 1 {
+            let out = if f(la[0], lb[0]) { 1 } else { 0 };
+            return Ok(Rc::new(APLValue::Number(KapNumber::Long(out))));
+        }
+        // Broadcast: scalar left/right extends; otherwise lengths must match.
+        let n = la.len().max(lb.len());
+        if !(la.len() == n || la.len() == 1) || !(lb.len() == n || lb.len() == 1) {
+            return Err(AplError::runtime(format!("{} length mismatch", sym)));
+        }
+        let out: Vec<i64> = (0..n)
+            .map(|i| {
+                let x = la[if la.len() == 1 { 0 } else { i }];
+                let y = lb[if lb.len() == 1 { 0 } else { i }];
+                if f(x, y) { 1 } else { 0 }
+            })
+            .collect();
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![out.len()],
+            ArrayData::Long(out),
+        )))))
+    }
+
+    /// Extract a flat list of booleans from a scalar/vector of numbers (Kap booleans: 1/0).
+    fn boolean_vector(&self, v: &APLValue, sym: &str) -> Result<Vec<bool>, AplError> {
+        match v {
+            APLValue::Number(n) => Ok(vec![n.as_boolean()]),
+            APLValue::Array(a) => {
+                let mut out = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    match e.as_ref() {
+                        APLValue::Number(n) => out.push(n.as_boolean()),
+                        other => return Err(AplError::runtime(format!("{} requires booleans", sym))),
+                    }
+                }
+                Ok(out)
+            }
+            other => Err(AplError::runtime(format!("{} requires booleans, got {}", sym, other.class_name()))),
+        }
+    }
+
     /// Membership `a ∊ b`: for each element of `a`, 1 if present in `b`, else 0.
     /// Returns a vector (same shape as `a`) of 0/1.
     fn membership(
@@ -4051,28 +4110,65 @@ impl Engine {
         )))))
     }
 
-    /// Grade up `⍋ x`: 0-based indices that would sort `x` ascending.
-    fn grade_up(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
-        let elems: Vec<(usize, AplRef<APLValue>)> = match right_val.as_ref() {
-            APLValue::Array(a) => a
-                .elements()
-                .into_iter()
-                .enumerate()
-                .collect(),
-            other => vec![(0, Rc::new(other.clone()))],
+    /// Grade `⍋`/`⍒ x`: 0-based indices (permutation of the first axis) that would
+    /// sort `x`. Mirrors Kotlin `GradeFunction`: grades the **first axis** only
+    /// (majoring over cells of size = `multipliers[0]`), comparing cells element-wise.
+    /// Edge rules: scalar → error ("cannot be sorted"); empty first axis → Null;
+    /// single element along first axis → `(0)`; otherwise a length-`axis[0]` vector.
+    /// `ascending=true` for `⍋`, `false` for `⍒` (reverses the comparison).
+    fn grade(
+        &self,
+        right_val: AplRef<APLValue>,
+        ascending: bool,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let r = right_val.force(self)?;
+        // `⍬` (Null) grades to itself (Kotlin: empty → APLNullValue).
+        if matches!(*r, APLValue::Null) {
+            return Ok(Rc::new(APLValue::Null));
+        }
+        // Scalars cannot be sorted.
+        if r.rank() == 0 {
+            return Err(AplError::runtime("Scalars cannot be sorted".into()));
+        }
+        let dims = r.dimensions();
+        let axis_len = dims[0];
+        // Empty along the major axis → Null.
+        if axis_len == 0 {
+            return Ok(Rc::new(APLValue::Null));
+        }
+        // Single element along the major axis → (0).
+        if axis_len == 1 {
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![1],
+                ArrayData::Nested(vec![Rc::new(APLValue::Number(KapNumber::Long(0)))]),
+            )))));
+        }
+        // Stride between consecutive first-axis cells (elements per cell).
+        let mult: usize = if dims.len() == 1 {
+            1
+        } else {
+            dims[1..].iter().product()
         };
-        // Stable sort by formatted value (orderable across all types via numeric_cmp where possible).
-        let mut idx: Vec<usize> = (0..elems.len()).collect();
+        let mut idx: Vec<usize> = (0..axis_len).collect();
         idx.sort_by(|&i, &j| {
-            let vi = &elems[i].1;
-            let vj = &elems[j].1;
-            match (vi.as_ref(), vj.as_ref()) {
-                (APLValue::Number(x), APLValue::Number(y)) => x
-                    .numeric_cmp(y)
-                    .unwrap_or(std::cmp::Ordering::Equal),
-                _ => vi
-                    .format_value()
-                    .cmp(&vj.format_value()),
+            let mut ap = i * mult;
+            let mut bp = j * mult;
+            let mut res = Ordering::Equal;
+            for _ in 0..mult {
+                let va = r.value_at(ap);
+                let vb = r.value_at(bp);
+                let c = va.total_cmp(&vb).unwrap_or(Ordering::Equal);
+                if c != Ordering::Equal {
+                    res = c;
+                    break;
+                }
+                ap += 1;
+                bp += 1;
+            }
+            if ascending {
+                res
+            } else {
+                res.reverse()
             }
         });
         let out: Vec<AplRef<APLValue>> = idx
@@ -4081,6 +4177,51 @@ impl Engine {
             .collect();
         Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
             vec![out.len()],
+            ArrayData::Nested(out),
+        )))))
+    }
+
+    /// Grade up `⍋ x`: ascending first-axis grade.
+    fn grade_up(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        self.grade(right_val, true)
+    }
+
+    /// Grade down `⍒ x`: descending first-axis grade.
+    fn grade_down(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        self.grade(right_val, false)
+    }
+
+    /// Logical not `∼ x`: element-wise `1 - x` for boolean arrays (0↔1). Dyadic-free;
+    /// called with one arg only (Kotlin `NotAPLFunction` is monadic).
+    fn logical_not(
+        &self,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let r = right_val.force(self)?;
+        // Single boolean scalar.
+        if r.rank() == 0 {
+            if let APLValue::Number(n) = r.as_ref() {
+                let b = n.as_boolean();
+                return Ok(Rc::new(APLValue::Number(KapNumber::Long(if b { 0 } else { 1 }))));
+            }
+            return Err(AplError::runtime("∼ requires booleans".into()));
+        }
+        let elems = match r.as_ref() {
+            APLValue::Array(a) => a.elements(),
+            _ => return Err(AplError::runtime("∼ requires booleans".into())),
+        };
+        let out: Vec<AplRef<APLValue>> = elems
+            .iter()
+            .map(|e| match e.as_ref() {
+                APLValue::Number(n) => {
+                    let b = n.as_boolean();
+                    Ok(Rc::new(APLValue::Number(KapNumber::Long(if b { 0 } else { 1 }))))
+                }
+                other => return Err(AplError::runtime(format!("∼ requires booleans, got {}", other.class_name()))),
+            })
+            .collect::<Result<Vec<_>, AplError>>()?;
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            r.dimensions(),
             ArrayData::Nested(out),
         )))))
     }
