@@ -9,6 +9,7 @@
 //!   D2 `num-bigint`/`num-rational` for numbers (no GMP yet).
 
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -248,6 +249,52 @@ impl APLValue {
                 .unwrap_or(APLValue::Null),
             other => other.clone(),
         }
+    }
+
+    /// Cross-kind total-order comparison, mirroring Kotlin `compareTotalOrdering`.
+    /// Two numeric values (any mix of Long/BigInt/Rational/Double/Complex) compare
+    /// numerically; two chars compare by codepoint; two arrays compare recursively;
+    /// otherwise distinct types order by Kap's `typeSortOrder`
+    /// (number < char < array < null). Complex numbers are not orderable → `None`.
+    /// Used by the dyadic `⍸` (interval) form which searches boundaries across kinds.
+    pub fn total_cmp(&self, other: &APLValue) -> Option<Ordering> {
+        use APLValue::*;
+        // Number vs Number → numeric.
+        if let (Number(a), Number(b)) = (self, other) {
+            return a.numeric_cmp(b).ok();
+        }
+        // Char vs Char → codepoint.
+        if let (Char(a), Char(b)) = (self, other) {
+            return Some(a.cmp(b));
+        }
+        // Array vs Array → recursive flat element comparison (first mismatch wins;
+        // shorter array is "less" at the first missing index).
+        if let (Array(a), Array(b)) = (self, other) {
+            let ea = a.elements();
+            let eb = b.elements();
+            let n = ea.len().min(eb.len());
+            for i in 0..n {
+                if let Some(o) = ea[i].total_cmp(&eb[i]) {
+                    if o != Ordering::Equal {
+                        return Some(o);
+                    }
+                }
+            }
+            return Some(ea.len().cmp(&eb.len()));
+        }
+        // Distinct types → by Kap type sort order.
+        let pos = |v: &APLValue| -> Option<usize> {
+            match v {
+                Number(_) => Some(0),
+                Char(_) => Some(5),
+                Array(_) => Some(7),
+                Null => Some(11),
+                _ => None,
+            }
+        };
+        let pa = pos(self)?;
+        let pb = pos(other)?;
+        Some(pa.cmp(&pb))
     }
 }
 

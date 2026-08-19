@@ -1202,15 +1202,13 @@ impl Engine {
             },
             "⍋" | "grade" => self.grade_up(right_val),
             "⍸" | "where" => match left_val {
-                // Dyadic interval form `a ⍸ b` (and inverse `⍸˝`) are NOT implemented
-                // in this pass. Return a clean error so the conformance harness counts
-                // it as Unsupported rather than triggering a runaway allocation. A huge
-                // right element (e.g. `1e100`) saturates `as_long()` to i64::MAX and would
-                // otherwise ask the allocator for ~9 quintillion slots → abort (uncatchable
-                // by catch_unwind), killing the whole process before its report is printed.
-                Some(_) => Err(AplError::runtime(
-                    "dyadic ⍸ (interval form) is not implemented yet".into(),
-                )),
+                // Dyadic interval form `a ⍸ b`: `a` = sorted boundaries (scalar or 1-D
+                // vector, strictly ascending, no duplicates), `b` = data. Result has the
+                // SAME SHAPE as `b`; each element is the count of boundaries `<=` that
+                // data value. `1e100` in `b` is just a value being compared, never an
+                // allocation count — so no runaway allocation (this is Kap's lazy
+                // IntervalValue: size = ⍴b, not any element magnitude).
+                Some(l) => self.interval(l, right_val),
                 None => self.where_fn(right_val),
             },
             "⊤" | "encode" => self.encode(left_val, right_val),
@@ -3966,6 +3964,90 @@ impl Engine {
         Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
             vec![out.len()],
             ArrayData::Nested(out),
+        )))))
+    }
+
+    /// Dyadic interval form `a ⍸ b` (Kotlin `WhereAPLFunction.eval2Arg`).
+    /// `a` = boundaries (scalar or 1-D vector), must be strictly ascending (no equal
+    /// adjacent values), else error. `b` = data; the result has the SAME SHAPE as `b`,
+    /// each element = the count of boundaries `<=` that data value (binary search).
+    /// Magnitude of a huge `b` element (e.g. `1e100`) is just a comparison operand,
+    /// never an allocation count — so this is inherently bounded by `⍴b` (Kotlin's
+    /// lazy `IntervalValue`), no runaway allocation.
+    fn interval(
+        &self,
+        left_val: AplRef<APLValue>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let a = left_val.force(self)?;
+        // Boundaries must be a scalar or a 1-D vector, strictly ascending.
+        let a_dims = a.dimensions();
+        if a_dims.len() > 1 {
+            return Err(AplError::runtime(
+                "Left argument must be a scalar or a 1-dimensional array".into(),
+            ));
+        }
+        let mut boundaries: Vec<APLValue> = match a.as_ref() {
+            APLValue::Array(arr) => arr.elements().into_iter().map(|e| (*e).clone()).collect(),
+            APLValue::Str(s) => s.chars().map(APLValue::Char).collect(),
+            other => vec![other.clone()],
+        };
+        // Validate strictly ascending (Kotlin throws on a non-ordered left arg).
+        for w in boundaries.windows(2) {
+            match w[0].total_cmp(&w[1]) {
+                Some(Ordering::Less) => {}
+                _ => {
+                    return Err(AplError::runtime(
+                        "Left argument must be ordered".into(),
+                    ))
+                }
+            }
+        }
+        let b = right_val.force(self)?;
+        // Empty data (including `⍬` / `""`) → Null (Kotlin `⍸` on an empty right returns Null).
+        if matches!(b.as_ref(), APLValue::Null) {
+            return Ok(Rc::new(APLValue::Null));
+        }
+        // Materialise one result per element of `b`, preserving `b`'s shape.
+        // A string right argument is iterated character-by-character (Kotlin `IntervalValue`).
+        let (b_dims, b_elems): (Vec<usize>, Vec<AplRef<APLValue>>) = match b.as_ref() {
+            APLValue::Array(arr) => (arr.dimensions.clone(), arr.elements()),
+            APLValue::Str(s) => {
+                let cs: Vec<AplRef<APLValue>> = s.chars().map(|c| Rc::new(APLValue::Char(c))).collect();
+                (vec![cs.len()], cs)
+            }
+            other => (vec![], vec![Rc::new(other.clone())]),
+        };
+        if b_elems.is_empty() {
+            return Ok(Rc::new(APLValue::Null));
+        }
+        let vals: Vec<AplRef<APLValue>> = b_elems
+            .iter()
+            .map(|e| {
+                // Binary search: count boundaries <= the data value.
+                let mut low = 0i64;
+                let mut high = boundaries.len() as i64 - 1;
+                while low <= high {
+                    let mid = ((low as u64 + high as u64) / 2) as i64;
+                    let cmp = boundaries[mid as usize]
+                        .total_cmp(&*e)
+                        .unwrap_or(Ordering::Less);
+                    match cmp {
+                        Ordering::Less => low = mid + 1,
+                        Ordering::Greater => high = mid - 1,
+                        Ordering::Equal => {
+                            // Found an equal boundary: in Kotlin a value equal to a
+                            // boundary counts as "past" it, i.e. index+1 (low = mid+1).
+                            low = mid + 1;
+                        }
+                    }
+                }
+                Rc::new(APLValue::Number(KapNumber::Long(low)))
+            })
+            .collect();
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            b_dims,
+            ArrayData::Nested(vals),
         )))))
     }
 
