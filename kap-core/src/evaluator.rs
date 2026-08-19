@@ -1176,9 +1176,14 @@ impl Engine {
                 }, "⌊"),
             },
             "|" | "mod" => self.num2(left_val, right_val, |a, b| a.modulo(b), "|"),
-            "*" => match left_val {
-                None => self.scalar1(right_val, |x| x.exp(), "*"),
-                Some(_) => self.num2(left_val, right_val, |a, b| a.pow(b), "*"),
+            "*" | "⋆" => match left_val {
+                None => self.scalar1(right_val, |x| x.exp(), "⋆"),
+                Some(_) => self.num2(left_val, right_val, |a, b| a.pow(b), "⋆"),
+            },
+            "√" => match left_val {
+                // Monadic `√ y` = square root. Dyadic `a √ b` = b^(1/a) (nth root).
+                None => self.scalar1(right_val, |x| x.sqrt(), "√"),
+                Some(_) => self.num2(left_val, right_val, |a, b| b.nth_root(a), "√"),
             },
             "×" => match left_val {
                 None => self.scalar1(right_val, |x| x.signum(), "×"),
@@ -1413,7 +1418,7 @@ impl Engine {
             "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"
                 | "↑" | "↓" | "⊂" | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥"
-                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼" | "!" | "…" | "⍷" | "cmp"
+                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√"
         )
     }
 

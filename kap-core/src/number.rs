@@ -429,6 +429,53 @@ impl KapNumber {
         }
     }
 
+    /// Square root (Kap `√` monadic). Negative reals and all complex inputs yield a
+    /// complex result, mirroring Kotlin `SqrtAPLFunction` (`x.pow(Complex.ONE_HALF)`).
+    pub fn sqrt(&self) -> KapNumber {
+        match self {
+            KapNumber::Complex(r, i) => {
+                let z = (*r, *i);
+                let (mag, arg) = (babs(z), barg(z));
+                let rm = mag.sqrt();
+                KapNumber::Complex(rm * bcos(arg * 0.5), rm * bsin(arg * 0.5))
+            }
+            other => {
+                let x = other.as_double();
+                if x < 0.0 {
+                    KapNumber::Complex(0.0, (-x).sqrt())
+                } else {
+                    KapNumber::Double(x.sqrt())
+                }
+            }
+        }
+    }
+
+    /// Nth root (Kap `√` dyadic: `a √ b` = `b ^ (1/a)`). Delegates to the power operation
+    /// via the reciprocal degree; negative radicands yield complex results.
+    pub fn nth_root(&self, degree: &KapNumber) -> KapNumber {
+        let a = degree.as_double();
+        if a == 0.0 {
+            return KapNumber::Double(f64::NAN);
+        }
+        let inv = 1.0 / a;
+        match self {
+            KapNumber::Complex(r, i) => {
+                let z = (*r, *i);
+                let (mag, arg) = (babs(z), barg(z));
+                let rm = mag.powf(inv);
+                KapNumber::Complex(rm * bcos(arg * inv), rm * bsin(arg * inv))
+            }
+            other => {
+                let b = other.as_double();
+                if b < 0.0 {
+                    KapNumber::Complex(0.0, (-b).powf(inv))
+                } else {
+                    KapNumber::Double(b.powf(inv))
+                }
+            }
+        }
+    }
+
     /// Signum (Kap `×`: `1`, `0`, or `-1` for real; angle-1 unit complex for complex).
     pub fn signum(&self) -> KapNumber {
         use KapNumber::*;
