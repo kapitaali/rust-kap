@@ -854,8 +854,10 @@ impl Engine {
                 _ => return Err(AplError::runtime("adverb must be a symbol".into())),
             };
             return match adv_name.as_str() {
-                "/" | "reduce" => self.adverb_reduce(func, left, right, env),
-                "\\" | "scan" => self.adverb_scan(func, left, right, env),
+                "/" | "reduce" => self.adverb_reduce(func, left, right, env, true),
+                "\\" | "scan" => self.adverb_scan(func, left, right, env, true),
+                "⌿" => self.adverb_reduce(func, left, right, env, false),
+                "⍀" => self.adverb_scan(func, left, right, env, false),
                 "¨" | "each" => self.adverb_each(func, left, right, env),
                 other => Err(AplError::runtime(format!("unknown adverb: {}", other))),
             };
@@ -3460,81 +3462,187 @@ impl Engine {
         left: &Option<Box<Instr>>,
         right: &Box<Instr>,
         env: &AplRef<Environment>,
+        last_axis: bool,
     ) -> Result<AplRef<APLValue>, AplError> {
         let data = self.eval_instr(right, env)?.force(self)?;
-        let elems = self.flat_elements(&data);
-        if elems.is_empty() {
-            return Err(AplError::runtime("reduce /: empty array".into()));
-        }
-        // Plain reduce (no left arg): fold the entire array to a single scalar value.
-        if left.is_none() {
-            let mut acc = elems[0].clone();
-            for e in &elems[1..] {
-                acc = self.apply_fn_instr(fn_instr, Some(&acc), e, env)?;
+        // Windowed reduce (`N f/`): sliding window of size `|N|` over the flat array,
+        // producing `len-|N|+1` results (Kap's windowed reduce).
+        if left.is_some() {
+            let elems = self.flat_elements(&data);
+            if elems.is_empty() {
+                return Err(AplError::runtime("reduce /: empty array".into()));
             }
-            return Ok(acc);
-        }
-        // Windowed reduce (`N f/`): sliding window of size `|N|`, producing `len-|N|+1`
-        // results (Kap's windowed reduce; `|N|` must fit within the array length).
-        let lv = self.eval_instr(left.as_ref().unwrap(), env)?.force(self)?;
-        let n = match lv.as_ref() {
-            APLValue::Number(KapNumber::Long(v)) => *v,
-            APLValue::Number(_) => {
-                return Err(AplError::runtime("reduce /: window must be an integer".into()))
+            let lv = self.eval_instr(left.as_ref().unwrap(), env)?.force(self)?;
+            let n = match lv.as_ref() {
+                APLValue::Number(KapNumber::Long(v)) => *v,
+                APLValue::Number(_) => {
+                    return Err(AplError::runtime("reduce /: window must be an integer".into()))
+                }
+                _ => return Err(AplError::runtime("reduce /: window must be a number".into())),
+            };
+            let window = n.unsigned_abs() as usize;
+            if window == 0 || window > elems.len() {
+                return Err(AplError::runtime(format!(
+                    "reduce /: left argument too large. |A| ({}) must be ≤ the size of the reduced axis ({}) - 1",
+                    window,
+                    elems.len()
+                )));
             }
-            _ => return Err(AplError::runtime("reduce /: window must be a number".into())),
+            let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(elems.len() - window + 1);
+            for i in 0..=(elems.len() - window) {
+                let mut acc = elems[i].clone();
+                for e in &elems[i + 1..i + window] {
+                    acc = self.apply_fn_instr(fn_instr, Some(&acc), e, env)?;
+                }
+                out.push(acc);
+            }
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![out.len()],
+                ArrayData::Nested(out),
+            )))));
+        }
+        // Plain reduce: fold along ONE axis. `/` reduces the LAST axis (Kap rank-1
+        // reduce → single scalar, matching APL), `⌿` reduces the FIRST axis.
+        let dims = data.dimensions();
+        let rank = dims.len();
+        if rank == 0 {
+            return Err(AplError::runtime("reduce: cannot reduce a scalar".into()));
+        }
+        let axis = if last_axis { rank - 1 } else { 0 };
+        let axis_len = dims[axis];
+        if axis_len == 0 {
+            return Err(AplError::runtime("reduce: cannot reduce an empty axis".into()));
+        }
+        // Row-major strides for the full shape.
+        let mut strides = vec![1usize; rank];
+        for i in (0..rank).rev() {
+            if i + 1 < rank {
+                strides[i] = strides[i + 1] * dims[i + 1];
+            }
+        }
+        let flat_of = |coords: &[usize]| -> usize {
+            let mut f = 0;
+            for i in 0..rank {
+                f += coords[i] * strides[i];
+            }
+            f
         };
-        let window = n.unsigned_abs() as usize;
-        if window == 0 || window > elems.len() {
-            return Err(AplError::runtime(format!(
-                "reduce /: left argument too large. |A| ({}) must be ≤ the size of the reduced axis ({}) - 1",
-                window,
-                elems.len()
-            )));
-        }
-        let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(elems.len() - window + 1);
-        for i in 0..=(elems.len() - window) {
-            let mut acc = elems[i].clone();
-            for e in &elems[i + 1..i + window] {
-                acc = self.apply_fn_instr(fn_instr, Some(&acc), e, env)?;
+        let mut result_dims = dims.clone();
+        result_dims.remove(axis);
+        let lane_count: usize = if result_dims.is_empty() { 1 } else { result_dims.iter().product() };
+        let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(lane_count);
+        for lane in 0..lane_count {
+            // Decode the lane index into fixed coords for every axis except `axis`.
+            let mut rest = lane;
+            let mut fixed = vec![0usize; rank];
+            let mut ri = 0;
+            for i in 0..rank {
+                if i == axis {
+                    continue;
+                }
+                let d = result_dims[ri];
+                fixed[i] = rest % d;
+                rest /= d;
+                ri += 1;
+            }
+            // Fold the fiber along `axis` (k = 0..axis_len).
+            let mut coords = fixed.clone();
+            coords[axis] = 0;
+            let mut acc = Rc::new(data.value_at(flat_of(&coords)));
+            for k in 1..axis_len {
+                coords[axis] = k;
+                let v = data.value_at(flat_of(&coords));
+                acc = self.apply_fn_instr(fn_instr, Some(&acc), &Rc::new(v), env)?;
             }
             out.push(acc);
         }
-        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-            vec![out.len()],
-            ArrayData::Nested(out),
-        )))))
+        if result_dims.is_empty() {
+            // Reduced a vector to a scalar (rank 0).
+            Ok(out.into_iter().next().unwrap())
+        } else {
+            Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                result_dims,
+                ArrayData::Nested(out),
+            )))))
+        }
     }
 
-    /// Scan `f\array`: like reduce but keep every intermediate accumulator
-    /// (`[a, a f b, (a f b) f c, ...]`).
+    /// Scan `f\\array`: like reduce but keep every intermediate accumulator along
+    /// one axis (`\\` scans the LAST axis, `⍀` scans the FIRST axis), producing a
+    /// result of the SAME shape as the input.
     fn adverb_scan(
         &self,
         fn_instr: &Instr,
         left: &Option<Box<Instr>>,
         right: &Box<Instr>,
         env: &AplRef<Environment>,
+        last_axis: bool,
     ) -> Result<AplRef<APLValue>, AplError> {
         if left.is_some() {
             return Err(AplError::runtime("scan \\ is monadic (use f\\array)".into()));
         }
         let data = self.eval_instr(right, env)?.force(self)?;
-        let elems = self.flat_elements(&data);
-        match elems.split_first() {
-            Some((first, rest)) => {
-                let mut acc = first.clone();
-                let mut out = vec![acc.clone()];
-                for e in rest {
-                    acc = self.apply_fn_instr(fn_instr, Some(&acc), e, env)?;
-                    out.push(acc.clone());
-                }
-                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                    vec![out.len()],
-                    ArrayData::Nested(out),
-                )))))
-            }
-            None => Err(AplError::runtime("scan \\: empty array".into())),
+        let dims = data.dimensions();
+        let rank = dims.len();
+        if rank == 0 {
+            return Err(AplError::runtime("scan: cannot scan a scalar".into()));
         }
+        let axis = if last_axis { rank - 1 } else { 0 };
+        let axis_len = dims[axis];
+        if axis_len == 0 {
+            return Err(AplError::runtime("scan: cannot scan an empty axis".into()));
+        }
+        // Row-major strides for the full shape.
+        let mut strides = vec![1usize; rank];
+        for i in (0..rank).rev() {
+            if i + 1 < rank {
+                strides[i] = strides[i + 1] * dims[i + 1];
+            }
+        }
+        let total: usize = dims.iter().product();
+        // Result shape (axis removed) and its row-major strides, so we can map a fiber
+        // to a sequential 0-based lane index in [0, lane_count).
+        let mut result_dims = dims.clone();
+        result_dims.remove(axis);
+        let mut rd_strides = vec![1usize; result_dims.len()];
+        for i in (0..result_dims.len()).rev() {
+            if i + 1 < result_dims.len() {
+                rd_strides[i] = rd_strides[i + 1] * result_dims[i + 1];
+            }
+        }
+        let lane_count = if result_dims.is_empty() { 1 } else { result_dims.iter().product() };
+        let mut accs: Vec<Option<AplRef<APLValue>>> = vec![None; lane_count];
+        let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(total);
+        for f in 0..total {
+            let mut rem = f;
+            let mut coords = vec![0usize; rank];
+            for i in 0..rank {
+                let c = rem / strides[i];
+                coords[i] = c;
+                rem -= c * strides[i];
+            }
+            // Sequential lane index = flat coord of the fiber (axis coordinate dropped).
+            let mut lane = 0usize;
+            let mut ri = 0;
+            for i in 0..rank {
+                if i == axis {
+                    continue;
+                }
+                lane += coords[i] * rd_strides[ri];
+                ri += 1;
+            }
+            let cur = Rc::new(data.value_at(f));
+            let new_acc = match accs[lane].take() {
+                None => cur.clone(),
+                Some(a) => self.apply_fn_instr(fn_instr, Some(&a), &cur, env)?,
+            };
+            accs[lane] = Some(new_acc.clone());
+            out.push(new_acc);
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            dims,
+            ArrayData::Nested(out),
+        )))))
     }
 
     /// Each `f¨array` (monadic) or `a f¨ b` (dyadic, element-wise with scalar extension).

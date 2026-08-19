@@ -1339,7 +1339,7 @@ impl<'a> Parser<'a> {
     /// Higher-order operators (adverbs) that take a *function* as one operand:
     /// `/` reduce, `\` scan, `¨` each.
     fn is_adverb(name: &str) -> bool {
-        matches!(name, "/" | "reduce" | "\\" | "scan" | "¨" | "each")
+        matches!(name, "/" | "reduce" | "\\" | "scan" | "⌿" | "⍀" | "¨" | "each")
     }
 
     /// Try to parse a *train*: a parenthesised sequence of >=2 function expressions,
