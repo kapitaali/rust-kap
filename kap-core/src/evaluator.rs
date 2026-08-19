@@ -1152,6 +1152,7 @@ impl Engine {
             "↑" => self.take(left_val, right_val),
             "↓" => self.drop(left_val, right_val),
             "⊂" => self.enclose(right_val),
+            "⍮" | "pair" => self.pair(left_val, right_val),
             "⌷" | "reveal" | "disclose" => self.disclose(right_val),
             // --- more builtins (Phase 6) ---
             "⌈" | "ceil" => match left_val {
@@ -1418,7 +1419,7 @@ impl Engine {
             "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"
                 | "↑" | "↓" | "⊂" | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥"
-                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√"
+                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair"
         )
     }
 
@@ -3081,6 +3082,28 @@ impl Engine {
             vec![1],
             ArrayData::Nested(vec![right_val]),
         )))))
+    }
+
+    /// Kap's pair (`⍮`): monadic `⍮x` = enclose x in a length-1 nested vector;
+    /// dyadic `a⍮b` = a length-2 nested vector `(a b)`. Mirrors Kotlin
+    /// `PairAPLFunction` (eval1Arg → ResizedArrayImpls.resizedSingleValue;
+    /// eval2Arg → APLArrayImpl(dimensionsOfSize(2), [a, b])).
+    fn pair(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        match left_val {
+            None => self.enclose(right_val),
+            Some(l) => {
+                let a = l.force(self)?;
+                let b = right_val.force(self)?;
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![2],
+                    ArrayData::Nested(vec![a, b]),
+                )))))
+            }
+        }
     }
 
     /// Kap's reveal/disclose (`⌷`): remove one level of boxing from a nested array.

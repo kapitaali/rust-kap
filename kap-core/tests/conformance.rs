@@ -489,6 +489,11 @@ fn curated_kap_parity() {
         ("2√8", "2.8284271247461903"),
         ("4√16", "2.0"),
         ("√0", "0.0"),
+        // Phase 6 breadth: ⍮ (pair) — Kotlin PairAPLFunction; display uses () per our hard rule
+        ("1 ⍮ 2", "(1 2)"),
+        ("1 2 3 ⍮ 4 5 6", "((1 2 3) (4 5 6))"),
+        ("⍮ 5", "(5)"),
+        ("(1 2) ⍮ (3 4)", "((1 2) (3 4))"),
     ];
 
     let mut failures = Vec::new();
