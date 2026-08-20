@@ -1167,6 +1167,7 @@ impl Engine {
             "↑" => self.take(left_val, right_val),
             "↓" => self.drop(left_val, right_val),
             "⊂" => self.enclose(right_val),
+            "⊆" => self.partitioned_enclose(left_val, right_val),
             "⍮" | "pair" => self.pair(left_val, right_val),
             "⌷" | "reveal" | "disclose" => self.disclose(right_val),
             // --- more builtins (Phase 6) ---
@@ -1434,7 +1435,7 @@ impl Engine {
             "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"
                 | "↑" | "↓" | "⊂" | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥"
-                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair"
+                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair" | "⊆"
         )
     }
 
@@ -3353,6 +3354,115 @@ impl Engine {
             vec![1],
             ArrayData::Nested(vec![right_val]),
         )))))
+    }
+
+    /// Kap's partitioned enclose (`⊆`): monadic = "nest" (enclose a non-scalar whole;
+    /// scalars pass through), dyadic = partition `B` along the last axis using `A`'s
+    /// integer indicators. Mirrors Kotlin `PartitionedEncloseFunction`
+    /// (`disclose.kt`): a `>0` indicator at position `i>0` starts a new partition; an
+    /// indicator `>1` opens that many partitions; cells are contiguous runs along the axis.
+    fn partitioned_enclose(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let b = right_val.force(self)?;
+        match left_val {
+            None => {
+                // Monadic: scalar passes through; anything else is enclosed whole.
+                if b.dimensions().is_empty() {
+                    Ok(Rc::new(b.as_ref().clone()))
+                } else {
+                    self.enclose(Rc::new(b.as_ref().clone()))
+                }
+            }
+            Some(l) => {
+                let a = l.force(self)?;
+                let b_dims = b.dimensions();
+                if b_dims.is_empty() {
+                    return Err(AplError::runtime("⊆: right argument must not be a scalar".into()));
+                }
+                let axis = b_dims.len() - 1; // default last axis (Kotlin computeAxis)
+                // Left indicators must be a scalar or a 1-D array.
+                let a_dims = a.dimensions();
+                let inds: Vec<i64> = match a.as_ref() {
+                    APLValue::Number(KapNumber::Long(v)) => vec![*v],
+                    APLValue::Array(_) => a
+                        .elements()
+                        .iter()
+                        .map(|e| match e.as_ref() {
+                            APLValue::Number(KapNumber::Long(v)) => *v,
+                            _ => 0,
+                        })
+                        .collect(),
+                    _ => {
+                        if a_dims.is_empty() {
+                            vec![0]
+                        } else {
+                            return Err(AplError::runtime(
+                                "⊆: left argument must be a scalar or 1-D array".into(),
+                            ));
+                        }
+                    }
+                };
+                if inds.len() != b_dims[axis] {
+                    return Err(AplError::runtime(format!(
+                        "⊆: size of A ({}) must equal the dimension of B along the selected axis ({})",
+                        inds.len(),
+                        b_dims[axis]
+                    )));
+                }
+                // computePartitionIndexes: collect (start,end) pairs along the axis.
+                let mut partitions: Vec<(usize, usize)> = Vec::new();
+                let mut curr_start: usize = 0;
+                let n = inds.len();
+                for i in 0..n {
+                    if inds[i] > 0 && i > 0 {
+                        partitions.push((curr_start, i));
+                        curr_start = i;
+                    }
+                    if inds[i] > 1 {
+                        for _ in 0..(inds[i] - 1) {
+                            partitions.push((i, i));
+                        }
+                    }
+                }
+                partitions.push((curr_start, n));
+
+                let b_elems = b.elements();
+                let axis_len = b_dims[axis];
+                let frame = b_dims[..axis].iter().product::<usize>().max(1);
+                let row_len = axis_len; // along-axis length per frame cell
+
+                // Build nested cells. For each leading-frame index, slice [start,end)
+                // along the axis and assemble a 1-D vector cell.
+                let mut cells: Vec<AplRef<APLValue>> = Vec::new();
+                for f in 0..frame {
+                    for &(start, end) in &partitions {
+                        let mut cell: Vec<AplRef<APLValue>> = Vec::new();
+                        for j in start..end {
+                            let flat = f * row_len + j;
+                            cell.push(b_elems[flat].clone());
+                        }
+                        cells.push(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                            vec![cell.len()],
+                            ArrayData::Nested(cell),
+                        )))));
+                    }
+                }
+                let outer_dims = if frame == 1 {
+                    vec![partitions.len()]
+                } else {
+                    let mut d = b_dims[..axis].to_vec();
+                    d.push(partitions.len());
+                    d
+                };
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    outer_dims,
+                    ArrayData::Nested(cells),
+                )))))
+            }
+        }
     }
 
     /// Kap's pair (`⍮`): monadic `⍮x` = enclose x in a length-1 nested vector;

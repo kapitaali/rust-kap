@@ -14,7 +14,7 @@ coverage at last measure: **~43%** (1091 ok / 278 mismatch / 1186 unsupported).
 
 Pick one to scope per session:
 
-- `⊆` / `⊇` — partition / shape
+- `⊆` / `⊇` — partition / shape  **(`⊆` DONE — see below)**
 - `∘` / `≬` — operators
 - `→` — branch / guard
 - key / major-cell operators: `⌺` / `⌸`, `⍋⍒`-with-axis
@@ -48,7 +48,17 @@ Pick one to scope per session:
 
 ## Already closed (current branch)
 
-- **Adverbs `¨` / `/` / `\` now bind to named user functions** — `dbl¨ 1 2 3`,
+- **`⊆` (partitioned enclose) implemented** — `evaluator.rs::partitioned_enclose`
+  mirrors Kotlin `PartitionedEncloseFunction` (disclose.kt). Monadic = "nest"
+  (scalar passes through; else the array is enclosed whole). Dyadic `A ⊆ B`
+  partitions `B` along the last axis using `A`'s integer indicators (a `>0`
+  at `i>0` opens a new partition; an indicator `>1` repeats). Verified against
+  the `kap-jvm-text` oracle: `1 0 1 ⊆ 1 2 3 → ((1 2) (3))`,
+  `1 0 1 0 1 ⊆ 10 20 30 40 50 → ((10 20) (30 40) (50))`, etc. Display uses the
+  port's `()` convention (not the oracle's `⟨⟩`). Registered in BOTH
+  `evaluator.rs::is_primitive_name` and `parser.rs::is_primitive_op`. Added 6
+  curated parity rows to `conformance.rs`. `⊇` (PickAPLFunction) NOT yet done.
+- **Adverbs `¨` / `/` / `\\` now bind to named user functions** — `dbl¨ 1 2 3`,
   `dbl/ 1 2 3`, `dbl\ …` work (commit `828913a`). Previously `unknown function: ¨`.
 - Dyadic `⍳` index-of + string `cmp` (commit `ee7df32`-era).
 - `regex:*` namespace (match/find/findall/replace/split/compile).
