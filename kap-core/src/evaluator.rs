@@ -1729,10 +1729,14 @@ impl Engine {
 
     /// Element-wise codepoint shift of a string by a number (scalar or numeric array,
     /// broadcast if the number side is length 1). `is_add` selects `+`/`-`.
+    /// `result_is_char` is true when the non-number operand was a single `Char`, in
+    /// which case the shifted scalar result is a `Char` (e.g. `@a + 1` -> `@b`); a
+    /// string operand instead yields a `Str` (a char-vector that displays as a string).
     fn char_shift(
         s: &str,
         nums: &[KapNumber],
         is_add: bool,
+        result_is_char: bool,
     ) -> Result<AplRef<APLValue>, AplError> {
         let cps: Vec<i64> = s.chars().map(|c| c as i64).collect();
         let n = if nums.len() == 1 {
@@ -1761,7 +1765,12 @@ impl Engine {
             }
             out.push(char::from_u32(new_cp as u32).unwrap_or('?'));
         }
-        Ok(Rc::new(APLValue::Str(out)))
+        if result_is_char {
+            // Single-char shift collapses to a `Char` value (matches Real Kap).
+            Ok(Rc::new(APLValue::Char(out.chars().next().unwrap_or('?'))))
+        } else {
+            Ok(Rc::new(APLValue::Str(out)))
+        }
     }
 
     /// Element-wise codepoint difference of two equal-length strings -> numeric vector.
@@ -1784,29 +1793,56 @@ impl Engine {
 
     /// Char/string arithmetic dispatch for `+`/`-`. Returns `Some(result)` when the operands
     /// are character-valued (so the caller should `return` it); `None` means "fall through to
-    /// ordinary numeric handling". Kap rules (mirrors StringsTest.kt):
-    ///  * a single `Char` may never do arithmetic (`@a + @A`, `@a - 98`, `±1j1` all error);
-    ///  * `Str + Number` and `Number + Str` => char shift (both directions);
-    ///  * `Str - Number` => char shift, but `Number - Str` => ERROR (int−char asymmetry);
-    ///  * `Str - Str` => element-wise codepoint difference (numeric vector); `Str + Str` => error.
+    /// ordinary numeric handling". Kap rules (verified against the `kap-jvm-text` oracle):
+    ///  * `Char - Char` => element-wise codepoint difference, an `Integer` (`@b - @a` -> `1`).
+    ///  * `Char ± Number` => codepoint shift, a `Char` (`@a + 1` -> `@b`, `@a - 1` -> `@\``).
+    ///  * `Number + Char` => shift, a `Char` (`1 + @a` -> `@b`).
+    ///  * `Number - Char` => ERROR (int−char asymmetry).
+    ///  * `Str ± Number` => char shift (`"ab" + 1` -> `"bc"`, `"ab" - 1` -> `"\`a"`).
+    ///  * `Number + Str` => shift; `Number - Str` => ERROR.
+    ///  * `Str - Str` => element-wise codepoint difference (numeric vector).
+    ///  * `Str + Str` / `Char × Char` / `Char | Char` => ERROR (char ops are not additive).
     fn compute_char_op(
         &self,
         left: &APLValue,
         right: &APLValue,
         is_add: bool,
     ) -> Option<Result<AplRef<APLValue>, AplError>> {
-        // Single-character arithmetic is never allowed.
-        if matches!(left, APLValue::Char(_)) || matches!(right, APLValue::Char(_)) {
-            return Some(Err(AplError::runtime(
-                "arithmetic on a single character is not allowed".into(),
-            )));
+        // Char - Char => integer difference.
+        if let (APLValue::Char(a), APLValue::Char(b)) = (left, right) {
+            if is_add {
+                // `+` does not support char arguments (only `-` subtracts chars).
+                return Some(Err(AplError::runtime(
+                    "cannot add two characters".into(),
+                )));
+            }
+            return Some(Ok(Rc::new(APLValue::Number(KapNumber::Long(
+                (*a as i64) - (*b as i64),
+            )))));
         }
-        // String - String => element-wise codepoint difference (numbers).
+        // String - String => element-wise codepoint difference (numbers). Addition errors.
         if let (APLValue::Str(a), APLValue::Str(b)) = (left, right) {
             if is_add {
                 return Some(Err(AplError::runtime("cannot add two strings".into())));
             }
             return Some(Self::char_diff(a, b));
+        }
+        // Char ± Number => char shift (both directions).
+        if let (APLValue::Char(c), APLValue::Number(n)) = (left, right) {
+            let nums = vec![n.clone()];
+            let s = c.to_string();
+            return Some(Self::char_shift(&s, &nums, is_add, true));
+        }
+        if let (APLValue::Number(n), APLValue::Char(c)) = (left, right) {
+            let nums = vec![n.clone()];
+            let s = c.to_string();
+            // int - char asymmetry: subtracting a char from a number is forbidden.
+            if !is_add {
+                return Some(Err(AplError::runtime(
+                    "cannot subtract a character from a number".into(),
+                )));
+            }
+            return Some(Self::char_shift(&s, &nums, is_add, true));
         }
         // Exactly one operand is a string; the other must be a number (scalar or numeric array).
         let (s, nums, str_is_left) = match (left, right) {
@@ -1820,7 +1856,7 @@ impl Engine {
                 "cannot subtract a character from a number".into(),
             )));
         }
-        Some(Self::char_shift(&s, &nums, is_add))
+        Some(Self::char_shift(&s, &nums, is_add, false))
     }
 
     /// Render a value for `io:print`/`:pretty`/`:read` style selection. The default

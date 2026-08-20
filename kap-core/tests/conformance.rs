@@ -562,6 +562,18 @@ fn curated_kap_parity() {
         ("\"x\" regex:replace (\"fooxbar\";\"qwe\")", "\"fooqwebar\""),
         ("\"a\" regex:split \"xayaz\"", "(\"x\" \"y\" \"z\")"),
         ("\"x(f[0-9]+)y\" regex:finderror \"fooxf12345ybar\"", "(\"xf12345y\" \"f12345\")"),
+        // Character arithmetic (Kotlin StringsTest.kt / oracle `kap-jvm-text`):
+        // `Char - Char` => integer; `Char ± Number`/`Number + Char` => Char;
+        // `Str ± Number` => shifted string (char array); `Str - Str` => numeric vector.
+        ("@b - @a", "1"),
+        ("@a - @b", "¯1"),
+        ("@a + 1", "@b"),
+        ("@a - 1", "@`"),
+        ("1 + @a", "@b"),
+        ("\"ab\" + 1", "\"bc\""),
+        ("1 + \"ab\"", "\"bc\""),
+        ("\"ab\" - 1", "\"`a\""),
+        ("\"abc\" - \"def\"", "(¯3 ¯3 ¯3)"),
         // Branch/return `→` (Kotlin ReturnFunction): monadic returns immediately;
         // dyadic `cond → val` returns val when cond truthy, else continues.
         ("{→ 5} 9", "5"),
