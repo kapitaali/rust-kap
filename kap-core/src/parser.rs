@@ -971,8 +971,11 @@ impl<'a> Parser<'a> {
                 });
             }
             // Function-then-adverb: `f/` `f¨` etc. Build a derived function `func op`
-            // and apply it to the following data operand.
-            if is_prim && next_is_adverb {
+            // and apply it to the following data operand. This fires for primitive ops
+            // (`+/`, `×¨`) AND for known user-defined functions (`dbl¨`, `fact/`) — a
+            // named function is a valid left operand of an adverb, so `dbl¨ 1 2 3`
+            // must bind `Derived{dbl, ¨}` rather than applying `¨` to `dbl`.
+            if (is_prim || is_known) && next_is_adverb {
                 let op = self.parse_primary()?; // consume the adverb symbol
                 let data = self.parse_apply()?;
                 return Ok(Instr::Apply {
@@ -1114,7 +1117,13 @@ impl<'a> Parser<'a> {
             // token is an adverb. Bind them into a derived function and apply the
             // accumulated `left` data plus the following data to it (dyadic each).
             let op_is_func = match &fn_expr {
-                Instr::Symbol { name, .. } => Self::is_primitive_op(name),
+                Instr::Symbol { name, namespace } => {
+                    // A primitive operator, OR a known user-defined function, can be the
+                    // left operand of an adverb: `×¨` and `dbl¨` both bind into a Derived.
+                    // (Previously only primitives were handled, so `dbl¨ 1 2 3` fell through
+                    // to a plain apply with `¨` as the function → "unknown function: ¨".)
+                    Self::is_primitive_op(name) || self.is_known_fn(name, namespace)
+                }
                 _ => false,
             };
             if op_is_func {
