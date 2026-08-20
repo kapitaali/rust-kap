@@ -562,6 +562,16 @@ fn curated_kap_parity() {
         ("\"x\" regex:replace (\"fooxbar\";\"qwe\")", "\"fooqwebar\""),
         ("\"a\" regex:split \"xayaz\"", "(\"x\" \"y\" \"z\")"),
         ("\"x(f[0-9]+)y\" regex:finderror \"fooxf12345ybar\"", "(\"xf12345y\" \"f12345\")"),
+        // Branch/return `→` (Kotlin ReturnFunction): monadic returns immediately;
+        // dyadic `cond → val` returns val when cond truthy, else continues.
+        ("{→ 5} 9", "5"),
+        ("{→ 5 ⋄ 99} 1", "5"),
+        ("{⍵ → ⍵+1} 9", "10"),
+        ("{⍵ → 5} 9", "5"),
+        ("{0 → 5 ⋄ ⍵} 9", "9"),
+        ("{1 → 5 ⋄ ⍵} 9", "5"),
+        ("f ⇐ {⍵<0 ⋄ → ¯1 ⋄ ⍵×2} ⋄ f 3", "¯1"),
+        ("f ⇐ {if(⍵<0){→¯1} ⋄ ⍵×2} ⋄ f 3", "6"),
     ];
 
     let mut failures = Vec::new();

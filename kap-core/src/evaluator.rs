@@ -790,7 +790,11 @@ impl Engine {
                     body: Rc::new(Instr::Block { body: body.clone() }),
                     env: env.clone(),
                 }));
-                return self.eval_block(body, &child);
+                // Return early on `→` (branch/return) so it exits the block.
+                return match self.eval_block(body, &child) {
+                    Err(AplError::Return(v)) => Ok(v),
+                    other => other,
+                };
             }
             // `⍞name`: a dynamic function reference. Resolve `name` to its value (a
             // function) and apply it. Mirrors Kap's DynamicFunctionDescriptor.
@@ -1169,6 +1173,7 @@ impl Engine {
             "⊂" => self.enclose(right_val),
             "⊆" => self.partitioned_enclose(left_val, right_val),
             "⊇" => self.pick_apl(left_val, right_val),
+            "→" | "branch" => self.return_arrow(left_val, right_val),
             "⍮" | "pair" => self.pair(left_val, right_val),
             "⌷" | "reveal" | "disclose" => self.disclose(right_val),
             // --- more builtins (Phase 6) ---
@@ -1436,7 +1441,7 @@ impl Engine {
             "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"
                 | "↑" | "↓" | "⊂" | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥"
-                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair" | "⊆" | "⊇"
+                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair" | "⊆" | "⊇" | "→"
  )
     }
 
@@ -1535,11 +1540,19 @@ impl Engine {
         // would drop the operand — e.g. `foo ⇐ ×/ ⋄ foo 1 2 3`, or apply `-` ambivalently
         // for `foo ⇐ -`). `eval_apply` dispatches primitives (and looks up user-fn names)
         // correctly with the supplied left/right.
-        match body {
+        //
+        // `→` (branch/return) raises `AplError::Return(v)`; the enclosing function frame
+        // catches it here and returns `v`. If it escapes uncaught (top level), `eval_string_in_env`
+        // converts it to the Real-Kap message "Call to return without a function call".
+        let result = match body {
             Instr::Derived { .. } | Instr::Train { .. } | Instr::Symbol { .. } => {
                 self.eval_apply(body, left, right, &child)
             }
             _ => self.eval_instr(body, &child),
+        };
+        match result {
+            Err(AplError::Return(v)) => Ok(v),
+            other => other,
         }
     }
 
@@ -3606,6 +3619,31 @@ impl Engine {
             a_dims,
             ArrayData::Nested(out),
         )))))
+    }
+
+    /// Kap's branch/return primitive `→`.
+    /// - Monadic `→ value`: immediately returns `value` from the enclosing function.
+    /// - Dyadic `cond → value`: if `cond` is truthy, returns `value`; otherwise
+    ///   yields `value` and control continues (the function does not exit).
+    /// Implemented as a control-flow signal (`AplError::Return`) that the enclosing
+    /// user-function frame catches. If it escapes to top level (no enclosing
+    /// function), `eval_string_in_env` converts it to a runtime error.
+    /// Mirrors Kotlin `ReturnFunction` (div_functions.kt).
+    fn return_arrow(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        match left_val {
+            None => Err(AplError::Return(right_val)),
+            Some(cond) => {
+                if self.truthy(&cond) {
+                    Err(AplError::Return(right_val))
+                } else {
+                    Ok(right_val)
+                }
+            }
+        }
     }
 
     /// Convert an `APLValue` into a 0-based integer index. Accepts Long and Double

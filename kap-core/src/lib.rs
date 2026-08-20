@@ -524,6 +524,12 @@ pub enum AplError {
     /// evaluating a well-formed expression. Position is not tracked for these.
     #[error("error: {0}")]
     Runtime(String),
+    /// Control-flow return signal raised by the `→` (branch/return) primitive. It is
+    /// caught by the enclosing user-function frame, which returns the wrapped value.
+    /// If it escapes to the top level (no enclosing function), the evaluator converts
+    /// it to a "Call to return without a function call" runtime error.
+    #[error("return: {0:?}")]
+    Return(AplRef<APLValue>),
 }
 
 impl AplError {
