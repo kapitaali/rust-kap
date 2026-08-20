@@ -1175,7 +1175,7 @@ impl Engine {
             "⊇" => self.pick_apl(left_val, right_val),
             "→" | "branch" => self.return_arrow(left_val, right_val),
             "⍮" | "pair" => self.pair(left_val, right_val),
-            "⌷" | "reveal" | "disclose" => self.disclose(right_val),
+            "⌷" | "reveal" => self.access_from_index(left_val, right_val),
             // --- more builtins (Phase 6) ---
             "⌈" | "ceil" => match left_val {
                 None => self.scalar1(right_val, |x| x.ceil(), "⌈"),
@@ -2845,22 +2845,35 @@ impl Engine {
         left_val: Option<AplRef<APLValue>>,
         right_val: AplRef<APLValue>,
     ) -> Result<AplRef<APLValue>, AplError> {
-        let a = left_val.ok_or_else(|| {
-            AplError::runtime(", needs two args".into())
-        })?;
-        // Two strings concatenate into a string (Kotlin ConcatenateAPLFunction, BMP path).
-        if let (APLValue::Str(s1), APLValue::Str(s2)) = (a.as_ref(), right_val.as_ref()) {
-            let mut s = s1.clone();
-            s.push_str(s2);
-            return Ok(Rc::new(APLValue::Str(s)));
+        match left_val {
+            None => {
+                // Monadic `,` = ravel: flatten (one level) into a rank-1 vector.
+                // Oracle: `,5`→`⟨5⟩`, `,1 2 3`→`⟨1 2 3⟩`, `,⊂5`→`⟨5⟩`, `⍴,5`→`⟨1⟩`.
+                let v = right_val.force(self)?;
+                let mut elems = Vec::new();
+                self.collect_elements(&v, &mut elems);
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![elems.len()],
+                    ArrayData::Nested(elems),
+                )))))
+            }
+            Some(a) => {
+                let a = a.force(self)?;
+                // Two strings concatenate into a string (Kotlin ConcatenateAPLFunction, BMP path).
+                if let (APLValue::Str(s1), APLValue::Str(s2)) = (a.as_ref(), right_val.as_ref()) {
+                    let mut s = s1.clone();
+                    s.push_str(s2);
+                    return Ok(Rc::new(APLValue::Str(s)));
+                }
+                let mut elems = Vec::new();
+                self.collect_elements(&a, &mut elems);
+                self.collect_elements(&right_val, &mut elems);
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![elems.len()],
+                    ArrayData::Nested(elems),
+                )))))
+            }
         }
-        let mut elems = Vec::new();
-        self.collect_elements(&a, &mut elems);
-        self.collect_elements(&right_val, &mut elems);
-        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-            vec![elems.len()],
-            ArrayData::Nested(elems),
-        )))))
     }
 
     /// Flatten a value's elements for catenation/stranding: scalars become a 1-element
@@ -3399,11 +3412,19 @@ impl Engine {
     }
 
     fn enclose(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
-        // `⊂` wraps its argument in a 1-element nested array (scalar enclosure).
-        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-            vec![1],
-            ArrayData::Nested(vec![right_val]),
-        )))))
+        let v = right_val.force(self)?;
+        // Enclose: a primitive value (scalar number, char, string, null) is returned
+        // *unchanged* — its depth stays 0 and it does not become a box. A non-primitive
+        // value (array) becomes a 0-dimensional array containing the value. Mirrors
+        // Kap's `EncloseAPLFunction`. So `⊂5 → 5` and `≡⊂5 → 0`, while `,5` (a 1-element
+        // vector) is non-primitive and `⊂,5` is a 0-D box of depth 2.
+        match v.as_ref() {
+            APLValue::Number(_) | APLValue::Char(_) | APLValue::Str(_) | APLValue::Null => Ok(v),
+            _ => Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![],
+                ArrayData::Nested(vec![v]),
+            ))))),
+        }
     }
 
     /// Kap's partitioned enclose (`⊆`): monadic = "nest" (enclose a non-scalar whole;
@@ -3525,7 +3546,15 @@ impl Engine {
         right_val: AplRef<APLValue>,
     ) -> Result<AplRef<APLValue>, AplError> {
         match left_val {
-            None => self.enclose(right_val),
+            None => {
+                // Monadic `⍮x` = `⟨x⟩` — a length-1 vector whose single element is `x`.
+                // Oracle: `⍮5`→`⟨5⟩`, `⍮1 2 3`→`⟨⟨1 2 3⟩⟩`, `⍮⊂5`→`⟨5⟩`, `⍴⍮5`→`⟨1⟩`.
+                let v = right_val;
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![1],
+                    ArrayData::Nested(vec![v]),
+                )))))
+            }
             Some(l) => {
                 let a = l.force(self)?;
                 let b = right_val.force(self)?;
@@ -3601,7 +3630,42 @@ impl Engine {
         )))))
     }
 
-    /// Kap's pick (`⊇`): result shape = shape of `A`; each element of `A` is an *index
+    /// Kap's `⌷` (squad / index selection, `AccessFromIndexAPLFunction` in lookup.kt).
+    /// - Monadic `⌷X` = `⟨X⟩` — a length-1 vector whose single element is `X` itself
+    ///   (Kotlin `fromListFunction.eval1Arg(X.listify())`; `listify` wraps the whole value
+    ///   in a 1-element APLList). Oracle: `⍴⌷1 2 3 4` → `⟨1⟩`, `⌷1 2 3 4` → `⟨⟨1 2 3 4⟩⟩`,
+    ///   `⍴⌷⊂5` → `⟨1⟩`, `⌷⊂5` → `⟨5⟩`.
+    /// - Dyadic `A⌷B`: `A` is a rank-1 "position argument" whose elements select along the
+    ///   corresponding axis of `B` — a scalar index collapses that axis, a vector selects a
+    ///   sub-axis of that size, and `⍬`/null selects the whole axis. Reuses `pick` (the same
+    ///   per-axis selection machinery Kotlin shares between bracket-index and `⌷`).
+    fn access_from_index(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        match left_val {
+            None => {
+                // Monadic: listify wraps the *whole* value X in a single-element vector.
+                let v = right_val.force(self)?;
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![1],
+                    ArrayData::Nested(vec![v]),
+                )))))
+            }
+            Some(a) => {
+                let b = right_val.force(self)?;
+                let s = a.force(self)?;
+                // `⍬⌷B` (Null/empty position argument) selects the *entire* right argument
+                // (Kotlin `indexValue == APLNilValue -> makeAllIndexList`): identity selection.
+                // Oracle: `⍬⌷1 2 3`→`⟨1 2 3⟩`, `⍬⌷3 3⍴⍳9`→shape `3 3`, `⍬⌷5`→`5`.
+                if matches!(s.as_ref(), APLValue::Null) {
+                    return Ok(b);
+                }
+                self.pick(&b, &s)
+            }
+        }
+    }
     /// coordinate* into `B` (a scalar index for rank-1 `B`, a coordinate vector for
     /// higher-rank `B`), with negative-index support (`¯1` = last). Mirrors Kotlin
     /// `PickAPLFunction` / `PickResultValue` (lookup.kt).
@@ -4215,8 +4279,9 @@ impl Engine {
         }
     }
 
-    /// `≡`: dyadic = deep match-equal (returns 1/0); monadic = nesting depth.
-    /// Mirrors Kap's `CompareFunction` (compare_functions.kt).
+    /// `≡`: dyadic = type-discriminating match (returns 1/0); monadic = nesting depth.
+    /// Mirrors Kap's `CompareFunction` (compare_functions.kt): dyadic equal is STRICT on
+    /// type — `10 ≡ 10.0` is 0 (Long vs Double), unlike `=` which is value-equal.
     fn match_or_depth(
         &self,
         left_val: Option<AplRef<APLValue>>,
@@ -4229,8 +4294,12 @@ impl Engine {
             }
             Some(l) => {
                 let eq =
-                    Self::deep_equal(l.force(self)?.as_ref(), right_val.force(self)?.as_ref());
-                Ok(Rc::new(APLValue::Number(KapNumber::Long(if eq { 1 } else { 0 }))))
+                    Self::type_equal(l.force(self)?.as_ref(), right_val.force(self)?.as_ref());
+                Ok(Rc::new(APLValue::Number(KapNumber::Long(if eq {
+                    1
+                } else {
+                    0
+                }))))
             }
         }
     }
@@ -4256,7 +4325,47 @@ impl Engine {
         }
     }
 
-    /// Structural deep equality: same shape and element-wise equal.
+    /// Type-discriminating equality for `≡`/`≢` (Kap's `CompareFunction`): unlike `=`/`≠`
+    /// (which are value-equal and merge numeric kinds), `≡` requires the *same type*. So
+    /// `10 ≡ 10.0` is 0 (Long vs Double), `(1 2) ≡ (1 2.0)` is 0. Primitive kinds (number/
+    /// char/string/null/symbol) must also match exactly; arrays compare shape + element-wise.
+    fn type_equal(a: &APLValue, b: &APLValue) -> bool {
+        match (a, b) {
+            (APLValue::Number(x), APLValue::Number(y)) => {
+                // Same numeric *kind* required: Long≠Double, Complex differs from the rest.
+                match (x, y) {
+                    (KapNumber::Long(x), KapNumber::Long(y)) => x == y,
+                    (KapNumber::Double(x), KapNumber::Double(y)) => x == y,
+                    (KapNumber::BigInt(x), KapNumber::BigInt(y)) => x == y,
+                    (KapNumber::Rational(x), KapNumber::Rational(y)) => x == y,
+                    (KapNumber::Complex(xr, xi), KapNumber::Complex(yr, yi)) => xr == yr && xi == yi,
+                    _ => false,
+                }
+            }
+            (APLValue::Char(x), APLValue::Char(y)) => x == y,
+            (APLValue::Str(x), APLValue::Str(y)) => x == y,
+            (APLValue::Null, APLValue::Null) => true,
+            (APLValue::Symbol { name: n1, namespace: ns1 }, APLValue::Symbol { name: n2, namespace: ns2 }) => {
+                n1 == n2 && ns1 == ns2
+            }
+            (APLValue::Array(x), APLValue::Array(y)) => {
+                if x.dimensions != y.dimensions {
+                    return false;
+                }
+                let xe = x.elements();
+                let ye = y.elements();
+                xe.len() == ye.len()
+                    && xe
+                        .iter()
+                        .zip(ye.iter())
+                        .all(|(p, q)| Self::type_equal(p.as_ref(), q.as_ref()))
+            }
+            _ => false,
+        }
+    }
+
+    /// Structural deep equality: same shape and element-wise equal. Used by `=`/`≠`
+    /// (value-equal; numeric kinds merged) — NOT by `≡`/`≢` which use `type_equal`.
     fn deep_equal(a: &APLValue, b: &APLValue) -> bool {
         match (a, b) {
             (APLValue::Number(x), APLValue::Number(y)) => x.numeric_cmp(y).map(|o| o == Ordering::Equal).unwrap_or(false),

@@ -584,6 +584,44 @@ fn curated_kap_parity() {
         ("{1 → 5 ⋄ ⍵} 9", "5"),
         ("f ⇐ {⍵<0 ⋄ → ¯1 ⋄ ⍵×2} ⋄ f 3", "¯1"),
         ("f ⇐ {if(⍵<0){→¯1} ⋄ ⍵×2} ⋄ f 3", "6"),
+        // --- `⌷` squad / index selection (Kotlin AccessFromIndexAPLFunction) ---
+        // Monadic `⌷X` = `⟨X⟩`; dyadic `A⌷B` selects along B's axes (scalar collapses,
+        // vector picks a sub-axis, `⍬`/Null selects the whole axis).
+        ("⌷1 2 3 4", "((1 2 3 4))"),
+        ("⌷⊂5", "(5)"),
+        ("⍬⌷1 2 3", "(1 2 3)"),
+        ("⍬⌷3 3⍴⍳9", "(0 1 2 3 4 5 6 7 8)"),
+        ("0⌷1 2 3 4", "1"),
+        ("2⌷1 2 3 4", "3"),
+        ("¯1⌷1 2 3 4 5", "5"),
+        ("0⌷(1 2)(3 4)", "(1 2)"),
+        ("1⌷(1 2)(3 4)", "(3 4)"),
+        ("0 0⌷3 3⍴⍳9", "0"),
+        ("1 2⌷3 3⍴⍳9", "5"),
+        // --- `≡`/`≢` type-discriminating match + depth-of (Kotlin CompareFunction) ---
+        ("10 ≡ 10", "1"),
+        ("10 ≡ 10.0", "0"),
+        ("10 ≢ 10.0", "1"),
+        ("10 = 10.0", "1"),
+        ("10 ≠ 10.0", "0"),
+        ("(1 2) ≡ (1 2.0)", "0"),
+        ("≡ 5", "0"),
+        ("≡⊂5", "0"),
+        ("≡,5", "1"),
+        ("≡⊂,5", "2"),
+        ("≡ 1 2 3", "1"),
+        // --- `⊂` enclose: primitive returns unchanged, non-primitive becomes 0-d box ---
+        ("⊂5", "5"),
+        ("⍴⊂5", "()"),
+        // --- `⍮` pair: monadic `⍮x`=`⟨x⟩`, dyadic `a ⍮ b`=`⟨a b⟩` ---
+        ("⍮5", "(5)"),
+        ("⍮1 2 3", "((1 2 3))"),
+        ("5 ⍮ 6", "(5 6)"),
+        // --- `,` catenate: monadic `,`=ravel (rank-1), dyadic=concat ---
+        (",5", "(5)"),
+        (",1 2 3 4", "(1 2 3 4)"),
+        (",1 2 3", "(1 2 3)"),
+        ("1 2 3 , 4 5 6", "(1 2 3 4 5 6)"),
     ];
 
     let mut failures = Vec::new();

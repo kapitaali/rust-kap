@@ -25,51 +25,58 @@ Legend for severity:
 
 ---
 
-## CRITICAL — `⌷` (squad / index selection) is mis-dispatched
+## CRITICAL — `⌷` (squad / index selection) — FIXED (commit 20260820+)
 
-`⌷` is wired to `disclose` in `eval_apply`
-(`"⌷" | "reveal" | "disclose" => self.disclose(right_val)`, evaluator.rs:1178).
-In Real Kap, `⌷` is **index selection** (squad), a completely different
-function. Consequence: ALL `⌷`-based selection silently returns the wrong thing.
+`⌷` was mis-wired to `disclose`. It is now **index selection** (`AccessFromIndexAPLFunction`),
+reusing `pick` for the dyadic axis-selection path:
+
+- Monadic `⌷X` = `⟨X⟩` (a length-1 vector whose sole element is `X`).
+- Dyadic `A⌷B`: `A` is the position arg; scalars collapse an axis, vectors select a
+  sub-axis, and a `⍬`/Null position arg selects the *entire* axis (identity). Negative
+  indices count from the end; out-of-range is an error.
+
+Verified against the `kap-jvm-text` oracle (all match):
 
 | expr | port | oracle |
 |------|------|--------|
-| `2 ⌷ 1 2 3 4` | `(1 2 3 4)` | `3` |
-| `¯1 ⌷ 1 2 3 4 5` | `(1 2 3 4 5)` | `5` |
-| `⌷ 1 2 3 4` (monadic) | `(1 2 3 4)` | `⟨⟨1 2 3 4⟩⟩` |
-| `⍴(0 1 400)(1 ¯2)(0 1)⌷3 3 3⍴⍳100` | `(27)` | **error**: Index out of bounds (400 > axis size 3) |
+| `2 ⌷ 1 2 3 4` | `3` | `3` |
+| `¯1 ⌷ 1 2 3 4 5` | `5` | `5` |
+| `⌷ 1 2 3 4` (monadic) | `((1 2 3 4))` | `⟨⟨1 2 3 4⟩⟩` |
+| `⍬⌷1 2 3` | `(1 2 3)` | `⟨1 2 3⟩` |
+| `0⌷(1 2)(3 4)` | `(1 2)` | `┌─────┐` |
 
-Bracket indexing is only partially present: `(1 2 3)[0]` → `1` works, but
-stranded index on a bare vector (`1 2 3[0]`) errors with a wrong message, and
-out-of-bounds does **not** raise the oracle's "Index out of bounds" error.
-This is the single largest mismatch/unsupported driver (LookupTest,
-indexLookup*, MultiAxis* families).
-
-**Fix direction**: implement a real `squad`/`index_select` (Kotlin
-`IndexAPLFunction` / `PickResultValue`), separate from `disclose` (`⊃`).
+The `()` vs `⟨⟩` difference is the faithful display-glyph convention (see DISPLAY below),
+not a value defect. Bracket indexing (`x[sel]`) is a separate path and remains partial.
 
 ---
 
-## CRITICAL — `≡` / `≢` (match) use wrong semantics
+## CRITICAL — `≡` / `≢` (match) — FIXED (commit 20260820+)
 
-Dyadic `≡` is implemented as plain `deep_equal → 1/0`
-(`match_or_depth`, evaluator.rs:4230). Real Kap `≡` is **match**: it returns a
-numeric *depth* when the arguments have identical type/depth/structure, else
-`0`; and it is **type-strict** (a `Long` never equals a `Double`).
+Dyadic `≡`/`≢` are now **type-discriminating** equal (not value-equal): a `Long` never
+equals a `Double`, a scalar never equals a vector. This is `type_equal`, distinct from `=`
+/`≠` which keep `numeric_cmp` value-equal semantics. Monadic `≡` is **depth** (nesting
+levels), and `⊂` of a *primitive* returns the primitive unchanged (so `≡⊂5 = 0`, `≡,5 = 1`).
 
 | expr | port | oracle | note |
 |------|------|--------|------|
 | `10≡10` | `1` | `1` | OK |
-| `@a≡@a` | `1` | `1` | OK |
-| `10≡10.0` | `1` | `0` | **WRONG** (long ≠ double) |
-| `10≢10` | `1` | `0` | **WRONG** |
-| `0≢0⌷0 1` | `2` | `0` | **WRONG** (depends on `⌷` bug too) |
+| `10≡10.0` | `0` | `0` | OK (type-strict) |
+| `10≢10.0` | `1` | `1` | OK |
+| `10=10.0` | `1` | `1` | OK (`=` stays value-equal) |
+| `(1 2)≡(1 2.0)` | `0` | `0` | OK |
+| `≡ 5` | `0` | `0` | OK (depth) |
+| `≡⊂5` | `0` | `0` | OK |
+| `≡,5` | `1` | `1` | OK |
+| `≡⊂,5` | `2` | `2` | OK |
 
-Monadic `≡` (nesting depth, `depth_of`) is implemented but **not yet
-cross-verified** against the oracle.
+The depth semantics were clarified from Real Kap's `compareEqualsTotalOrdering` + `disclose`
+rules: a simple scalar has depth 0; `⊂` of a primitive returns the value itself (still depth
+0); turning a scalar into a 1-element vector via `,` gives depth 1; `⊂` of a non-primitive
+produces a 0-dimensional box whose depth equals its content's depth.
 
-**Fix direction**: replace the `deep_equal` 1/0 logic with Kap's match
-algorithm (compare element type/strictness + depth, return common depth or 0).
+As a side effect of the depth clarification, `⊂` (enclose) was fixed (primitive → unchanged;
+non-primitive → 0-d box), and monadic `⍮` (pair → `⟨x⟩`) and monadic `,` (ravel → rank-1
+vector) were implemented, since `≡⊂,5` and related depth expressions require them.
 
 ---
 
