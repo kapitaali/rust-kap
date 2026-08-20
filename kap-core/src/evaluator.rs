@@ -3530,6 +3530,10 @@ impl Engine {
         let mut result_dims = dims.clone();
         result_dims.remove(axis);
         let lane_count: usize = if result_dims.is_empty() { 1 } else { result_dims.iter().product() };
+        // Hoist the element vector ONCE: `value_at(i)` rebuilds the entire element
+        // Vec on every call, so calling it inside the loop makes reduce O(total²)
+        // and makes large vectors (e.g. `-/ 100000 ⍴ x`) appear to hang.
+        let elems = data.elements();
         let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(lane_count);
         for lane in 0..lane_count {
             // Decode the lane index into fixed coords for every axis except `axis`.
@@ -3548,11 +3552,11 @@ impl Engine {
             // Fold the fiber along `axis` (k = 0..axis_len).
             let mut coords = fixed.clone();
             coords[axis] = 0;
-            let mut acc = Rc::new(data.value_at(flat_of(&coords)));
+            let mut acc = elems[flat_of(&coords)].clone();
             for k in 1..axis_len {
                 coords[axis] = k;
-                let v = data.value_at(flat_of(&coords));
-                acc = self.apply_fn_instr(fn_instr, Some(&acc), &Rc::new(v), env)?;
+                let v = &elems[flat_of(&coords)];
+                acc = self.apply_fn_instr(fn_instr, Some(&acc), v, env)?;
             }
             out.push(acc);
         }
@@ -3611,6 +3615,7 @@ impl Engine {
             }
         }
         let lane_count = if result_dims.is_empty() { 1 } else { result_dims.iter().product() };
+        let elems = data.elements();
         let mut accs: Vec<Option<AplRef<APLValue>>> = vec![None; lane_count];
         let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(total);
         for f in 0..total {
@@ -3631,7 +3636,7 @@ impl Engine {
                 lane += coords[i] * rd_strides[ri];
                 ri += 1;
             }
-            let cur = Rc::new(data.value_at(f));
+            let cur = elems[f].clone();
             let new_acc = match accs[lane].take() {
                 None => cur.clone(),
                 Some(a) => self.apply_fn_instr(fn_instr, Some(&a), &cur, env)?,

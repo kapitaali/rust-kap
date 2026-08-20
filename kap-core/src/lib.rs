@@ -251,6 +251,20 @@ impl APLValue {
         }
     }
 
+    /// All elements as `APLValue`s, in flat (row-major) order. Unlike
+    /// `KapArray::elements`, this works on any `APLValue` (scalars, strings) and is
+    /// the right call when you need to iterate a whole value more than once — callers
+    /// should hoist this ONCE rather than calling `value_at(i)` in a loop, because
+    /// `KapArray::elements` rebuilds the whole `Vec` on every call.
+    pub fn elements(&self) -> Vec<AplRef<APLValue>> {
+        match self {
+            APLValue::Array(a) => a.elements(),
+            APLValue::Str(s) => s.chars().map(|c| Rc::new(APLValue::Char(c))).collect(),
+            APLValue::Null => vec![],
+            other => vec![Rc::new(other.clone())],
+        }
+    }
+
     /// Cross-kind total-order comparison, mirroring Kotlin `compareTotalOrdering`.
     /// Two numeric values (any mix of Long/BigInt/Rational/Double/Complex) compare
     /// numerically; two chars compare by codepoint; two arrays compare recursively;
