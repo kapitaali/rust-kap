@@ -295,6 +295,11 @@ fn curated_kap_parity() {
         ("1 0 1 0 1 ⊆ 10 20 30 40 50", "((10 20) (30 40) (50))"),
         ("1 1 0 1 1 ⊆ 1 2 3 4 5", "((1) (2 3) (4) (5))"),
         ("0 1 0 1 0 ⊆ 1 2 3 4 5", "((1) (2 3) (4 5))"),
+        // Pick `⊇` (Phase 6 — mirrors Kotlin PickAPLFunction / PickResultValue)
+        ("0 ⊇ 1 2 3 4 5", "(1)"),
+        ("2 ⊇ 1 2 3 4 5", "(3)"),
+        ("¯1 ⊇ 1 2 3 4 5", "(5)"),
+        ("1 0 2 ⊇ 10 20 30 40", "(20 10 30)"),
         // Builtins (ambivalent max/min, arithmetic) — Phase 6
         ("⌈ 3.2", "4.0"),
         ("⌊ 3.8", "3.0"),
@@ -564,7 +569,7 @@ fn curated_kap_parity() {
     {
         let symbol_cases: Vec<(&str, &str)> = vec![
             // A bare `'foo` literal is a symbol value in the default namespace.
-            ("'foo", "default:foo"),
+            ("'foo", "foo"),
             // `int:symbolName` returns a 2-element vector [name, namespace] (Kap pair form).
             ("int:symbolName 'foo", "(\"foo\" \"default\")"),
             ("int:symbolName 'abc", "(\"abc\" \"default\")"),

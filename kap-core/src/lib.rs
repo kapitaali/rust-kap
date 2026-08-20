@@ -144,7 +144,7 @@ impl APLValue {
             APLValue::Symbol { name, namespace } => match namespace {
                 Some(ns) if ns == "keyword" => format!(":{}", name),
                 Some(ns) => format!("{}:{}", ns, name),
-                None => format!("default:{}", name),
+                None => name.clone(),
             },
         }
     }
@@ -193,7 +193,7 @@ impl APLValue {
             APLValue::Symbol { name, namespace } => match namespace {
                 Some(ns) if ns == "keyword" => format!(":{}", name),
                 Some(ns) => format!("{}:{}", ns, name),
-                None => format!("default:{}", name),
+                None => name.clone(),
             },
         }
     }

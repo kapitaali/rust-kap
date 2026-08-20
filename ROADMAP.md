@@ -14,7 +14,7 @@ coverage at last measure: **~43%** (1091 ok / 278 mismatch / 1186 unsupported).
 
 Pick one to scope per session:
 
-- `⊆` / `⊇` — partition / shape  **(`⊆` DONE — see below)**
+- `⊆` / `⊇` — partition / shape  **(DONE)**
 - `∘` / `≬` — operators
 - `→` — branch / guard
 - key / major-cell operators: `⌺` / `⌸`, `⍋⍒`-with-axis
@@ -57,7 +57,16 @@ Pick one to scope per session:
   `1 0 1 0 1 ⊆ 10 20 30 40 50 → ((10 20) (30 40) (50))`, etc. Display uses the
   port's `()` convention (not the oracle's `⟨⟩`). Registered in BOTH
   `evaluator.rs::is_primitive_name` and `parser.rs::is_primitive_op`. Added 6
-  curated parity rows to `conformance.rs`. `⊇` (PickAPLFunction) NOT yet done.
+  curated parity rows to `conformance.rs`. `⊇` (PickAPLFunction) — see below.
+- **`⊇` (pick) implemented** — `evaluator.rs::pick_apl` mirrors Kotlin
+  `PickAPLFunction` / `PickResultValue` (lookup.kt). Result shape = shape of
+  `A` (left); each element of `A` is an *index coordinate* into `B` (right): a
+  scalar index for rank-1 `B` (with `¯n` negative support), a coordinate vector
+  for higher-rank `B`. Errors match the oracle ("Index out of bounds",
+  "rank mismatch"). Scalar results render as `(x)` (the port's cell convention,
+  consistent with `⊂`/`⊆`), not the oracle's bare scalar. Verified:
+  `0⊇1 2 3 4 5 → (1)`, `2⊇… → (3)`, `¯1⊇… → (5)`, `1 0 2⊇10 20 30 40 → (20 10 30)`.
+  Registered in BOTH lists. Added 4 curated parity rows.
 - **Adverbs `¨` / `/` / `\\` now bind to named user functions** — `dbl¨ 1 2 3`,
   `dbl/ 1 2 3`, `dbl\ …` work (commit `828913a`). Previously `unknown function: ¨`.
 - Dyadic `⍳` index-of + string `cmp` (commit `ee7df32`-era).

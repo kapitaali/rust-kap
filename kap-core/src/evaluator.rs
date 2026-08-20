@@ -1168,6 +1168,7 @@ impl Engine {
             "↓" => self.drop(left_val, right_val),
             "⊂" => self.enclose(right_val),
             "⊆" => self.partitioned_enclose(left_val, right_val),
+            "⊇" => self.pick_apl(left_val, right_val),
             "⍮" | "pair" => self.pair(left_val, right_val),
             "⌷" | "reveal" | "disclose" => self.disclose(right_val),
             // --- more builtins (Phase 6) ---
@@ -1435,8 +1436,8 @@ impl Engine {
             "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"
                 | "↑" | "↓" | "⊂" | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥"
-                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair" | "⊆"
-        )
+                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair" | "⊆" | "⊇"
+ )
     }
 
     /// Apply a user-defined lambda. `split` = number of leading params that are bound to
@@ -3547,6 +3548,62 @@ impl Engine {
         }
         Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
             vec![out.len()],
+            ArrayData::Nested(out),
+        )))))
+    }
+
+    /// Kap's pick (`⊇`): result shape = shape of `A`; each element of `A` is an *index
+    /// coordinate* into `B` (a scalar index for rank-1 `B`, a coordinate vector for
+    /// higher-rank `B`), with negative-index support (`¯1` = last). Mirrors Kotlin
+    /// `PickAPLFunction` / `PickResultValue` (lookup.kt).
+    fn pick_apl(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let a = left_val.ok_or_else(|| AplError::runtime("⊇ needs two arguments".into()))?;
+        let a = a.force(self)?;
+        let b = right_val.force(self)?;
+        let a_dims = a.dimensions();
+        let a_elems = a.elements();
+        let b_dims = b.dimensions();
+        let b_elems = b.elements();
+
+        // Row-major strides for `B` (so a coordinate vector maps to a flat position).
+        let r = b_dims.len();
+        let mut bstride = vec![1usize; r];
+        if r > 1 {
+            for k in (0..r - 1).rev() {
+                bstride[k] = bstride[k + 1] * b_dims[k + 1];
+            }
+        }
+
+        let total = a_elems.len();
+        let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(total);
+        for idx in &a_elems {
+            let idx = idx.force(self)?;
+            // An index coordinate is either a scalar (rank-1 B) or a vector (rank-N B).
+            let coord_elems: Vec<AplRef<APLValue>> = match idx.as_ref() {
+                APLValue::Array(x) => x.elements(),
+                _ => vec![Rc::new(idx.as_ref().clone())],
+            };
+            if coord_elems.len() != r {
+                return Err(AplError::runtime(format!(
+                    "⊇: index coordinate rank mismatch (got {}, expected rank {})",
+                    coord_elems.len(),
+                    r
+                )));
+            }
+            let mut flat = 0usize;
+            for k in 0..r {
+                let i = self.index_to_i64(coord_elems[k].as_ref())?;
+                let adj = check_and_adjust_selected_index(i, b_dims[k])?;
+                flat += adj * bstride[k];
+            }
+            out.push(Rc::new(b_elems[flat].as_ref().clone()));
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            a_dims,
             ArrayData::Nested(out),
         )))))
     }
