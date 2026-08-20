@@ -111,6 +111,12 @@ impl<'a> Parser<'a> {
                             ))
                         || (ns == "s" && matches!(base, "trimLeft" | "trimRight" | "trim"))
                         || (ns == "int" && matches!(base, "intern" | "symbolName"))
+                        || (ns == "regex"
+                            && matches!(
+                                base,
+                                "match" | "find" | "finderror" | "findall" | "replace" | "split"
+                                    | "compile"
+                            ))
                 }
                 None => false,
             }

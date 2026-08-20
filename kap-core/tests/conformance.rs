@@ -540,6 +540,16 @@ fn curated_kap_parity() {
         ("\"abc\" cmp \"bcd\"", "¯1"),
         ("\"abc\" cmp \"abc\"", "0"),
         ("\"xyz\" cmp \"abc\"", "1"),
+        // --- Strings: `regex:*` regular-expression utilities (Kotlin RegexpModule) ---
+        ("\"foo\" regex:match \"foobar\"", "1"),
+        ("\"xyz\" regex:match \"foobar\"", "0"),
+        ("\"foo\" regex:find \"foobar\"", "(\"foo\")"),
+        ("\"xyz\" regex:find \"foobar\"", "⍬"),
+        ("\"f(o)\" regex:find \"fobar\"", "(\"fo\" \"o\")"),
+        ("\"o\" regex:findall \"foobar\"", "((\"o\") (\"o\"))"),
+        ("\"x\" regex:replace (\"fooxbar\";\"qwe\")", "\"fooqwebar\""),
+        ("\"a\" regex:split \"xayaz\"", "(\"x\" \"y\" \"z\")"),
+        ("\"x(f[0-9]+)y\" regex:finderror \"fooxf12345ybar\"", "(\"xf12345y\" \"f12345\")"),
     ];
 
     let mut failures = Vec::new();

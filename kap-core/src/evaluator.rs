@@ -997,6 +997,16 @@ impl Engine {
                     other.format_value()
                 ))),
             },
+            // `regex:*` — regular-expression string utilities (Real Kap RegexpModule).
+            // Left arg is the pattern (string); right arg is the subject string (or, for
+            // `replace`, an `(subject; replacement)` pair). Mirrors regexp.kt.
+            "regex:match" => self.regex_match(left_val, right_val),
+            "regex:find" => self.regex_find(left_val, right_val),
+            "regex:finderror" => self.regex_finderror(left_val, right_val),
+            "regex:findall" => self.regex_findall(left_val, right_val),
+            "regex:replace" => self.regex_replace(left_val, right_val),
+            "regex:split" => self.regex_split(left_val, right_val),
+            "regex:compile" => self.regex_compile(left_val, right_val),
             // `int:intern` (dyadic): `"ns" int:intern "name"` -> Symbol{name, ns}.
             // `int:symbolName` (monadic): `'foo:bar` -> `(bar foo)` vector of
             // [name, namespace]. Mirrors Kotlin `symbol.kt`.
@@ -2466,6 +2476,223 @@ impl Engine {
             b.dimensions(),
             ArrayData::Nested(out),
         )))))
+    }
+
+
+    // ===== `regex:*` — regular-expression string utilities (Kotlin RegexpModule) =====
+    // Left arg is the pattern (a string); right arg is the subject (and, for `replace`,
+    // an `(subject; replacement)` pair). Mirrors regexp.kt.
+
+    /// Extract the pattern string from the (optional) left arg or the right arg,
+    /// compiling it. A bad pattern produces a runtime error (Kotlin `InvalidRegexp`).
+    fn regex_compiled(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<(regex::Regex, String), AplError> {
+        let v = match left_val {
+            Some(l) => l,
+            None => right_val.clone(),
+        }
+        .force(self)?;
+        let pat = match v.as_ref() {
+            APLValue::Str(s) => s.clone(),
+            other => {
+                return Err(AplError::runtime(format!(
+                    "regex: pattern must be a string, got: {}",
+                    other.format_value()
+                )))
+            }
+        };
+        let re = regex::Regex::new(&pat)
+            .map_err(|e| AplError::runtime(format!("invalid regex pattern: {}", e)))?;
+        Ok((re, pat))
+    }
+
+    /// Build the group vector for one match: `[whole, g1, g2, ...]` (Kotlin
+    /// `makeAPLValueFromGroups`). Unmatched optional groups are represented as the
+    /// empty string here (Kap's `:undefined` symbol is not yet modelled).
+    fn regex_groups_vector(re: &regex::Regex, hay: &str) -> AplRef<APLValue> {
+        let caps = re.captures(hay).expect("caller guarantees a match exists");
+        let mut elems: Vec<AplRef<APLValue>> = Vec::with_capacity(caps.len());
+        for i in 0..caps.len() {
+            let s = caps
+                .get(i)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default();
+            elems.push(Rc::new(APLValue::Str(s)));
+        }
+        Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![elems.len()],
+            ArrayData::Nested(elems),
+        ))))
+    }
+
+    fn regex_match(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let (re, _) = self.regex_compiled(left_val, right_val.clone())?;
+        let subject = match right_val.force(self)?.as_ref() {
+            APLValue::Str(s) => s.clone(),
+            other => {
+                return Err(AplError::runtime(format!(
+                    "regex:match subject must be a string, got: {}",
+                    other.format_value()
+                )))
+            }
+        };
+        let hit = if re.find(&subject).is_some() { 1 } else { 0 };
+        Ok(Rc::new(APLValue::Number(KapNumber::Long(hit))))
+    }
+
+    fn regex_find(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let (re, _) = self.regex_compiled(left_val, right_val.clone())?;
+        let subject = match right_val.force(self)?.as_ref() {
+            APLValue::Str(s) => s.clone(),
+            other => {
+                return Err(AplError::runtime(format!(
+                    "regex:find subject must be a string, got: {}",
+                    other.format_value()
+                )))
+            }
+        };
+        match re.find(&subject) {
+            Some(m) => Ok(Self::regex_groups_vector(&re, m.as_str())),
+            None => Ok(Rc::new(APLValue::Null)),
+        }
+    }
+
+    /// Like `regex:find` but errors (instead of returning Null) when there is no match.
+    fn regex_finderror(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let (re, _) = self.regex_compiled(left_val, right_val.clone())?;
+        let subject = match right_val.force(self)?.as_ref() {
+            APLValue::Str(s) => s.clone(),
+            other => {
+                return Err(AplError::runtime(format!(
+                    "regex:finderror subject must be a string, got: {}",
+                    other.format_value()
+                )))
+            }
+        };
+        let m = re.find(&subject).ok_or_else(|| {
+            AplError::runtime("regex:finderror: pattern did not match subject".into())
+        })?;
+        Ok(Self::regex_groups_vector(&re, m.as_str()))
+    }
+
+    fn regex_findall(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let (re, _) = self.regex_compiled(left_val, right_val.clone())?;
+        let subject = match right_val.force(self)?.as_ref() {
+            APLValue::Str(s) => s.clone(),
+            other => {
+                return Err(AplError::runtime(format!(
+                    "regex:findall subject must be a string, got: {}",
+                    other.format_value()
+                )))
+            }
+        };
+        let mut elems: Vec<AplRef<APLValue>> = Vec::new();
+        for m in re.find_iter(&subject) {
+            elems.push(Self::regex_groups_vector(&re, m.as_str()));
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![elems.len()],
+            ArrayData::Nested(elems),
+        )))))
+    }
+
+    fn regex_replace(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let (re, _) = self.regex_compiled(left_val, right_val.clone())?;
+        // Right arg is an `(subject; replacement)` pair (Kotlin `b.listify()`).
+        let pair = right_val.force(self)?;
+        let (subject, replacement) = match pair.as_ref() {
+            APLValue::Array(a) if a.element_count() == 2 => {
+                let es = a.elements();
+                let subj = match es[0].as_ref() {
+                    APLValue::Str(s) => s.clone(),
+                    other => {
+                        return Err(AplError::runtime(format!(
+                            "regex:replace subject must be a string, got: {}",
+                            other.format_value()
+                        )))
+                    }
+                };
+                let repl = match es[1].as_ref() {
+                    APLValue::Str(s) => s.clone(),
+                    other => {
+                        return Err(AplError::runtime(format!(
+                            "regex:replace replacement must be a string, got: {}",
+                            other.format_value()
+                        )))
+                    }
+                };
+                (subj, repl)
+            }
+            other => {
+                return Err(AplError::runtime(format!(
+                    "regex:replace requires a (subject; replacement) pair, got: {}",
+                    other.format_value()
+                )))
+            }
+        };
+        // Kotlin's `Regex.replace` replaces ALL matches (like `replace_all`).
+        let out = re.replace_all(&subject, replacement.as_str()).into_owned();
+        Ok(Rc::new(APLValue::Str(out)))
+    }
+
+    fn regex_split(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let (re, _) = self.regex_compiled(left_val, right_val.clone())?;
+        let subject = match right_val.force(self)?.as_ref() {
+            APLValue::Str(s) => s.clone(),
+            other => {
+                return Err(AplError::runtime(format!(
+                    "regex:split subject must be a string, got: {}",
+                    other.format_value()
+                )))
+            }
+        };
+        let parts: Vec<AplRef<APLValue>> = re
+            .split(&subject)
+            .map(|s| Rc::new(APLValue::Str(s.to_string())))
+            .collect();
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![parts.len()],
+            ArrayData::Nested(parts),
+        )))))
+    }
+
+    /// `regex:compile` validates the pattern; on success it returns the pattern string
+    /// (Kotlin returns a RegexpMatcherValue, which our string form can feed back as a
+    /// left arg). A bad pattern errors (covers the `kind: "fails"` compile cases).
+    fn regex_compile(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let (_, pat) = self.regex_compiled(left_val, right_val)?;
+        Ok(Rc::new(APLValue::Str(pat)))
     }
 
     fn shape(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
