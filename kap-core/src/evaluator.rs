@@ -1140,7 +1140,10 @@ impl Engine {
             "≤" => self.cmp2(left_val, right_val, |o| o != Ordering::Greater, "≤"),
             "≥" => self.cmp2(left_val, right_val, |o| o != Ordering::Less, "≥"),
             "cmp" => self.cmp_values(left_val, right_val, "cmp"),
-            "⍳" | "iota" => self.iota(right_val),
+            "⍳" | "iota" => match left_val {
+                None => self.iota(right_val),
+                Some(l) => self.index_of(l, right_val),
+            },
             "⍴" | "rho" => match left_val {
                 None => self.shape(right_val),
                 Some(l) => self.reshape(l, right_val),
@@ -2396,12 +2399,21 @@ impl Engine {
                 x.numeric_cmp(y).map_err(|e| AplError::runtime(e))?
             }
             (APLValue::Char(x), APLValue::Char(y)) => x.cmp(y),
-            _ => {
-                return Err(AplError::runtime(format!(
-                    "{} requires comparable scalars (numbers or chars)",
-                    sym
-                )))
-            }
+            // String vs String: lexicographic by codepoint (Real Kap `compareTotalOrdering`).
+            (APLValue::Str(x), APLValue::Str(y)) => x.cmp(y),
+            // Cross-kind (e.g. Number vs Str): defer to the general total-ordering rule,
+            // which orders number < char < string < null and compares equal kinds by value.
+            _ => match a.total_cmp(b.as_ref()) {
+                Some(o) => o,
+                None => {
+                    return Err(AplError::runtime(format!(
+                        "{}: not comparable ({} vs {})",
+                        sym,
+                        a.class_name(),
+                        b.class_name()
+                    )))
+                }
+            },
         };
         let v = match ord {
             Ordering::Less => -1i64,
@@ -2424,6 +2436,36 @@ impl Engine {
         let nums: Vec<KapNumber> = (0..n).map(KapNumber::Long).collect();
         let arr = KapArray::from_numbers(nums);
         Ok(Rc::new(APLValue::Array(Rc::new(arr))))
+    }
+
+    /// Dyadic `⍳` (index-of), mirroring Kotlin `FindIndexArray1DLeftArg`.
+    /// Result shape = shape of B; for each element of B, the first 0-based position
+    /// in A where `a[i]` matches (cross-kind, `total_cmp` == Equal), else `a.size`.
+    fn index_of(
+        &self,
+        left_val: AplRef<APLValue>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let a = left_val.force(self)?;
+        let b = right_val.force(self)?;
+        let a_elems = a.elements();
+        let b_elems = b.elements();
+        let not_found = a_elems.len() as i64;
+        let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(b_elems.len());
+        for bref in &b_elems {
+            let mut found = not_found;
+            for (i, aelem) in a_elems.iter().enumerate() {
+                if aelem.total_cmp(bref.as_ref()) == Some(Ordering::Equal) {
+                    found = i as i64;
+                    break;
+                }
+            }
+            out.push(Rc::new(APLValue::Number(KapNumber::Long(found))));
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            b.dimensions(),
+            ArrayData::Nested(out),
+        )))))
     }
 
     fn shape(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
