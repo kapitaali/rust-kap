@@ -19,6 +19,16 @@ Pick one to scope per session:
 - `→` — branch / guard
 - key / major-cell operators: `⌺` / `⌸`, `⍋⍒`-with-axis
 - format family
+- **`⌷` (squad / index selection) — CRITICAL, currently mis-dispatched to
+  `disclose`** (see `KNOWN-NONCONFORMANCE.md`). `2 ⌷ 1 2 3 4` returns the whole
+  array instead of `3`. Largest mismatch/unsupported driver. Needs a real
+  index-select distinct from `⊃`.
+- **`≡` / `≢` (match) — CRITICAL, wrong semantics** (see
+  `KNOWN-NONCONFORMANCE.md`). Implemented as `deep_equal→1/0` with no type
+  strictness; `10≡10.0`→`1` (oracle `0`). Needs Kap's match (type/depth → depth
+  or 0).
+- **`⊃` (first / pick) — semantics diverge** from the oracle (monadic should
+  disclose to a nested vector; dyadic should reject mismatched dimensions).
 
 ## Worst-covered corpus files (where coverage gains live)
 
