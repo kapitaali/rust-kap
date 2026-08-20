@@ -7,9 +7,11 @@
 //! of the language is implemented.
 //!
 //! NOTE: `cargo test` captures a passing test's stdout/stderr and only prints it
-//! when the test *fails* or with `-- --nocapture`. To always see the summary,
-//! the harness ALSO writes it to `/tmp/conform_summary.txt`. The `conformance_probe`
-//! test fails on purpose so the summary is surfaced in the terminal output.
+//! when a test *fails* or with `-- --nocapture`. To always see the summary, the
+//! harness ALSO writes it to `conformance_summary.txt` (repo root) and `eprintln!`s
+//! it to stderr. `run_kotlin_conformance` now runs as part of the normal suite (with a
+//! per-case timeout so a runaway builtin can't hang it) and PASSES; `curated_kap_parity`
+//! is the real per-feature pass/fail gate.
 //!
 //! Run: `cargo test -p kap-core --test conformance`
 //!   or with visible output: `cargo test -p kap-core --test conformance -- --nocapture`
@@ -29,6 +31,7 @@ enum Outcome {
     Unsupported,
 }
 
+#[derive(Clone)]
 struct Case {
     file: String,
     test: String,
@@ -104,14 +107,32 @@ fn classify(engine: &Engine, c: &Case) -> Outcome {
     }
 }
 
-/// Broad Kotlin-reference conformance sweep. IGNORED by default: it iterates
-/// thousands of extracted cases and can hang on case(s) that trigger a runaway
-/// evaluation path in a not-yet-complete builtin (a hang, not a panic, which
-/// `catch_unwind` cannot stop). Run on demand with:
-///   cargo test -p kap-core --test conformance -- --ignored run_kotlin_conformance
-/// The real pass/fail gate is `curated_kap_parity` (runs in the normal suite).
+/// Evaluate one case in a worker thread with a wall-clock timeout. If the case
+/// triggers a runaway evaluation (an infinite loop rather than a panic), the
+/// thread is abandoned and the case is counted as `Unsupported` — so a single
+/// bad builtin can no longer freeze the entire `cargo test` run.
+fn classify_with_timeout(c: &Case) -> Outcome {
+    let c = c.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _handle = std::thread::spawn(move || {
+        let engine = Engine::new();
+        let o = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| classify(&engine, &c)))
+            .unwrap_or(Outcome::Unsupported);
+        let _ = tx.send(o);
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(o) => o,
+        Err(_) => Outcome::Unsupported,
+    }
+}
+
+/// Broad Kotlin-reference conformance sweep. Runs as part of the normal
+/// `cargo test` suite (no longer `#[ignore]`d). Each case is evaluated in its
+/// own worker thread with a wall-clock timeout, so a runaway evaluation in a
+/// not-yet-complete builtin degrades that one case to `Unsupported` instead of
+/// freezing the whole `cargo test` run (a hang, not a panic, which `catch_unwind`
+/// cannot stop). The real per-feature pass/fail gate remains `curated_kap_parity`.
 #[test]
-#[ignore = "broad sweep; hangs on incomplete builtins — run with --ignored"]
 fn run_kotlin_conformance() {
     let cases = load_cases();
     assert!(!cases.is_empty(), "no extracted test cases found");
@@ -130,7 +151,7 @@ fn run_kotlin_conformance() {
     let mut mismatch_examples: Vec<(&Case, String)> = Vec::new();
 
     for c in &cases {
-        let o = classify(&engine, c);
+        let o = classify_with_timeout(c);
         *by_outcome.entry(o).or_insert(0) += 1;
         let (ok, total) = by_file.entry(c.file.clone()).or_insert((0, 0));
         *total += 1;
@@ -218,14 +239,10 @@ fn run_kotlin_conformance() {
     // Also emit to stderr (visible with `-- --nocapture` or when a test fails).
     eprint!("{s}");
 
-    // We do NOT assert a pass rate here (it grows over time). Instead we FAIL this
-    // test on purpose so cargo prints the captured summary above — a passing test's
-    // output is suppressed by `cargo test`. The real per-feature pass/fail gate is
-    // `curated_kap_parity`.
-    panic!(
-        "conformance summary (written to {}):\n{s}\n\n(remove the final panic in run_kotlin_conformance to stop the intentional failure)",
-        summary_path.display()
-    );
+    // We do NOT assert a pass rate here (it grows over time) — this test now PASSES
+    // so `cargo test` stays green and the summary is surfaced via the file written
+    // above (`conformance_summary.txt`) and the `eprintln!` below. The real
+    // per-feature pass/fail gate remains `curated_kap_parity`.
 }
 
 /// Curated hand-ported cases: features we KNOW are implemented, each with an
