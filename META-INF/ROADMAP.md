@@ -4,11 +4,79 @@ Consolidated from the dated `PROGRESS-2026*.md` session logs. Tracks the
 open Phase 6 breadth work and deferred items. Branch invariant (enforced
 after every commit): `main == strings == origin/*`.
 
-## Current phase: Phase 6 breadth
+## Current phase: stdlib-kernel (Phase 4) + Phase 6 breadth
 
-Filling in remaining structural / array builtins to raise conformance
-coverage against the Kotlin corpus (2,535 extracted cases). Baseline
-coverage at last measure: **~43%** (1091 ok / 278 mismatch / 1186 unsupported).
+Phase 6 breadth is now **effectively complete** — all listed structural/array builtins
+(`⊆`/`⊇`, `∘`/`⍛`, `≬`, `→`, bracket-index, `⌷`, `≡`/`≢`, `⊃`, the `⍕` format family)
+are DONE and match the Kotlin oracle. The remaining genuinely-open work is the **stdlib
+kernel** (`use()` file-loading + the Kap-source stdlib), which unblocks `⌸`/`⌺`/`⎕*` and
+the `s:`/`io:` helpers. This is the next planned stage; strategy below.
+
+## Stdlib-kernel strategy (Phase 4 of `RUST_REWRITE_STRATEGY.md` §5–§6)
+
+`use("file.kap")` is a **lexical `IncludeToken`** in Kotlin (`parser.kt::processInclude` →
+`includeFileContent`): it resolves the path (`engine.resolveLibraryFile` / `resolvePathName`),
+builds a fresh `APLParser` over the file, and runs `engine.withSavedNamespace { innerParser
+.parseValueToplevel() }` — a **parse-time file include evaluated into the current namespace**.
+The port already has the in-memory `namespace` / `import` / `declare` directives wired in
+`evaluator.rs`; it is **missing only `use` itself** (plus two glyphs the stdlib exercises).
+
+### Tier A — minimal kernel: load `base-functions.kap` (unblocks `⌸`, `⎕p`, `⎕pl`, `⎕A`, `⎕a`, `⎕d`)
+
+`standard-lib/base-functions.kap` is only **18 lines** and defines `⌸` as a pure-Kap user
+function (`∇ (keys) (fn ⌸) (values) { … ⍞fn¨ keyindex⫇values }`) plus the `⎕` quad symbols.
+Its *entire* missing-port dependency surface (everything else it uses — `⍋`/`≠`/`/`/`¨`,
+`io:print`/`io:println` — is **already present** in the port):
+
+| Missing port feature | Kotlin source | Notes |
+|---|---|---|
+| `use(...)` file-include directive | `parser.kt::processInclude` / `includeFileContent` | New lexer `IncludeToken` + parser arm + `engine.resolveLibraryFile`/`resolvePathName` (map a lib path to `standard-lib/` on disk). Evaluate the file as a top-level `Instr` in the current namespace. |
+| `⍞` apply-reference operator | `tokeniser.kt::ApplyToken` | **Unary** operator over a *function-valued symbol* (oracle: `⍞+` → "Variable not assigned: kap:+" because `+` was never bound to a var). `⍞fn` applies the function named by `fn`. Port has none. |
+| `⫇` GroupFunction | `engine.kt:351` `registerNativeFunction("⫇", GroupFunction())` (disclose.kt) | Native pick-with-axis (`A⫇B` selects cells of `B` by index vector `A` along the major axis). Port has none. |
+| `,[axis]` catenate-with-axis | `catenate` in `evaluator.rs` (currently axis-less) | `base-functions.kap` uses `,[0.5]`. Needs axis support added to the existing `,`. |
+
+**Acceptance for Tier A:** `use("standard-lib/base-functions.kap")` (or a vendored copy) loads
+with no errors, and afterwards `⌸` / `⎕A` / `⎕p` behave like the oracle (probe each vs
+`kap-jvm-text`). Add curated rows for `⌸` / `⎕A←@A…@Z`.
+
+### Tier B — `standard-lib.kap` chain (the full `use` web)
+
+`standard-lib.kap` does `use("structure.kap") … use("fhelp.kap")` — 13 includes pulling in
+`math`/`io`/`regex`/`util`/`map`/`time`/`stat`/`http`/`thread`/`output3`/`graph`/`fhelp`.
+Many of those `.kap` files call builtins the port may still lack (e.g. `math:` namespace,
+`chart:`, `http:`, `thread:`). **Strategy: load the chain incrementally, one file at a time,
+and implement/repair only the builtins each file actually exercises** — not the whole Kotlin
+surface at once. The `math.kap`/`io.kap`/`util.kap`/`structure.kap` subset is the highest-value
+first slice; `http.kap`/`thread.kap`/`graph.kap`/`fhelp.kap` can stay deferred (they need
+networking/threading/charting builtins that are explicit out-of-scope per `RUST_REWRITE_STRATEGY.md` §1.2).
+
+### Tier C — wire `kap-cli` to load the vendored stdlib at startup
+
+The `kap-stdlib` crate **already exists** (workspace member) and already vendors the Kap
+source: `kap-stdlib/std/{standard-lib,base-functions,structure,math,io,util,regex,time,
+stat,map,http,thread,output3,graph,fhelp}.kap` (+ `kap-stdlib/test/test.kap` and hundreds of
+extracted `*.kap` conformance cases). So Tier C is **not** "vendor the files" — it is: (a) make
+`use()` resolve paths against `kap-stdlib/std/` (or a configured lib dir), and (b) have `kap-cli`
+call `use("standard-lib.kap")` at startup (mirroring `LinuxReplBuilder.loadStartupFiles`). Each
+loaded file is a regression test: if it parses and its functions run, that surface is compatible.
+The `test/` dir doubles as the D5 Kap-native harness (run `test.kap` + `test/*Test.kap`, parse the
+`TESTS total=N pass=M fail=K` summary).
+
+### Mechanics notes (faithful port)
+
+- `use` must resolve relative to a registered library directory (the Kotlin `resolveLibraryFile`
+  maps `"base-functions.kap"` → the stdlib dir; `secureMode` restricts to registered paths — the
+  port can skip secure-mode for now). Absolute paths pass through.
+- `use` evaluates in the **current namespace** (`withSavedNamespace` save/restore), so a file's
+  `namespace("kap")` switches in, defines symbols, and the outer namespace is restored.
+- `⍞` needs a parser distinction: a *symbol* operand (function reference) vs an *apply* — the
+  port's `is_primitive_op`/`is_primitive_name` gates must let `⍞` take a bare symbol as its operand.
+
+### Rollout order (recommended)
+
+1. **Tier A** (4 features) → `⌸`/`⎕*` work. Highest leverage, smallest surface. **Do this first.**
+2. **Tier B** structure/math/io/util subset, one file per commit, gated by side-by-side probe.
+3. **Tier C** vendoring + startup load.
 
 ## Open scope targets (Phase 6 breadth gaps)
 
@@ -24,8 +92,10 @@ Pick one to scope per session:
   - `⍋⍒`-with-axis is **N/A**: Kotlin `GradeFunction` extends `NoAxisAPLFunction`,
     so axis specifiers are explicitly unsupported (oracle errors "Function does not
     support axis specifier"). Nothing to implement — the port correctly rejects it.
-  - `⌺`/`⌸` are **NOT native** (stdlib `use()`-loaded `kap:keys`/`kap:stencil`);
-    out of reach until the stdlib-kernel is built (see DEFERRED/KNOWN).
+  - `⌺`/`⌸` are **NOT native** (stdlib `use()`-loaded `kap:keys`/`kap:stencil`); they are
+    reachable once the **stdlib-kernel (Tier A)** is built — see the "Stdlib-kernel strategy"
+    section below. `base-functions.kap` (18 lines) defines `⌸` as a pure-Kap user fn; the
+    only port gaps are `use`, `⍞`, `⫇`, `,[axis]`.
 - format family  **(DONE, 2026-08-21)** — see `KNOWN-NONCONFORMANCE.md` (`⍕` monadic
   flatten + dyadic `$s`/`$h`/`$$` directives all match the oracle).
 - **`⌷` (squad / index selection) — CRITICAL, currently mis-dispatched to
@@ -58,8 +128,9 @@ Pick one to scope per session:
   *string* form is supported.
 - **Dyadic interval `⍸`** (`a ⍸ b`) and inverse `⍸˝` (needs `˝` adverb) —
   returns a clean "not implemented" error so the harness counts it Unsupported.
-- **`use()` file-loading / `.kap` stdlib kernel** (`standard-lib.kap` +
-  `base-functions.kap`) — deferred.
+- **`use()` file-loading / `.kap` stdlib kernel** — now scoped as a planned stage, not
+  open-ended deferral. See the **"Stdlib-kernel strategy"** section above: Tier A (load
+  `base-functions.kap`) needs only `use` + `⍞` + `⫇` + `,[axis]`; Tiers B/C follow.
 
 ## Suggested hardening
 
