@@ -664,6 +664,15 @@ fn curated_kap_parity() {
         // called with two arguments") are verified by hand against the oracle + Kotlin
         // source; this harness cannot assert error messages (see `⊃` block note above).
         ("fromList ≬ 1 2 3", "(1 2 3)"),
+        // --- Axis specifiers `f[axis]` (Kotlin AxisValAssignedFunctionDirect + MathCombineAPLFunction) ---
+        // scalar+scalar IGNORES the axis (Kotlin eval2Arg short-circuits combine2Arg first).
+        // vector+vector (both rank 1, axis 0) is element-wise. vector + higher-rank broadcasts
+        // the vector along `axis`. The oracle renders the rank-3 result boxed; the port flattens
+        // to parens (the recognised DISPLAY-glyph divergence, values identical).
+        ("2 +[0] 3", "5"),
+        ("2 +[1] 3", "5"),
+        ("1 2 3 +[0] 4 5 6", "(5 7 9)"),
+        ("10 20 30 40 +[0] 4 3 2 ⍴ 100+⍳24", "(110 111 112 113 114 115 126 127 128 129 130 131 142 143 144 145 146 147 158 159 160 161 162 163)"),
     ];
 
     let mut failures = Vec::new();

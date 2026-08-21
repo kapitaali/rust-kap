@@ -263,7 +263,9 @@ Features the engine does not build yet. Most are tracked in `ROADMAP.md`.
   not as registered native functions; only `keys`/`map` is native.)
 - **Compose operators** — `∘` / `⍛` (compose / reverse-compose trains) are wired;
   `≬`/`toList` is now implemented (see DISPLAY section).
-- **Axis specifiers** `[axis]` — not accepted for `⌷`, `⊆`, `⍋`/`⍒`, etc.
+- **Axis specifiers** `[axis]` — not accepted for `⌷`, `⊆`, `⍋`/`⍒`, etc. (Scalar
+  arithmetic `+ - × ÷ *` DOES now honor `f[axis]`, matching Kotlin — including the
+  scalar+scalar short-circuit that ignores the axis. Fixed 2026-08-21.)
 - **Dyadic interval `⍸`** (`a ⍸ b`) and inverse `⍸˝` (needs `˝` adverb) —
   returns a clean "not implemented" error.
 - **`regex:replace` lambda form** — only the `(subject; replacement)` *string*

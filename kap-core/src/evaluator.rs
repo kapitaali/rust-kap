@@ -510,6 +510,20 @@ impl Engine {
                     Err(AplError::runtime("assignment target must be a symbol".into()))
                 }
             }
+            Instr::AxisApplied { func, axis } => {
+                // An axis-applied function always appears as the `fn_expr` of an `Apply`,
+                // where `eval_apply` unwraps it. Reached directly only as a stray top-level
+                // expression; route through `eval_apply` so the guard handles it.
+                self.eval_apply(
+                    &Instr::AxisApplied {
+                        func: func.clone(),
+                        axis: axis.clone(),
+                    },
+                    &None,
+                    &Box::new(Instr::Empty),
+                    env,
+                )
+            }
             Instr::Apply {
                 fn_expr,
                 left,
@@ -750,6 +764,61 @@ impl Engine {
         right: &Box<Instr>,
         env: &AplRef<Environment>,
     ) -> Result<AplRef<APLValue>, AplError> {
+        // Axis specifier `f[axis]` (Kotlin `AxisValAssignedFunctionDirect`). When the
+        // function expr is wrapped in `AxisApplied`, evaluate the axis and route the
+        // scalar arithmetic builtins to an axis-aware broadcast path.
+        if let Instr::AxisApplied { func, axis } = fn_expr {
+            let axis_val = self.eval_instr(axis, env)?.force(self)?;
+            let axis = match axis_val.as_ref() {
+                APLValue::Number(n) => n.as_long().map_err(|e| AplError::runtime(e))? as usize,
+                APLValue::Array(a) if a.dimensions.len() == 1 && a.element_count() == 1 => {
+                    match a.elements().get(0) {
+                        Some(e) => match e.as_ref() {
+                            APLValue::Number(x) => {
+                                x.as_long().map_err(|e| AplError::runtime(e))? as usize
+                            }
+                            _ => return Err(AplError::runtime("axis must be an integer".into())),
+                        },
+                        None => return Err(AplError::runtime("axis must be an integer".into())),
+                    }
+                }
+                _ => return Err(AplError::runtime("axis must be an integer".into())),
+            };
+            // Only scalar arithmetic builtins support an axis in this port (matches the
+            // subset Elias's tests exercise: `+[0]`). Other functions error clearly.
+            let fn_name = match **func {
+                Instr::Symbol { ref name, .. } => name.as_str(),
+                _ => {
+                    return Err(AplError::runtime(
+                        "axis specifier is only supported on scalar arithmetic functions".into(),
+                    ))
+                }
+            };
+            let left_v = match left {
+                Some(l) => Some(self.eval_instr(l, env)?.force(self)?),
+                None => None,
+            };
+            let right_v = self.eval_instr(right, env)?.force(self)?;
+            // Kotlin `MathCombineAPLFunction.eval2Arg` short-circuits scalar+scalar BEFORE
+            // any axis handling: `if (a0 is APLSingleValue && b0 is APLSingleValue)
+            // return combine2Arg(a0, b0)`. The axis is silently ignored for two scalars,
+            // so `2 +[0] 3` -> `5`, NOT "A or B has to be rank 1".
+            if let (Some(l), APLValue::Number(b)) = (left_v.as_ref(), right_v.as_ref()) {
+                if let APLValue::Number(a) = l.as_ref() {
+                    let res = self.apply_op(fn_name, a, b)?;
+                    return Ok(Rc::new(APLValue::Number(res)));
+                }
+            }
+            return match fn_name {
+                "+" | "-" | "×" | "÷" | "*" => {
+                    self.num2_axis(left_v, right_v, fn_name, axis)
+                }
+                other => Err(AplError::runtime(format!(
+                    "axis specifier not supported for '{}'",
+                    other
+                ))),
+            };
+        }
         // Resolve the function: a builtin name, a direct lambda, or a user function
         // bound to a symbol.
         let fn_name: Option<String> = match fn_expr {
@@ -2368,6 +2437,18 @@ impl Engine {
         Ok(Rc::new(result))
     }
 
+    /// Map a scalar arithmetic operator name to its `KapNumber` op. Shared by `num2` and
+    /// `num2_axis` so the two paths stay in lock-step.
+    fn apply_op(&self, name: &str, a: &KapNumber, b: &KapNumber) -> Result<KapNumber, AplError> {
+        match name {
+            "+" => Ok(a.add(b)),
+            "-" => Ok(a.sub(b)),
+            "×" | "*" => Ok(a.mul(b)),
+            "÷" | "/" => Ok(a.div(b)),
+            _ => Err(AplError::runtime(format!("unsupported axis operator: {}", name))),
+        }
+    }
+
     fn num2(
         &self,
         left_val: Option<AplRef<APLValue>>,
@@ -2419,6 +2500,109 @@ impl Engine {
             }
             _ => Err(AplError::runtime(format!("{} requires numbers", sym))),
         }
+    }
+
+    /// Axis-broadcast scalar arithmetic: `A f[axis] B` (Kotlin `AxisValAssignedFunctionDirect`
+    /// over a `MathCombineAPLFunction`). The LEFT operand must be a rank-1 vector (the oracle
+    /// errors "When specifying an axis, A or B has to be rank 1" for a scalar left); its
+    /// length must equal the size of `axis` in `B`. Each element of `B` at coordinate `c` is
+    /// combined with `left[c[axis]]` (the left vector's entry for that position along `axis`).
+    /// Mirrors Kotlin's axis-combine broadcasting.
+    fn num2_axis(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+        name: &str,
+        axis: usize,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let left = left_val
+            .ok_or_else(|| AplError::runtime(format!("{}[axis] needs two arguments", name)))?;
+        let la = match left.as_ref() {
+            APLValue::Array(a) if a.dimensions.len() == 1 => {
+                let mut v = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    match e.as_ref() {
+                        APLValue::Number(n) => v.push(n.clone()),
+                        _ => return Err(AplError::runtime(
+                            "axis-combine left operand must be a numeric vector".into(),
+                        )),
+                    }
+                }
+                v
+            }
+            _ => {
+                return Err(AplError::runtime(
+                    "When specifying an axis, A or B has to be rank 1".into(),
+                ))
+            }
+        };
+        let arr = match right_val.as_ref() {
+            APLValue::Array(a) => a,
+            APLValue::Number(_) => {
+                // B is a scalar: treat as 1-D of size 1 along axis 0; broadcast left[0].
+                let out = match right_val.as_ref() {
+                    APLValue::Number(y) => {
+                        let l0 = la.first().cloned().unwrap_or_else(|| y.clone());
+                        self.apply_op(name, &l0, y)?
+                    }
+                    _ => unreachable!(),
+                };
+                return Ok(Rc::new(APLValue::Number(out)));
+            }
+            _ => {
+                return Err(AplError::runtime(
+                    "axis-combine right operand must be a numeric array".into(),
+                ))
+            }
+        };
+        let dims = arr.dimensions.clone();
+        if axis >= dims.len() {
+            return Err(AplError::runtime(format!(
+                "axis {} out of range for array of rank {}",
+                axis,
+                dims.len()
+            )));
+        }
+        if la.len() != dims[axis] {
+            return Err(AplError::runtime(format!(
+                "axis-combine: left vector length {} does not match axis {} size {}",
+                la.len(),
+                axis,
+                dims[axis]
+            )));
+        }
+        // Strides for unravelling a flat index into coordinates.
+        let mut strides = vec![1usize; dims.len()];
+        for i in (0..dims.len().saturating_sub(1)).rev() {
+            strides[i] = strides[i + 1] * dims[i + 1];
+        }
+        let elems = arr.elements();
+        let total = arr.element_count();
+        let mut out = Vec::with_capacity(total);
+        for i in 0..total {
+            let coord_axis = (i / strides[axis]) % dims[axis];
+            let right_elem = match elems.get(i) {
+                Some(e) => match e.as_ref() {
+                    APLValue::Number(n) => n,
+                    _ => {
+                        return Err(AplError::runtime(
+                            "axis-combine right operand must be numeric".into(),
+                        ))
+                    }
+                },
+                None => {
+                    return Err(AplError::runtime(
+                        "internal error: axis-combine element index out of bounds".into(),
+                    ))
+                }
+            };
+            let res = self.apply_op(name, &la[coord_axis], right_elem)?;
+            out.push(Rc::new(APLValue::Number(res)));
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            dims,
+            ArrayData::Nested(out),
+        )))))
     }
 
     /// Monadic negation: `- x` over a number or an array of numbers (scalar extension).

@@ -1015,9 +1015,35 @@ impl<'a> Parser<'a> {
                 };
                 if next_fn && paren_group_is_fn {
                     let func = self.parse_function_expr()?;
+                    // Axis specifier: `f[axis]` (e.g. `+[0]`). Kotlin's `parseOperator`
+                    // reads an optional `[axis]` *before* the right operand and wraps the
+                    // function in `AxisValAssignedFunctionDirect`. We must parse it here,
+                    // BEFORE the right operand, because `parse_apply` would otherwise
+                    // greedily consume `[0] …` as a bracket-index on the right argument.
+                    // GATED to scalar-arithmetic operators (`+ - × ÷ *`), the only
+                    // functions with an axis path in `num2_axis`. Anything else (e.g. `,`
+                    // catenate) must NOT swallow a following `[` — the port treats `[3;4]`
+                    // as a list literal (a known port-leniency, asserted by `eval_catenate`).
+                    let mut fn_expr = func;
+                    let axis_ok = matches!(
+                        &fn_expr,
+                        Instr::Symbol { name, .. }
+                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*")
+                    );
+                    if axis_ok
+                        && matches!(self.peek().map(|t| &t.token), Some(Token::OpenBracket))
+                    {
+                        self.advance();
+                        let axis = self.parse_apply()?;
+                        self.expect(Token::CloseBracket, "expected ] after axis specifier")?;
+                        fn_expr = Instr::AxisApplied {
+                            func: Box::new(fn_expr),
+                            axis: Box::new(axis),
+                        };
+                    }
                     let right = self.parse_apply()?;
                     return Ok(Instr::Apply {
-                        fn_expr: Box::new(func),
+                        fn_expr: Box::new(fn_expr),
                         left: Some(Box::new(first)),
                         right: Box::new(right),
                     });
@@ -1110,7 +1136,7 @@ impl<'a> Parser<'a> {
             if !is_operator {
                 break;
             }
-            let fn_expr = self.parse_primary()?; // the operator (symbol or parenthesised)
+            let mut fn_expr = self.parse_primary()?; // the operator (symbol or parenthesised)
             self.skip_newlines();
             // Detect `func adverb` immediately after the operator (e.g. `×¨` in
             // `2 ×¨ 3 4 5`): the operator is a function-primitive and the very next
@@ -1148,6 +1174,32 @@ impl<'a> Parser<'a> {
                     };
                     continue;
                 }
+            }
+            // Axis specifier `f[axis]` (e.g. `1 2 3 +[0] 4 5 6`). The single-value
+            // `L f R` path above handles this, but a STRANDED left operand (`1 2 3`)
+            // reaches the dyadic loop here and would otherwise greedily consume `[0] …`
+            // as a bracket-index on the right argument (producing "different length").
+            // Read the optional `[axis]` BEFORE the right operand and wrap the function
+            // in an `AxisApplied` node, mirroring Kotlin's `AxisValAssignedFunctionDirect`.
+            // GATED to the scalar-arithmetic operators `num2_axis` supports: only those
+            // five have an axis path in the evaluator. Anything else (e.g. `,` catenate)
+            // must NOT swallow a following `[` — the port treats `[3;4]` as a list
+            // literal (a known port-leniency vs Kotlin, asserted by `eval_catenate`).
+            let op_is_scalar_arith = matches!(
+                &fn_expr,
+                Instr::Symbol { name, .. }
+                    if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*")
+            );
+            if op_is_scalar_arith
+                && matches!(self.peek().map(|t| &t.token), Some(Token::OpenBracket))
+            {
+                self.advance();
+                let axis = self.parse_apply()?;
+                self.expect(Token::CloseBracket, "expected ] after axis specifier")?;
+                fn_expr = Instr::AxisApplied {
+                    func: Box::new(fn_expr),
+                    axis: Box::new(axis),
+                };
             }
             let right = self.parse_apply()?;
             left = Instr::Apply {

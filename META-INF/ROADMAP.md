@@ -105,12 +105,14 @@ Pick one to scope per session:
     → `⟨3 4 5⟩` (identity perm [0,1,2]), matching the oracle. Covers Elias's new
     `TransposeTest__mismatchingAxisCount*` / `__multiDimensionTransposeWith*LeftArg*` cases.
     4 curated rows added.
-  - **Dyadic scalar `+[axis]` (and general `f[axis]` for scalar ops): OPEN.** Elias's
-    new `ScalarTest__additionWithAxis*` cases use `10 20 30 40 +[0] 4 3 2⍴…` (axis-0
-    broadcasting). The port's parser treats `[…]` after an operand as bracket-index, so
-    `+[0]` errors. Needs (a) a parser rule attaching an axis to dyadic scalar ops and
-    (b) scalar functions honoring it with broadcasting — a larger feature. Tracked as the
-    next axis sub-target.
+  - **Dyadic scalar `+[axis]` (and general `f[axis]` for scalar ops): DONE (2026-08-21).**
+    `f[axis]` for `+ - × ÷ *` now parses in BOTH the single-value `L f R` path AND the
+    dyadic strand loop, and `eval_apply` broadcasts along `axis` (`num2_axis`). The
+    scalar+scalar case ignores the axis (Kotlin `eval2Arg` short-circuit): `2 +[0] 3 → 5`.
+    Verified: `1 2 3 +[0] 4 5 6 → (5 7 9)`, `10 20 30 40 +[0] 4 3 2⍴… → (110…163)`
+    (shape `(4 3 2)`). 4 curated rows added. Non-scalar-arithmetic `f[axis]` (e.g. `,`,
+    `⌷`, `⊆`, `⍋`/`⍒`) remains out of scope — the parser deliberately does NOT attach an
+    axis to those.
 - **`⌷` (squad / index selection) — CRITICAL, currently mis-dispatched to
   `disclose`** (see `KNOWN-NONCONFORMANCE.md`). `2 ⌷ 1 2 3 4` returns the whole
   array instead of `3`. Largest mismatch/unsupported driver. Needs a real

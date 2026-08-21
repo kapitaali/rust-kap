@@ -122,6 +122,11 @@ pub enum Instr {
         left_fn: Box<Instr>,
         right_fn: Option<Box<Instr>>,
     },
+    /// A function with an explicit axis specifier: `f[axis]` (e.g. `+[0]`). Mirrors
+    /// Kotlin's `AxisValAssignedFunctionDirect`, created by `parseOperator` when a
+    /// `[axis]` follows the function. `eval_apply` unwraps it and threads the axis into
+    /// the builtin (currently only scalar arithmetic functions support an axis).
+    AxisApplied { func: Box<Instr>, axis: Box<Instr> },
     /// An empty array / nil.
     Empty,
     /// Array *pick* / selection: `array[selector]`. `selector` is an index expression
