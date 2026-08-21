@@ -46,7 +46,49 @@ Verified against the `kap-jvm-text` oracle (all match):
 | `0⌷(1 2)(3 4)` | `(1 2)` | `┌─────┐` |
 
 The `()` vs `⟨⟩` difference is the faithful display-glyph convention (see DISPLAY below),
-not a value defect. Bracket indexing (`x[sel]`) is a separate path and remains partial.
+not a value defect.
+
+---
+
+## CRITICAL — bracket indexing `x[sel]` (`Instr::Index` → `index_select`) — IMPLEMENTED (2026-08-21)
+
+`Instr::Index` (the `[i][j]` suffix path in `parser.rs`) now routes to a new
+`Engine::index_select` (Kotlin `APLValue.get` / `indexFromPositionNegativeSupport`
+in `dimension.kt`), **distinct from `pick`/`⊇`**. Each `;`-separated section of the
+selector drives one axis: `⍬`/empty section → whole axis, a scalar index →
+**collapse** that axis (Kap discloses the scalar element, not a length-1 array), a
+vector of indices → that many elements along the axis. Negative indices wrap
+(`¯1` = last). A result whose every section was a scalar is a rank-0 scalar
+(`x[1;2]` → `5`, not `(5)`). Chained `x[i][j]` re-indexes the inner result.
+
+Verified against the `kap-jvm-text` oracle (value matches; only `()` vs `⟨⟩` glyph
+differs on the multi-element rows):
+
+| expr | port | oracle |
+|------|------|--------|
+| `(3 4⍴10×⍳100)[2;]` | `(80 90 100 110)` | `⟨80 90 100 110⟩` |
+| `(3 4⍴10×⍳100)[;3]` | `(30 70 110)` | `⟨30 70 110⟩` |
+| `(3 4⍴10×⍳100)[;0 3]` | `(0 30 40 70 80 110)` | `⟨0 30 40 70 80 110⟩` |
+| `(2 3⍴⍳6)[1;⍳3]` | `(3 4 5)` | `⟨3 4 5⟩` |
+| `(2 2 2⍴100+⍳8)[1;0;1]` | `105` | `105` |
+| `(2 2 2⍴100+⍳8)[1;1;1]` | `107` | `107` |
+| `(1 2 3 4 5 6 7 8)[4 4⍴⍳4]` | `(1 2 3 4 1 2 3 4 1 2 3 4 1 2 3 4)` | matrix view |
+| `(10 20 30 40)[2]` | `30` | `30` |
+| `(10 20 30 40)[0 2]` | `(10 30)` | `⟨10 30⟩` |
+| `(10 20 30 40)[¯4]` | `10` | `10` |
+
+Error semantics also match the oracle byte-for-byte ("Index list length must be
+less than or equal to the rank of the argument"), including Kap's deliberate
+`1 2 3 4[2]` error (the `[2]` binds to the trailing scalar `8`).
+
+**One divergence — pre-existing nested-array representation, NOT an `index_select`
+bug:** a vector-of-vectors like `((1 2 3)(4 5 6)(7 8 9))` is generalized by the
+port into a true 2-D `(3 3)` array (so `⍴`→`(3 3)`), whereas Real Kap keeps it
+rank-1 `(3)`. Consequently the port's chained `((1 2 3)(4 5 6)(7 8 9))[0][2]` → `3`
+(indexing the 2-D array) while the oracle errors (a rank-1 array has no second
+axis). The `index_select` algorithm is correct for genuine N-D arrays; this is the
+same nested-vector generalization gap already tracked under DISPLAY/DEFERRED. No
+change made this session — flagged for later.
 
 ---
 

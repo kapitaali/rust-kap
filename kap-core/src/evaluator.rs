@@ -698,7 +698,10 @@ impl Engine {
             Instr::Index { array, selector } => {
                 let arr = self.eval_instr(array, env)?;
                 let sel = self.eval_instr(selector, env)?;
-                self.pick(&arr, &sel)
+                // `x[y]` bracket indexing is Kap's OWN index-select semantics
+                // (Kotlin `APLValue.get` / `indexFromPositionNegativeSupport`),
+                // NOT `pick` (`⊇`). Route to `index_select`.
+                self.index_select(arr.as_ref(), sel.as_ref())
             }
             Instr::Guard { cond, truthy, falsy } => {
                 let c = self.eval_instr(cond, env)?.force(self)?;
@@ -3871,6 +3874,120 @@ impl Engine {
         }
         Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
             a_dims,
+            ArrayData::Nested(out),
+        )))))
+    }
+
+    /// Kap's bracket-index selection `x[y]` (Kotlin `APLValue.get` /
+    /// `indexFromPositionNegativeSupport` in dimension.kt).
+    ///
+    /// `selector` is an `APLValue::Array` of `;`-separated *sections*, one per axis; the
+    /// number of sections must be ≤ the rank of `x`. Each section selects along its axis:
+    ///   - `⍬` / `Instr::Empty` / an empty vector (e.g. `x[;2]` second part) -> the whole axis
+    ///   - a scalar index -> one element (with negative wrap: `¯1` = last)
+    ///   - a vector of indices -> that many elements along the axis
+    /// Result shape = the concatenation of the per-section lengths. Chained bracket-index
+    /// `x[i][j]` is just nested `index_select`: the outer `Index` re-indexes the inner result.
+    fn index_select(
+        &self,
+        arr: &APLValue,
+        selector: &APLValue,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let arr = arr.force(self)?;
+        let dims = arr.dimensions();
+        let rank = dims.len();
+
+        // Resolve the selector into one section value per written axis.
+        let sections: Vec<AplRef<APLValue>> = match selector {
+            APLValue::Array(a) => a.elements(),
+            other => vec![Rc::new(other.clone())],
+        };
+        if sections.len() > rank {
+            return Err(AplError::runtime(format!(
+                "Index list length must be less than or equal to the rank of the argument. Argument={}, index={}",
+                rank, sections.len()
+            )));
+        }
+
+        // For each axis, resolve the section into the list of selected flat indices.
+        let mut selected: Vec<Vec<usize>> = Vec::with_capacity(rank);
+        for k in 0..sections.len() {
+            let sec = sections[k].force(self)?;
+            let axis_size = dims[k];
+            // Empty / `⍬` section => whole axis.
+            let idx_list: Vec<AplRef<APLValue>> = match sec.as_ref() {
+                APLValue::Null => vec![],
+                APLValue::Array(a) if a.element_count() == 0 => vec![],
+                APLValue::Array(a) => a.elements(),
+                _ => vec![Rc::new(sec.as_ref().clone())],
+            };
+            if idx_list.is_empty() {
+                selected.push((0..axis_size).collect());
+            } else {
+                let mut v = Vec::with_capacity(idx_list.len());
+                for e in &idx_list {
+                    let i = self.index_to_i64(e.force(self)?.as_ref())?;
+                    v.push(check_and_adjust_selected_index(i, axis_size)?);
+                }
+                selected.push(v);
+            }
+        }
+        // Pad missing trailing axes with "all".
+        for k in sections.len()..rank {
+            selected.push((0..dims[k]).collect());
+        }
+
+        // Result shape = the lengths of every axis whose section selects MORE THAN ONE
+        // element. A scalar section (exactly one index) collapses/drops that axis — this is
+        // how Kap's `x[0]` on a matrix yields a rank-1 row vector, and `x[1;2]` (two scalar
+        // sections) yields a rank-0 scalar. A vector/`⍬` section keeps its axis.
+        let result_dims: Vec<usize> = selected
+            .iter()
+            .filter(|s| s.len() > 1)
+            .map(|s| s.len())
+            .collect();
+
+        // Row-major strides over the *original* `arr` axes.
+        let mut strides = vec![1usize; rank];
+        if rank > 1 {
+            for k in (0..rank - 1).rev() {
+                strides[k] = strides[k + 1] * dims[k + 1];
+            }
+        }
+
+        // Enumerate row-major combinations of per-section index choices. Scalar sections
+        // (len 1) stay fixed at index 0 and are not advanced by the combo counter, but they
+        // still contribute their (single) coordinate to the flat position.
+        let total: usize = result_dims.iter().product();
+        let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(total.max(1));
+        let mut combo = vec![0usize; selected.len()];
+        for _ in 0..total {
+            let mut flat = 0usize;
+            for k in 0..selected.len() {
+                flat += selected[k][combo[k]] * strides[k];
+            }
+            out.push(Rc::new(arr.value_at(flat)));
+            // Increment combo: only axes with more than one choice vary (last varies fastest).
+            for k in (0..selected.len()).rev() {
+                if selected[k].len() > 1 {
+                    combo[k] += 1;
+                    if combo[k] < selected[k].len() {
+                        break;
+                    }
+                    combo[k] = 0;
+                }
+            }
+        }
+
+        // When every section was a scalar index, `result_dims` is empty: the result is a
+        // single rank-0 element, which Kap renders as a bare scalar (e.g. `x[2] → 3`, not
+        // `(3)`). Return that element directly rather than wrapping it in a rank-0 array.
+        if result_dims.is_empty() {
+            return Ok(out.into_iter().next().unwrap_or_else(|| Rc::new(APLValue::Null)));
+        }
+
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            result_dims,
             ArrayData::Nested(out),
         )))))
     }

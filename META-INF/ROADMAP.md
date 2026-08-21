@@ -16,7 +16,8 @@ Pick one to scope per session:
 
 - `⊆` / `⊇` — partition / shape  **(DONE)**
 - `∘` / `≬` — operators
-- `→` — branch / guard
+- `→` — branch / guard  **(DONE)** — see `KNOWN-NONCONFORMANCE.md` (`→` committed earlier this branch)
+- bracket indexing `x[sel]` (`Instr::Index` → `index_select`)  **(DONE)** — see `KNOWN-NONCONFORMANCE.md`
 - key / major-cell operators: `⌺` / `⌸`, `⍋⍒`-with-axis
 - format family
 - **`⌷` (squad / index selection) — CRITICAL, currently mis-dispatched to
