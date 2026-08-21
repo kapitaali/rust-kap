@@ -324,7 +324,16 @@ impl KapNumber {
         use KapNumber::*;
         match self {
             Long(v) => Long(*v),
-            Double(v) => Double(v.ceil()),
+            // Oracle: `⌈3.7` → `3` typed `kap:integer` — a whole-valued result
+            // normalises to Long (Kotlin `ParsedDouble.floor/ceil` → `APLLong`).
+            Double(v) => {
+                let c = v.ceil();
+                if c.fract() == 0.0 && c.abs() <= i64::MAX as f64 {
+                    Long(c as i64)
+                } else {
+                    Double(c)
+                }
+            }
             BigInt(v) => BigInt(v.clone()),
             Rational(v) => {
                 // ceil of a/b = -floor(-a/b)
@@ -340,7 +349,15 @@ impl KapNumber {
         use KapNumber::*;
         match self {
             Long(v) => Long(*v),
-            Double(v) => Double(v.floor()),
+            // Oracle: `⌊3.7` → `3` typed `kap:integer` — normalise whole doubles.
+            Double(v) => {
+                let f = v.floor();
+                if f.fract() == 0.0 && f.abs() <= i64::MAX as f64 {
+                    Long(f as i64)
+                } else {
+                    Double(f)
+                }
+            }
             BigInt(v) => BigInt(v.clone()),
             Rational(v) => Rational(v.floor()),
             Complex(r, i) => Complex(r.floor(), i.floor()),

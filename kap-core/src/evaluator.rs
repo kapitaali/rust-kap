@@ -445,7 +445,14 @@ impl Engine {
             Instr::Literal(LiteralValue::Char(c)) => Ok(Rc::new(APLValue::Char(*c))),
             Instr::Literal(LiteralValue::Str(s)) => Ok(Rc::new(APLValue::Str(s.clone()))),
             Instr::Literal(LiteralValue::Symbol { .. }) => Err(AplError::runtime("lone symbol literal".into())),
-            Instr::Literal(LiteralValue::SymbolValue { .. }) => Err(AplError::runtime("lone symbol-value literal".into())),
+            Instr::Literal(LiteralValue::SymbolValue { name }) => {
+                // A `'name` symbol literal (Kotlin QuotePrefix → LiteralSymbol):
+                // evaluates to the interned symbol VALUE itself.
+                Ok(Rc::new(APLValue::Symbol {
+                    name: name.clone(),
+                    namespace: None,
+                }))
+            }
             Instr::SymbolValue { name } => {
                 Ok(Rc::new(APLValue::Symbol {
                     name: name.clone(),
@@ -1167,6 +1174,24 @@ impl Engine {
                     namespace: Some("kap".to_string()),
                 }))
             }
+            // `isLocallyBound` (monadic, Kotlin `IsLocallyBoundFunction`): takes a
+            // *symbol literal* (`'⍺`) and returns 1 if that symbol is bound in the
+            // current scope chain with a value — used by stdlib to detect whether a
+            // left argument was supplied (`n ← if (isLocallyBound('⍺)) { ⍺ } …`).
+            "isLocallyBound" => {
+                let v = right_val.force(self)?;
+                let name = match v.as_ref() {
+                    APLValue::Symbol { name, .. } => name.clone(),
+                    other => {
+                        return Err(AplError::runtime(format!(
+                            "isLocallyBound requires a symbol, got: {}",
+                            other.format_value()
+                        )))
+                    }
+                };
+                let bound = env.lookup(&name, &None).is_some();
+                Ok(Rc::new(APLValue::Number(KapNumber::Long(bound as i64))))
+            }
             // --- Namespace directives (Kotlin `namespace`/`import`/`declare`). ---
             // `namespace("foo")` sets the current module namespace for subsequent
             // top-level bindings/lookups. `import("foo")` makes `foo`'s *exported*
@@ -1341,7 +1366,18 @@ impl Engine {
                     }
                 }, "⌊"),
             },
-            "|" | "mod" => self.num2(left_val, right_val, |a, b| a.modulo(b), "|"),
+            // `|`: dyadic = modulo; monadic = magnitude (absolute value).
+            "|" | "mod" => match left_val {
+                None => self.scalar1(
+                    right_val,
+                    |x| match x.numeric_cmp(&KapNumber::Long(0)) {
+                        Ok(std::cmp::Ordering::Less) => x.neg(),
+                        _ => x.clone(),
+                    },
+                    "|",
+                ),
+                Some(_) => self.num2(left_val, right_val, |a, b| a.modulo(b), "|"),
+            },
             "*" | "⋆" => match left_val {
                 None => self.scalar1(right_val, |x| x.exp(), "⋆"),
                 Some(_) => self.num2(left_val, right_val, |a, b| a.pow(b), "⋆"),
@@ -1584,7 +1620,7 @@ impl Engine {
             "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"
                 | "↑" | "↓" | "⊂" | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥"
-                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair" | "⊆" | "⊇" | "→" | "≬" | "toList" | "fromList" | "⫇" | "group" | "use"
+                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair" | "⊆" | "⊇" | "→" | "≬" | "toList" | "fromList" | "⫇" | "group" | "use" | "isLocallyBound"
  )
  }
 
@@ -2516,6 +2552,55 @@ impl Engine {
         match (a.as_ref(), right_val.as_ref()) {
             (APLValue::Number(x), APLValue::Number(y)) => {
                 Ok(Rc::new(APLValue::Number(f(x, y))))
+            }
+            // Char arithmetic (Kap: `@A + ⍳26 → "ABC…Z"`). `char ±×÷ number`,
+            // `number ±×÷ char`, and `char ±×÷ char` all operate on codepoints and
+            // yield a char; scalar-extended across arrays too.
+            (APLValue::Char(c), APLValue::Number(n)) => Ok(Rc::new(APLValue::Char(
+                char::from_u32((*c as i64 + n.as_long().unwrap_or(0)) as u32).ok_or_else(|| {
+                    AplError::runtime("character codepoint out of range".into())
+                })?,
+            ))),
+            (APLValue::Number(n), APLValue::Char(c)) => Ok(Rc::new(APLValue::Char(
+                char::from_u32((*c as i64 + n.as_long().unwrap_or(0)) as u32).ok_or_else(|| {
+                    AplError::runtime("character codepoint out of range".into())
+                })?,
+            ))),
+            (APLValue::Char(a), APLValue::Char(b)) => Ok(Rc::new(APLValue::Char(
+                char::from_u32(((*a as i64) + (*b as i64)) as u32).ok_or_else(|| {
+                    AplError::runtime("character codepoint out of range".into())
+                })?,
+            ))),
+            // Scalar extension with a char operand.
+            (APLValue::Array(xa), APLValue::Char(c))
+            | (APLValue::Char(c), APLValue::Array(xa)) => {
+                let mut out = Vec::with_capacity(xa.element_count());
+                for e in xa.elements() {
+                    if let APLValue::Number(x) = e.as_ref() {
+                        out.push(char::from_u32((*c as i64 + x.as_long().unwrap_or(0)) as u32)
+                            .ok_or_else(|| AplError::runtime("character codepoint out of range".into()))?);
+                    }
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    xa.dimensions.clone(),
+                    ArrayData::Char(out),
+                )))))
+            }
+            (APLValue::Array(xa), APLValue::Array(xb)) if matches!(xb.data, ArrayData::Char(_)) => {
+                let mut out = Vec::with_capacity(xa.element_count());
+                let xbe = xb.elements();
+                for (i, e) in xa.elements().into_iter().enumerate() {
+                    if let (APLValue::Number(x), Some(APLValue::Char(c))) =
+                        (e.as_ref(), xbe.get(i).map(|y| y.as_ref()))
+                    {
+                        out.push(char::from_u32((*c as i64 + x.as_long().unwrap_or(0)) as u32)
+                            .ok_or_else(|| AplError::runtime("character codepoint out of range".into()))?);
+                    }
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    xa.dimensions.clone(),
+                    ArrayData::Char(out),
+                )))))
             }
             // Scalar extension: array <op> scalar, scalar <op> array, array <op> array.
             (APLValue::Array(xa), APLValue::Number(y)) | (APLValue::Number(y), APLValue::Array(xa)) => {
@@ -6625,10 +6710,12 @@ mod tests {
 
     #[test]
     fn eval_ceil_floor() {
-        assert_eq!(eval("⌈ 3.2"), "4.0");
-        assert_eq!(eval("⌊ 3.8"), "3.0");
+        // Oracle: `⌈3.2` → `4` typed `kap:integer` (whole-valued results normalise
+        // to Long; verified against kap-jvm-text).
+        assert_eq!(eval("⌈ 3.2"), "4");
+        assert_eq!(eval("⌊ 3.8"), "3");
         assert_eq!(eval("⌈ 5"), "5");
-        assert_eq!(eval("⌈ 1.5 2.5 3.5"), "(2.0 3.0 4.0)");
+        assert_eq!(eval("⌈ 1.5 2.5 3.5"), "(2 3 4)");
     }
 
     #[test]
@@ -6704,7 +6791,7 @@ mod tests {
 
     #[test]
     fn eval_each_monadic() {
-        assert_eq!(eval("⌈¨ 1.2 2.8 3.5"), "(2.0 3.0 4.0)");
+        assert_eq!(eval("⌈¨ 1.2 2.8 3.5"), "(2 3 4)");
         assert_eq!(eval("~¨ 1 0 3"), "(0 1 0)");
     }
 

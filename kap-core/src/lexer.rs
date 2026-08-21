@@ -115,27 +115,21 @@ pub fn tokenise(src: &str) -> Vec<SpannedToken> {
             continue;
         }
         // symbol literal: `'foo` -> a *symbol value* (distinct from a variable
-        // reference). Emitted as `LiteralValue::SymbolValue` so the parser builds an
-        // `Instr::SymbolValue` that evaluates to `APLValue::Symbol` (Kotlin SymbolValue).
+        // reference). Kotlin ground truth (tokeniser.kt QuotePrefix +
+        // parser.kt:1003): `'` emits a bare QuotePrefix token and the PARSER
+        // consumes the following full symbol token (`[ns:]name`). Scanning here
+        // cannot work because APL glyphs like `⍺` are NOT alphabetic
+        // (`char::is_alphabetic` is false for U+237A), so a character-level scan
+        // stops immediately and fuses the rest of the line into stray tokens
+        // (broke io.kap:31 `isLocallyBound('⍺)`).
         if c == '\'' {
-            let mut j = i + 1;
-            let mut name = String::new();
-            while j < chars.len() && chars[j] != '\'' && !chars[j].is_whitespace() {
-                name.push(chars[j]);
-                j += 1;
-            }
-            // Consume the closing `'` if present.
-            if j < chars.len() && chars[j] == '\'' {
-                j += 1;
-            }
             out.push(SpannedToken {
-                token: Token::Literal(LiteralValue::SymbolValue { name: name.clone() }),
+                token: Token::QuotePrefix,
                 line: start_line,
                 col: start_col,
             });
-            let consumed = j.saturating_sub(i).max(1);
-            i = j;
-            col += consumed;
+            i += 1;
+            col += 1;
             continue;
         }
         // single-char punctuation / symbols
@@ -246,3 +240,4 @@ fn single_char_token(c: char) -> Option<Token> {
         _ => return None,
     })
 }
+

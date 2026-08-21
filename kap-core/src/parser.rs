@@ -215,16 +215,12 @@ impl<'a> Parser<'a> {
             }
         }
         // Control-flow keywords are *syntactic* (not symbols): `if`/`while`/`when`.
-        // Detect a leading keyword symbol and dispatch to the dedicated parser.
-        if let Some(t) = self.peek() {
-            if let Token::Literal(LiteralValue::Symbol { name, .. }) = &t.token {
-                match name.as_str() {
-                    "if" => return self.parse_if(),
-                    "while" => return self.parse_while(),
-                    "when" => return self.parse_when(),
-                    _ => {}
-                }
-            }
+        // Detect a leading keyword symbol and dispatch to the dedicated parser. This
+        // must run in BOTH `parse_expr` (statement start) and `parse_apply` (value /
+        // assignment positions, e.g. `x ← if (…) …` or `⊢ if (…) …`), otherwise the
+        // keyword strands as a bare symbol and errors as "undefined symbol".
+        if let Some(instr) = self.parse_keyword_prefix()? {
+            return Ok(instr);
         }
         let base = self.parse_assign()?;
         // Guarded expression: `base : truthy ⋄ falsy`.
@@ -286,6 +282,25 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(Instr::Block { body })
+    }
+
+    /// Shared control-flow keyword dispatch for `if`/`while`/`when`. Returns `Ok(Some(instr))`
+    /// when the next token is one of those keywords (consuming it), or `Ok(None)` otherwise.
+    /// Called from BOTH `parse_expr` (statement start) and `parse_apply` (value / assignment
+    /// positions) so that e.g. `x ← if (…) …` and `⊢ if (…) …` parse correctly instead of
+    /// stranding `if` as a bare symbol.
+    fn parse_keyword_prefix(&mut self) -> Result<Option<Instr>, AplError> {
+        if let Some(t) = self.peek() {
+            if let Token::Literal(LiteralValue::Symbol { name, .. }) = &t.token {
+                match name.as_str() {
+                    "if" => return Ok(Some(self.parse_if()?)),
+                    "while" => return Ok(Some(self.parse_while()?)),
+                    "when" => return Ok(Some(self.parse_when()?)),
+                    _ => {}
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// if (cond) { then } [ else { alt } ]
@@ -737,6 +752,11 @@ impl<'a> Parser<'a> {
 
     /// apply := (fn term) | (term fn term)*  — monadic `f x` or dyadic `a f b` / trains.
     fn parse_apply(&mut self) -> Result<Instr, AplError> {
+        // Control-flow keywords must also be recognised in *value* / assignment
+        // positions (e.g. `x ← if (…) …`, `⊢ if (…) …`), not only at statement start.
+        if let Some(instr) = self.parse_keyword_prefix()? {
+            return Ok(instr);
+        }
         let mut first = self.parse_primary()?;
         // A *value* followed by `primitive_op known_op` is a dyadic operator call where the
         // value is the operator's left DATA argument: `10 +foo 2` = `(+foo) applied to (10, 2)`.
@@ -1374,7 +1394,7 @@ impl<'a> Parser<'a> {
                 | "⊢" | "⊣" | "≡" | "⍓" | "∪" | "∩" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair"
                 | "⊆" | "⊇" | "→" | "≬" | "toList" | "fromList" | "⫇" | "group"
                 | "⍕" | "format" | "⍎" | "execute" | "typeof"
-                | "namespace" | "import" | "declare" | "use"
+                | "namespace" | "import" | "declare" | "use" | "isLocallyBound"
         )
     }
 
@@ -1737,6 +1757,33 @@ impl<'a> Parser<'a> {
                 let name = name.clone();
                 self.advance();
                 Ok(Instr::SymbolValue { name })
+            }
+            Token::QuotePrefix => {
+                // `'name` — a *symbol literal* (Kotlin QuotePrefix +
+                // parser.kt:1003: `LiteralSymbol(nameToSymbol(tokeniser.nextTokenWithType()))`).
+                // Consume the following symbol token (which may be namespace-qualified)
+                // and yield a SymbolValue that evaluates to `APLValue::Symbol`.
+                self.advance();
+                match self.peek() {
+                    Some(t) if matches!(
+                        t.token,
+                        Token::Literal(LiteralValue::Symbol { .. })
+                    ) => {
+                        let tok = t.token.clone();
+                        self.advance();
+                        if let Token::Literal(LiteralValue::Symbol { name, namespace }) = tok {
+                            Ok(Instr::Literal(LiteralValue::SymbolValue {
+                                name: match namespace {
+                                    Some(ns) => format!("{}:{}", ns, name),
+                                    None => name,
+                                },
+                            }))
+                        } else {
+                            unreachable!()
+                        }
+                    }
+                    _ => Err(self.err("expected a symbol after '")),
+                }
             }
             Token::ApplyToken => {
                 // Kap's `⍞name`: a *dynamic* function reference. Unlike a plain symbol

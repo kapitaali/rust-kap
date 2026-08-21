@@ -283,7 +283,9 @@ fn curated_kap_parity() {
         ("+\\ 1 2 3 4", "(1 3 6 10)"),
         ("⌈/ 3 9 2 7", "9"),
         ("⌊/ 3 9 2 7", "2"),
-        ("⌈¨ 1.2 2.8 3.5", "(2.0 3.0 4.0)"),
+        // Oracle: whole-valued floor/ceil results normalise to integers
+        // (`⌈3.2` → `4` typed `kap:integer`; verified vs kap-jvm-text).
+        ("⌈¨ 1.2 2.8 3.5", "(2 3 4)"),
         ("2 ×¨ 3 4 5", "(6 8 10)"),
         ("1 2 3 ×¨ 4 5 6", "(4 10 18)"),
         ("3 ⌈ 5", "5"),
@@ -301,8 +303,9 @@ fn curated_kap_parity() {
         ("¯1 ⊇ 1 2 3 4 5", "(5)"),
         ("1 0 2 ⊇ 10 20 30 40", "(20 10 30)"),
         // Builtins (ambivalent max/min, arithmetic) — Phase 6
-        ("⌈ 3.2", "4.0"),
-        ("⌊ 3.8", "3.0"),
+        // Oracle: `⌈3.2` → `4` typed `kap:integer` (whole results normalise to Long).
+        ("⌈ 3.2", "4"),
+        ("⌊ 3.8", "3"),
         ("3 ⌈ 5", "5"),
         ("3 | 2", "1"),
         ("1 ∧ 0", "0"),
@@ -685,7 +688,10 @@ fn curated_kap_parity() {
             ("int:symbolName 'foo", "(\"foo\" \"default\")"),
             ("int:symbolName 'abc", "(\"abc\" \"default\")"),
             // A parenthesised symbol value also round-trips through the paren-group path.
-            ("int:symbolName ('abc')", "(\"abc\" \"default\")"),
+            // NOTE: `'abc'` (trailing quote) is NOT valid Kap — `'` is a QuotePrefix
+            // that consumes exactly one following symbol token (Kotlin parser.kt:1003),
+            // so a second `'` has no operand and errors. Use `('abc)` instead.
+            ("int:symbolName ('abc)", "(\"abc\" \"default\")"),
             // `int:intern` (dyadic) builds a symbol: name is the right arg, namespace the left.
             ("\"foo\" int:intern \"bar\"", "foo:bar"),
             ("\"ns\" int:intern \"sym\"", "ns:sym"),
