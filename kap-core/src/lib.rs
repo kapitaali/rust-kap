@@ -529,11 +529,29 @@ impl Environment {
 #[derive(Debug, Default)]
 pub struct Engine {
     pub standard_output: Option<String>,
+    /// Basenames of files currently being loaded via `use(...)`. Guards against
+    /// recursive `use` (e.g. `base-functions.kap` calls `use("base-functions.kap")`
+    /// at its top). Real Kap has no such guard and StackOverflows; we skip an
+    /// already-in-flight include instead so the intended single load succeeds.
+    pub include_stack: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>>,
+    /// Explicitly-configured standard-library search directories (e.g. set from a
+    /// `--lib-path` CLI flag). Consulted first by `use(...)` when resolving a file
+    /// by basename — the port's analog of kap-jvm-text's `--lib-path`.
+    pub lib_paths: std::rc::Rc<std::cell::RefCell<Vec<std::path::PathBuf>>>,
 }
 
 impl Engine {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Prepend one or more standard-library directories (in priority order) to the
+    /// `use(...)` search path. Mirrors kap-jvm-text `--lib-path=path` / `-p path`.
+    pub fn set_lib_paths<S: AsRef<std::path::Path>>(&self, paths: &[S]) {
+        let mut v = self.lib_paths.borrow_mut();
+        for p in paths {
+            v.push(p.as_ref().to_path_buf());
+        }
     }
 }
 

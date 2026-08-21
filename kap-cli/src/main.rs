@@ -16,11 +16,59 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let session = Session::new();
 
-    match args.get(1) {
+    // Parse `--lib-path=PATH` / `-p PATH` (the port analog of kap-jvm-text's
+    // `--lib-path`): one or more standard-library directories `use(...)` searches
+    // first when resolving a file by basename. Stops at the first positional (file)
+    // argument, which switches to file mode.
+    let mut lib_paths: Vec<String> = Vec::new();
+    let mut positional: Option<String> = None;
+    let mut i = 1;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--lib-path" {
+            if let Some(v) = args.get(i + 1) {
+                lib_paths.push(v.clone());
+                i += 2;
+                continue;
+            }
+            eprintln!("error: --lib-path requires a path");
+            std::process::exit(2);
+        } else if let Some(p) = a.strip_prefix("--lib-path=") {
+            lib_paths.push(p.to_string());
+            i += 1;
+            continue;
+        } else if a == "-p" {
+            if let Some(v) = args.get(i + 1) {
+                lib_paths.push(v.clone());
+                i += 2;
+                continue;
+            }
+            eprintln!("error: -p requires a path");
+            std::process::exit(2);
+        } else if a.starts_with("-p") {
+            lib_paths.push(a[2..].to_string());
+            i += 1;
+            continue;
+        } else if a.starts_with('-') && a.len() > 1 && a != "-n" && !a.starts_with("--no-") {
+            // Unknown flag; ignore (could be a REPL flag passed through) but don't
+            // treat as the file. We only switch to file mode on a non-flag arg.
+            i += 1;
+            continue;
+        } else {
+            positional = Some(a.clone());
+            i += 1;
+            break;
+        }
+    }
+    if !lib_paths.is_empty() {
+        session.set_lib_paths(&lib_paths);
+    }
+
+    match positional {
         Some(path) => {
-            // File mode: read, evaluate once, print the last value (REPL-style
+            // File mode: read, evaluate once, print the last result (REPL-style
             // display: strings are quoted, matching Real Kap).
-            match std::fs::read_to_string(path) {
+            match std::fs::read_to_string(&path) {
                 Ok(src) => match session.eval(&src) {
                     Ok(v) => {
                         let out = v.format_display();

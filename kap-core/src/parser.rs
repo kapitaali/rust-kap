@@ -1015,20 +1015,24 @@ impl<'a> Parser<'a> {
                 };
                 if next_fn && paren_group_is_fn {
                     let func = self.parse_function_expr()?;
-                    // Axis specifier: `f[axis]` (e.g. `+[0]`). Kotlin's `parseOperator`
-                    // reads an optional `[axis]` *before* the right operand and wraps the
-                    // function in `AxisValAssignedFunctionDirect`. We must parse it here,
-                    // BEFORE the right operand, because `parse_apply` would otherwise
-                    // greedily consume `[0] …` as a bracket-index on the right argument.
-                    // GATED to scalar-arithmetic operators (`+ - × ÷ *`), the only
-                    // functions with an axis path in `num2_axis`. Anything else (e.g. `,`
-                    // catenate) must NOT swallow a following `[` — the port treats `[3;4]`
-                    // as a list literal (a known port-leniency, asserted by `eval_catenate`).
+                    // Axis specifier: `f[axis]` (e.g. `+[0]`, `,[0.5]`). Kotlin's
+                    // `parseOperator` reads an optional `[axis]` *before* the right
+                    // operand and wraps the function in `AxisValAssignedFunctionDirect`.
+                    // We must parse it here, BEFORE the right operand, because
+                    // `parse_apply` would otherwise greedily consume `[0] …` as a
+                    // bracket-index on the right argument.
+                    // Applies to the scalar-arithmetic operators (`+ - × ÷ *`, the only
+                    // ones with an axis path in `num2_axis`) and the catenation operators
+                    // (`,`/`⍪`, which support `,[0.5]` laminate / `,[0]` concat). These
+                    // are precisely the functions with an axis path in the evaluator.
+                    // Anything else must NOT swallow a following `[` — the port treats
+                    // `[3;4]` as a list literal (a known port-leniency, asserted by
+                    // `eval_catenate`).
                     let mut fn_expr = func;
                     let axis_ok = matches!(
                         &fn_expr,
                         Instr::Symbol { name, .. }
-                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*")
+                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪")
                     );
                     if axis_ok
                         && matches!(self.peek().map(|t| &t.token), Some(Token::OpenBracket))
@@ -1188,7 +1192,7 @@ impl<'a> Parser<'a> {
             let op_is_scalar_arith = matches!(
                 &fn_expr,
                 Instr::Symbol { name, .. }
-                    if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*")
+                    if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪")
             );
             if op_is_scalar_arith
                 && matches!(self.peek().map(|t| &t.token), Some(Token::OpenBracket))
@@ -1368,9 +1372,9 @@ impl<'a> Parser<'a> {
                 | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⍪" | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥" | "⍸" | "⍒" | "⍲" | "⍱" | "∼"
                 | "⊢" | "⊣" | "≡" | "⍓" | "∪" | "∩" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair"
-                | "⊆" | "⊇" | "→" | "≬" | "toList" | "fromList"
+                | "⊆" | "⊇" | "→" | "≬" | "toList" | "fromList" | "⫇" | "group"
                 | "⍕" | "format" | "⍎" | "execute" | "typeof"
-                | "namespace" | "import" | "declare"
+                | "namespace" | "import" | "declare" | "use"
         )
     }
 
@@ -1505,7 +1509,12 @@ impl<'a> Parser<'a> {
         // *value*, so `(⌷x)` must parse as the monadic application `⌷ x`, not the 2-train
         // `⌷∘x` (which would treat `x` as a function and fail). Genuine function-variable
         // trains like `(f g)` still work because `f`/`g` are registered as known functions.
-        let all_funcs = funcs.iter().all(Self::is_function_expr);
+        // A train's members must be *definite* functions (primitives, known fns,
+        // lambdas, derived trains) — NOT bare unknown symbols. A group of bare symbols
+        // like `(a b c d e)` is a *list literal* of symbols (see `declare`), not a
+        // 5-function train. Using `is_function_expr` here (which admits ANY symbol)
+        // would wrongly turn `(a b c d e)` into a 5-train.
+        let all_funcs = funcs.iter().all(Self::is_definite_function);
         let left_bind = funcs.len() == 2
             && matches!(funcs[0], Instr::Literal(_) | Instr::Array { .. } | Instr::Empty)
             && matches!(funcs[1], Instr::Symbol { .. } | Instr::Derived { .. } | Instr::Lambda { .. } | Instr::Train { .. });
@@ -1517,6 +1526,13 @@ impl<'a> Parser<'a> {
             // 1-member train — wrap it so it applies to the surrounding left/right args.
             // Anything else (e.g. an array `(1 2)`, a value group `(1+2)`) is *not* a train.
             Some(Instr::Train { funcs, reverse: false, compose: false })
+        } else if funcs.iter().all(|f| matches!(f, Instr::Symbol { .. })) {
+            // A parenthesised group of *only* plain symbols (e.g. `(a b c)`) is a
+            // vector of symbols (a list literal), NOT a function train. This is what
+            // `declare(:export (name1 name2 …))` and `declare(:const (…))` expect —
+            // `declare`'s argument is a list of symbol names, not a train. (Kotlin
+            // treats `(sym1 sym2 …)` of bare symbols as a symbol-array list literal.)
+            Some(Instr::Array { elements: funcs })
         } else {
             None
         }
@@ -1527,8 +1543,17 @@ impl<'a> Parser<'a> {
     /// train. Excludes bare variable symbols (which may hold a value at runtime) and literals.
     fn is_definite_function(e: &Instr) -> bool {
         match e {
-            Instr::Symbol { name, .. } => {
-                Self::is_primitive_op(name) || name == "⊢" || name == "⊣"
+            Instr::Symbol { name, namespace } => {
+                // A primitive/identity symbol, OR a namespace-qualified name
+                // (`io:print` => name="print", namespace=Some("io")) which can only
+                // reference a module function (never a local value), so it is safe to
+                // treat as a definite function in a 2-train. This lets `(⊣ io:print)`
+                // parse as an atop; a bare local variable (`x` in `(⌷x)`) stays
+                // non-definite so it parses as the monadic application `⌷ x` instead.
+                Self::is_primitive_op(name)
+                    || name == "⊢"
+                    || name == "⊣"
+                    || namespace.is_some()
             }
             Instr::Derived { .. } | Instr::Lambda { .. } | Instr::Train { .. } => true,
             _ => false,

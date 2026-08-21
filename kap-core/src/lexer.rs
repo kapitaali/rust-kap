@@ -147,7 +147,10 @@ pub fn tokenise(src: &str) -> Vec<SpannedToken> {
         }
         // APL glyphs that are not ASCII (e.g. ⍳ ⊃ ≢ ⍴ ⌽ etc.) are single-char
         // function/operator *names* in Kap. Emit each as its own Symbol token.
-        if !c.is_ascii() {
+        // Exception: `⎕` (U+2395, the quad), which begins a *multi-char* name such
+        // as `⎕A`, `⎕p`, `⎕pl` — those must stay one Symbol, so `⎕` falls through
+        // to the symbol-run path below.
+        if !c.is_ascii() && c != '⎕' {
             out.push(SpannedToken {
                 token: Token::Literal(LiteralValue::Symbol { name: c.to_string(), namespace: None }),
                 line: start_line,

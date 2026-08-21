@@ -769,14 +769,12 @@ impl Engine {
         // scalar arithmetic builtins to an axis-aware broadcast path.
         if let Instr::AxisApplied { func, axis } = fn_expr {
             let axis_val = self.eval_instr(axis, env)?.force(self)?;
-            let axis = match axis_val.as_ref() {
+            let axis_as_long = match axis_val.as_ref() {
                 APLValue::Number(n) => n.as_long().map_err(|e| AplError::runtime(e))? as usize,
                 APLValue::Array(a) if a.dimensions.len() == 1 && a.element_count() == 1 => {
                     match a.elements().get(0) {
                         Some(e) => match e.as_ref() {
-                            APLValue::Number(x) => {
-                                x.as_long().map_err(|e| AplError::runtime(e))? as usize
-                            }
+                            APLValue::Number(x) => x.as_long().map_err(|e| AplError::runtime(e))? as usize,
                             _ => return Err(AplError::runtime("axis must be an integer".into())),
                         },
                         None => return Err(AplError::runtime("axis must be an integer".into())),
@@ -784,8 +782,20 @@ impl Engine {
                 }
                 _ => return Err(AplError::runtime("axis must be an integer".into())),
             };
-            // Only scalar arithmetic builtins support an axis in this port (matches the
-            // subset Elias's tests exercise: `+[0]`). Other functions error clearly.
+            // Keep the *possibly fractional* axis value too (for `,[0.5]` laminate).
+            let axis_number: KapNumber = match axis_val.as_ref() {
+                APLValue::Number(n) => n.clone(),
+                APLValue::Array(a) if a.dimensions.len() == 1 && a.element_count() == 1 => {
+                    match a.elements().get(0) {
+                        Some(e) => match e.as_ref() {
+                            APLValue::Number(x) => x.clone(),
+                            _ => return Err(AplError::runtime("axis must be a number".into())),
+                        },
+                        None => return Err(AplError::runtime("axis must be a number".into())),
+                    }
+                }
+                _ => return Err(AplError::runtime("axis must be a number".into())),
+            };
             let fn_name = match **func {
                 Instr::Symbol { ref name, .. } => name.as_str(),
                 _ => {
@@ -799,6 +809,13 @@ impl Engine {
                 None => None,
             };
             let right_v = self.eval_instr(right, env)?.force(self)?;
+            // `,` / `⍪` support a fractional axis: an axis within 0.01 of an integer is
+            // treated as a plain (integer) axis; otherwise it is a *laminate* axis
+            // (Kotlin `computeLaminateAxis`: axis -> ceil(d)), which inserts a length-1
+            // axis and concatenates the two arrays along it. This is how `,[0.5]` works.
+            if fn_name == "," || fn_name == "⍪" {
+                return self.catenate_axis(left_v, right_v, &axis_number);
+            }
             // Kotlin `MathCombineAPLFunction.eval2Arg` short-circuits scalar+scalar BEFORE
             // any axis handling: `if (a0 is APLSingleValue && b0 is APLSingleValue)
             // return combine2Arg(a0, b0)`. The axis is silently ignored for two scalars,
@@ -811,7 +828,7 @@ impl Engine {
             }
             return match fn_name {
                 "+" | "-" | "×" | "÷" | "*" => {
-                    self.num2_axis(left_v, right_v, fn_name, axis)
+                    self.num2_axis(left_v, right_v, fn_name, axis_as_long)
                 }
                 other => Err(AplError::runtime(format!(
                     "axis specifier not supported for '{}'",
@@ -1205,18 +1222,47 @@ impl Engine {
                         elems.len()
                     )));
                 }
-                let sym = match elems[1].as_ref() {
-                    APLValue::Symbol { name, .. } => name.clone(),
+                // The second element may be:
+                //  - a single Symbol  (declare(:export a))
+                //  - an array of Symbols (declare(:export (a b c))) — export each
+                //  - an operator operand (declare(:export ⌸)) — not exportable here,
+                //    so skip gracefully rather than erroring.
+                let cur = env.ns_registry.current_ns();
+                match elems[1].as_ref() {
+                    APLValue::Symbol { name, .. } => {
+                        env.ns_registry.declare_export(&cur, name);
+                    }
+                    APLValue::Array(g) => {
+                        for sub in g.elements() {
+                            if let APLValue::Symbol { name, .. } = sub.as_ref() {
+                                env.ns_registry.declare_export(&cur, name);
+                            }
+                        }
+                    }
+                    // Operator operand or other non-symbol: ignore (export is a no-op
+                    // for these, and `⌸` is a deferred operator).
+                    _ => {}
+                }
+                Ok(right_val)
+            }
+            // `use("file.kap")` — load and evaluate a library file in the *current*
+            // namespace (so its top-level `∇`/`⇐` definitions land where the call
+            // appears). Mirrors Kotlin's `LoadFileFunction`/`resolveLibraryFile`:
+            // the argument is a string resolved by *basename* across the library
+            // search path. We add a recursion guard (see `Engine::include_stack`) so
+            // a file that self-`use`s loads exactly once.
+            "use" => {
+                let name = match right_val.as_ref() {
+                    APLValue::Str(s) => s.clone(),
+                    APLValue::Char(c) => c.to_string(),
                     other => {
                         return Err(AplError::runtime(format!(
-                            "declare's second element must be a symbol, got: {}",
+                            "use: argument must be a filename string, got: {}",
                             other.format_value()
                         )))
                     }
                 };
-                let cur = env.ns_registry.current_ns();
-                env.ns_registry.declare_export(&cur, &sym);
-                Ok(right_val)
+                self.use_file(&name, env)
             }
             "÷" | "/" => match left_val {
                 None => self.scalar1(right_val, |x| x.recip(), "÷"),
@@ -1262,6 +1308,16 @@ impl Engine {
             "fromList" => match left_val {
                 None => self.from_list(right_val),
                 Some(_) => Err(AplError::runtime("fromList: Function cannot be called with two arguments".into())),
+            },
+            // `⫇` / `group` — Kotlin GroupFunction (group-index.kt). Left `L` is a rank-1
+            // vector of group indices (negative => element skipped). Right `R` has major
+            // axis == length(L); each index selects into R's major cells. Returns a vector
+            // of arrays: group `i` holds its selected cells (skipped indices leave APLNull
+            // in that slot). For a rank-1 R the cells are scalars; for higher rank they are
+            // the (rank-1) sub-arrays along the major axis.
+            "⫇" | "group" => match left_val {
+                None => Err(AplError::runtime("⫇ requires a left argument (group indices)".into())),
+                Some(l) => self.group_indices(l, right_val),
             },
             // --- more builtins (Phase 6) ---
             "⌈" | "ceil" => match left_val {
@@ -1528,9 +1584,9 @@ impl Engine {
             "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"
                 | "↑" | "↓" | "⊂" | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥"
-                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair" | "⊆" | "⊇" | "→" | "≬" | "toList" | "fromList"
+                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair" | "⊆" | "⊇" | "→" | "≬" | "toList" | "fromList" | "⫇" | "group" | "use"
  )
-    }
+ }
 
     /// Apply a user-defined lambda. `split` = number of leading params that are bound to
     /// the *left* (dyadic) argument; the remainder are bound to the right argument.
@@ -3078,6 +3134,176 @@ impl Engine {
         }
     }
 
+    /// `,[axis]` — axis-aware catenation (Kotlin `ConcatenateAPLFunctionImpl.eval2Arg`).
+    ///
+    /// A *near-integer* axis (within 0.01, per Kap's `computeLaminateAxis`) concatenates
+    /// the two arrays along that integer axis (dims must match on every axis except the
+    /// concatenation axis). A genuinely fractional axis is a *laminate*: the axis is
+    /// `ceil(d)`, a length-1 axis is inserted at that position in both arrays, and the
+    /// (now equal-rank) arrays are concatenated along it — stacking A over B.
+    fn catenate_axis(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+        axis: &KapNumber,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let a = match left_val {
+            Some(l) => l.force(self)?,
+            None => return Err(AplError::runtime(",[axis]: requires two arguments".into())),
+        };
+        let b = right_val.force(self)?;
+        // Strings: Kotlin errors on axis for two strings (no laminate for chars); mirror.
+        if matches!((a.as_ref(), b.as_ref()), (APLValue::Str(_), APLValue::Str(_))) {
+            return Err(AplError::runtime(
+                ",[axis]: axis catenation is not supported for strings".into(),
+            ));
+        }
+        // Resolve the (possibly fractional) axis.
+        let (is_laminate, new_axis): (bool, i64) = match axis {
+            KapNumber::Long(v) => (false, *v),
+            KapNumber::Double(d) => {
+                let frac = d.fract();
+                if frac.abs() < 0.01 {
+                    (false, *d as i64)
+                } else {
+                    (true, d.ceil() as i64)
+                }
+            }
+            _ => return Err(AplError::runtime(",[axis]: axis must be a number".into())),
+        };
+        if is_laminate {
+            // `joinByLaminate`: insert a length-1 axis at `new_axis` in both, then concat.
+            let a_dims = a.dimensions();
+            let b_dims = b.dimensions();
+            if a_dims.len() != b_dims.len() || a_dims != b_dims {
+                return Err(AplError::runtime(
+                    ",[axis]: laminate requires both arguments to have the same shape".into(),
+                ));
+            }
+            let na = new_axis as usize;
+            if na > a_dims.len() {
+                return Err(AplError::runtime(format!(
+                    ",[axis]: Axis must be between 0 and {} inclusive. Found: {}",
+                    a_dims.len(),
+                    na
+                )));
+            }
+            let mut rd = a_dims.clone();
+            rd.insert(na, 1);
+            let a_elems = a.elements();
+            let b_elems = b.elements();
+            // Reshape each to `rd` (elements unchanged — length-1 insertion keeps order).
+            let a1 = APLValue::Array(Rc::new(KapArray::new(rd.clone(), ArrayData::Nested(a_elems))));
+            let b1 = APLValue::Array(Rc::new(KapArray::new(rd, ArrayData::Nested(b_elems))));
+            return self.join_by_axis(
+                &a1.elements(),
+                &a1.dimensions(),
+                &b1.elements(),
+                &b1.dimensions(),
+                na,
+            );
+        }
+        // Plain integer-axis concatenation.
+        let na = new_axis as usize;
+        let a_dims = a.dimensions();
+        let b_dims = b.dimensions();
+        if na > a_dims.len() {
+            return Err(AplError::runtime(format!(
+                ",[axis]: Axis {} is not valid. Expected: {}",
+                na,
+                a_dims.len()
+            )));
+        }
+        self.join_by_axis(
+            &a.elements(),
+            &a_dims,
+            &b.elements(),
+            &b_dims,
+            na,
+        )
+    }
+
+    /// Concatenate two arrays of equal rank along `axis` (Kotlin `joinByAxis`). Dims must
+    /// match on every axis except `axis`, which sums. Flat element order is row-major
+    /// (Kap's default); for the laminate path the inserted length-1 axis interleaves
+    /// A and B along that axis (e.g. `(3),[0.5](3)` → `(3 2)`, interleaved by row).
+    fn join_by_axis(
+        &self,
+        a_elems: &[AplRef<APLValue>],
+        a_dims: &[usize],
+        b_elems: &[AplRef<APLValue>],
+        b_dims: &[usize],
+        axis: usize,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        if a_dims.len() != b_dims.len() {
+            return Err(AplError::runtime(
+                ",[axis]: ranks of A and B are different".into(),
+            ));
+        }
+        for i in 0..a_dims.len() {
+            if i != axis && a_dims[i] != b_dims[i] {
+                return Err(AplError::runtime(format!(
+                    ",[axis]: dimensions at axis {} do not match: {:?} vs {:?}",
+                    i, a_dims, b_dims
+                )));
+            }
+        }
+        let rank = a_dims.len();
+        let mut out_dims = a_dims.to_vec();
+        out_dims[axis] = a_dims[axis] + b_dims[axis];
+        let mut out_elems: Vec<AplRef<APLValue>> = Vec::with_capacity(out_dims.iter().product());
+        // Strides for the output shape (row-major).
+        let mut strides = vec![1usize; rank];
+        for i in (0..rank).rev() {
+            if i + 1 < rank {
+                strides[i] = strides[i + 1] * out_dims[i + 1];
+            }
+        }
+        let total: usize = out_dims.iter().product();
+        for flat in 0..total {
+            // Decode flat -> coords.
+            let mut rem = flat;
+            let mut coords = vec![0usize; rank];
+            for i in 0..rank {
+                coords[i] = rem / strides[i];
+                rem %= strides[i];
+            }
+            let k = coords[axis];
+            let (src_elems, src_dims, offset) = if k < a_dims[axis] {
+                (a_elems, a_dims, 0usize)
+            } else {
+                (b_elems, b_dims, a_dims[axis])
+            };
+            // Encode the source flat index (same coords, but axis coord relative to source).
+            coords[axis] = k - offset;
+            let mut src_flat = 0usize;
+            for i in 0..rank {
+                src_flat += coords[i] * strides[i];
+            }
+            // src_dims has the output stride layout; recompute using src_dims strides.
+            let mut src_strides = vec![1usize; rank];
+            for i in (0..rank).rev() {
+                if i + 1 < rank {
+                    src_strides[i] = src_strides[i + 1] * src_dims[i + 1];
+                }
+            }
+            let mut sf = 0usize;
+            let mut rrem = 0usize;
+            let mut c2 = coords.clone();
+            for i in 0..rank {
+                c2[i] = if i == axis { k - offset } else { coords[i] };
+            }
+            for i in 0..rank {
+                sf += c2[i] * src_strides[i];
+            }
+            out_elems.push(src_elems[sf].clone());
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            out_dims,
+            ArrayData::Nested(out_elems),
+        )))))
+    }
+
     /// Flatten a value's elements for catenation/stranding: scalars become a 1-element
     /// list; arrays contribute their elements (one level, not deep).
     fn collect_elements(&self, v: &AplRef<APLValue>, out: &mut Vec<AplRef<APLValue>>) {
@@ -3682,6 +3908,116 @@ impl Engine {
             }
             _ => Err(AplError::runtime("fromList: Argument is not a list".into())),
         }
+    }
+
+    /// Kap's `⫇` / `group` (Kotlin `GroupFunction`, group-index.kt). Left `L` is a rank-1
+    /// vector of group indices; right `R` has its major axis equal in length to `L`. Each
+    /// index selects the corresponding major cell of `R` into that group. Negative indices
+    /// are skipped. Returns a vector of arrays: group `i` (0-based) holds the selected cells;
+    /// a group with no members is filled with `APLNull` (the Kotlin `APLNullValue` behaviour).
+    /// For a rank-1 `R` the selected cells are scalars; for higher rank they are the
+    /// per-`(rank-1)` sub-arrays along the major axis.
+    fn group_indices(
+        &self,
+        left_val: AplRef<APLValue>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let a = left_val.force(self)?;
+        let b = right_val.force(self)?;
+        let a_dims = a.dimensions();
+        if a_dims.len() != 1 {
+            return Err(AplError::runtime(
+                "⫇: Left argument should be rank 1".into(),
+            ));
+        }
+        let b_dims = b.dimensions();
+        if a_dims[0] != b_dims[0] {
+            return Err(AplError::runtime(
+                "⫇: Size of left argument must match the size of the major axis in the right argument".into(),
+            ));
+        }
+        // Major cells of `b`: if rank > 1, each cell is a (rank-1) sub-array; otherwise a scalar.
+        let b_is_scalar_cells = b_dims.len() == 1;
+        let cell_dims: Vec<usize> = if b_is_scalar_cells {
+            vec![]
+        } else {
+            b_dims[1..].to_vec()
+        };
+        let mut groups: Vec<Option<Vec<AplRef<APLValue>>>> = Vec::new();
+        let mut max_group = 0i64;
+        for i in 0..a_dims[0] {
+            let idx = match &a.value_at(i) {
+                APLValue::Number(n) => n.as_long().map_err(|e| AplError::runtime(e))?,
+                other => {
+                    return Err(AplError::runtime(format!(
+                        "⫇: Left argument must be numeric, got {}",
+                        other.class_name()
+                    )))
+                }
+            };
+            if idx < 0 {
+                continue; // negative index => skip this element (Kotlin)
+            }
+            let cell = if b_is_scalar_cells {
+                Rc::new(b.value_at(i).clone())
+            } else {
+                // Build the per-major-cell (rank-1) sub-array.
+                let total: usize = cell_dims.iter().product();
+                let stride: usize = total.max(1);
+                let base = i * stride;
+                let mut elems = Vec::with_capacity(total);
+                for k in 0..total {
+                    elems.push(Rc::new(b.value_at(base + k).clone()));
+                }
+                Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    cell_dims.clone(),
+                    ArrayData::Nested(elems),
+                ))))
+            };
+            let gi = idx as usize;
+            if gi >= groups.len() {
+                groups.resize_with(gi + 1, || None);
+            }
+            groups[gi].get_or_insert_with(Vec::new).push(cell);
+            if idx > max_group {
+                max_group = idx;
+            }
+        }
+        // Pad to the highest referenced group so the result length is (max_group + 1).
+        if (max_group as usize + 1) > groups.len() {
+            groups.resize_with(max_group as usize + 1, || None);
+        }
+        let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(groups.len());
+        for g in groups {
+            match g {
+                None => out.push(Rc::new(APLValue::Null)),
+                Some(cells) => {
+                    let arr = if b_is_scalar_cells {
+                        // Scalar cells: a plain vector.
+                        APLValue::Array(Rc::new(KapArray::new(
+                            vec![cells.len()],
+                            ArrayData::Nested(cells),
+                        )))
+                    } else {
+                        // Rank-1 sub-arrays: concatenate along the new leading axis.
+                        let mut elems = Vec::new();
+                        for c in &cells {
+                            for e in c.elements() {
+                                elems.push(e.clone());
+                            }
+                        }
+                        let mut dims = vec![cells.len()];
+                        dims.extend_from_slice(&cell_dims);
+                        APLValue::Array(Rc::new(KapArray::new(dims, ArrayData::Nested(elems))))
+                    };
+                    out.push(Rc::new(arr));
+                }
+            }
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![out.len()],
+            ArrayData::Nested(out),
+        )))))
     }
 
     /// Kap's partitioned enclose (`⊆`): monadic = "nest" (enclose a non-scalar whole;
@@ -6023,6 +6359,88 @@ impl Engine {
         }
         Ok(Rc::new(APLValue::Number(KapNumber::Long(total))))
     }
+
+    /// Load a library file and evaluate it in the current namespace.
+    ///
+    /// Mirrors Kotlin `LoadFileFunction`/`resolveLibraryFile`: the argument is a
+    /// *filename*, resolved by **basename** across a search path (CWD, then
+    /// `$KAP_LIB`, then this project's `kap-stdlib/std`). A recursion guard in
+    /// `Engine::include_stack` prevents a file that self-`use`s (e.g.
+    /// `base-functions.kap`) from loading more than once.
+    fn use_file(
+        &self,
+        name: &str,
+        env: &Rc<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let basename = std::path::Path::new(name)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| name.to_string());
+
+        // Recursion guard: skip an already-in-flight include.
+        {
+            let stack = self.include_stack.borrow();
+            if stack.contains(&basename) {
+                return Ok(Rc::new(APLValue::Null));
+            }
+        }
+
+        // Build the search path: configured --lib-path dirs first, then CWD, then
+        // $KAP_LIB, then this repo's kap-stdlib/std.
+        let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+        for p in self.lib_paths.borrow().iter() {
+            dirs.push(p.clone());
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            dirs.push(cwd);
+        }
+        if let Ok(kap_lib) = std::env::var("KAP_LIB") {
+            dirs.push(std::path::PathBuf::from(kap_lib));
+        }
+        // CARGO_MANIFEST_DIR for kap-core is .../rust-kap/kap-core; the stdlib
+        // lives at rust-kap/kap-stdlib/std.
+        if let Some(manifest) = option_env!("CARGO_MANIFEST_DIR") {
+            let repo = std::path::Path::new(manifest)
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from(manifest));
+            dirs.push(repo.join("kap-stdlib").join("std"));
+        }
+
+        let path = dirs
+            .iter()
+            .map(|d| d.join(&basename))
+            .find(|p| p.exists())
+            .ok_or_else(|| {
+                AplError::runtime(format!("use: library file not found: {}", name))
+            })?;
+        let content = std::fs::read_to_string(&path).map_err(|e| {
+            AplError::runtime(format!("use: cannot read {}: {}", path.display(), e))
+        })?;
+
+        self.include_stack.borrow_mut().insert(basename);
+        let _guard = IncludeGuard {
+            stack: self.include_stack.clone(),
+            name: path.to_string_lossy().into_owned(),
+        };
+        // Evaluate the file in the *current* namespace so its top-level
+        // `∇`/`⇐` definitions land where the `use` call appears.
+        self.eval_string_in_env(&content, env)
+    }
+}
+
+/// RAII guard that removes a basename from `Engine::include_stack` on drop, so a
+/// failed or completed include does not permanently block a later `use` of the
+/// same file.
+struct IncludeGuard {
+    stack: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>>,
+    name: String,
+}
+
+impl Drop for IncludeGuard {
+    fn drop(&mut self) {
+        self.stack.borrow_mut().remove(&self.name);
+    }
 }
 
 #[cfg(test)]
@@ -6156,7 +6574,14 @@ mod tests {
     #[test]
     fn eval_catenate() {
         assert_eq!(eval("1 , 2 , 3"), "(1 2 3)");
-        assert_eq!(eval("[1; 2] , [3; 4]"), "(1 2 3 4)");
+        // In Real Kap, `[...]` after `,` is always an *axis* specifier, not a list
+        // literal — so `[1;2] , [3;4]` is `,[3;4]` (a 2-element list as axis) and errors.
+        // The port now conforms: assert the error rather than the old lenient result.
+        assert!(Engine::new().eval_string("[1; 2] , [3; 4]").is_err());
+        // `,[axis]` laminate / concat (Kotlin `,[0.5]` / `,[0]`):
+        assert_eq!(eval("⍴ 1 2 3 ,[0.5] 4 5 6"), "(3 2)");
+        assert_eq!(eval("⍴ 1 2 3 ,[0] 4 5 6"), "(6)");
+        assert_eq!(eval("⍴ (2 2⍴⍳4) ,[0.5] (2 2⍴4+⍳4)"), "(2 2 2)");
     }
 
     #[test]

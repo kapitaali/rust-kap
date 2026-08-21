@@ -257,7 +257,7 @@ pub fn lex_symbol(chars: &[char], i: usize) -> (String, usize) {
     let mut s = String::new();
     while j < chars.len() {
         let c = chars[j];
-        if c.is_alphanumeric() || c == '_' || c == ':' {
+        if c.is_alphanumeric() || c == '_' || c == ':' || c == '⎕' {
             s.push(c);
             j += 1;
         } else {
@@ -288,6 +288,8 @@ pub fn is_symbol_start(c: char) -> bool {
     c == '=' || c == '<' || c == '>' || c == '?' || c == '!' || c == '%' || c == '^' ||
     c == '&' || c == '|' || c == '$' || c == '#' || c == '~' || c == '@' || c == '\\'
         || c == ','
+        // `⎕` (quad) begins multi-char names like `⎕A`, `⎕p`; handled in `lex_symbol`.
+        || c == '⎕'
     // note: many APL glyphs are single-char symbols; handled by parser as bare tokens
 }
 

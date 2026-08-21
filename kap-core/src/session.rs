@@ -59,6 +59,12 @@ impl Session {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Configure the standard-library search directories (port analog of kap-jvm-text's
+    /// `--lib-path`), consulted by `use(...)` when resolving a file by basename.
+    pub fn set_lib_paths<S: AsRef<std::path::Path>>(&self, paths: &[S]) {
+        self.engine.set_lib_paths(paths);
+    }
 }
 
 #[cfg(test)]
