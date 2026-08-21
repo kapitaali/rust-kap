@@ -80,16 +80,32 @@ vector) were implemented, since `≡⊂,5` and related depth expressions require
 
 ---
 
-## CRITICAL — `⊃` (first / pick) semantics diverge
+## CRITICAL — `⊃` (first / pick) — FIXED (2026-08-21)
+
+`⊃` now maps to Kap's `DiscloseAPLFunction` (`disclose.kt`):
+- Monadic `⊃X` = disclose: drop the outer box level. Simple arrays are identity,
+  `⊂`-boxed scalars unwrap (`⊃⊂5`→`5`), `(1 2)(3 4)` drops the outer axis to a 2×2
+  (`(1 2 3 4)` with shape `2 2`).
+- Dyadic `A⊃B` = nested pick (selector iterates over `B`), distinct from `⊇`/`pick`,
+  with Kap's exact dimension errors:
+  - scalar selector into a scalar arg → `⊃: Mismatched dimensions for selection`
+  - nested selector whose shape ≠ rank of `B` → `⊃: Dimensions does not match`
+  - out-of-range (positive; negatives wrap) → `⊃: Selection index out of bounds`
 
 | expr | port | oracle |
 |------|------|--------|
-| `⊃1 2 3` (monadic) | `1` | `⟨1 2 3⟩` (disclose → nested vector) |
-| `1 2 3 ⊃ 2` (dyadic) | `2` | **error**: Mismatched dimensions for selection |
+| `⊃1 2 3` (monadic) | `(1 2 3)` | `⟨1 2 3⟩` |
+| `⊃(1 2)(3 4)` | `(1 2 3 4)` shape `2 2` | matrix `2 2` |
+| `⊃⊂5` | `5` | `5` |
+| `2 ⊃ 1 2 3 4` | `3` | `3` |
+| `1 ⊃ (1 2 3)(4 5 6)` | `(4 5 6)` | `(4 5 6)` |
+| `1 2 3 ⊃ 2` | error: Mismatched dimensions for selection | error: Mismatched dimensions for selection |
+| `(1 2 3)(4 5 6) ⊃ 1` | error: Dimensions does not match | error: Dimensions does not match |
+| `5 ⊃ 1 2 3 4 5` | error: Selection index out of bounds | error: Selection index out of bounds |
 
-Monadic `⊃` should disclose (return the enclosed content as a nested vector),
-not the first scalar; dyadic `⊃` should be pick-with-selection and reject
-mismatched dimensions. Currently both are off.
+Only display-glyph diffs remain (`()` vs `⟨⟩`, matrix borders) — house style, not
+defects. Error-text cases verified by hand against the Kotlin oracle + source
+(this test harness cannot assert error messages).
 
 ---
 

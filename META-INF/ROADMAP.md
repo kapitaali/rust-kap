@@ -27,8 +27,9 @@ Pick one to scope per session:
   `KNOWN-NONCONFORMANCE.md`). Implemented as `deep_equal→1/0` with no type
   strictness; `10≡10.0`→`1` (oracle `0`). Needs Kap's match (type/depth → depth
   or 0).
-- **`⊃` (first / pick) — semantics diverge** from the oracle (monadic should
-  disclose to a nested vector; dyadic should reject mismatched dimensions).
+- **`⊃` (reveal / disclose + nested pick) — FIXED** (2026-08-21). Monadic discloses
+  (identity for simple arrays, drops outer axis for `⊂`-nested); dyadic is pick-with-
+  dimension-checks with Kap's exact error text. Verified vs Kotlin oracle + source.
 
 ## Worst-covered corpus files (where coverage gains live)
 

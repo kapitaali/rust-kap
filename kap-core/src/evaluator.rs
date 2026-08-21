@@ -1163,7 +1163,7 @@ impl Engine {
                 Some(l) => self.reshape(l, right_val),
             },
             "≢" | "tally" => self.tally(right_val),
-            "⊃" | "first" => self.first(right_val),
+            "⊃" | "first" => self.reveal(left_val, right_val),
             "," | "⍪" => self.catenate(left_val, right_val),
             "⌽" | "rotateright" => self.reverse_horizontal(left_val, right_val),
             "⊖" | "rotateleft" => self.reverse_vertical(left_val, right_val),
@@ -3566,68 +3566,222 @@ impl Engine {
         }
     }
 
-    /// Kap's reveal/disclose (`⌷`): remove one level of boxing from a nested array.
-    /// - On a `Nested` array of scalars, return the elements as a plain (Simple) vector.
-    /// - On a `Nested` array of arrays, ravel (catenate) the elements' contents one level.
-    /// - On a Simple array or scalar, return it unchanged (identity).
-    fn disclose(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
-        let v = right_val.force(self)?;
-        let elems = match v.as_ref() {
-            APLValue::Array(a) => match &a.data {
-                ArrayData::Nested(e) => e.clone(),
-                _ => return Ok(Rc::new(v.as_ref().clone())), // Simple array: identity.
-            },
-            _ => return Ok(Rc::new(v.as_ref().clone())), // scalar/other: identity.
-        };
-        if elems.is_empty() {
-            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                vec![0],
-                ArrayData::Nested(vec![]),
-            )))));
+    /// Kap's `⊃` (reveal / disclose + pick), `DiscloseAPLFunction` in disclose.kt.
+    ///
+    /// Monadic `⊃X` = disclose: remove the outer level of boxing.
+    ///   - A Simple (Long/Double/Char) array of any rank is returned unchanged.
+    ///   - A scalar / 0-d box returns its single contained value (`⊃⊂5 → 5`, `⊃⍬ → ⍬`).
+    ///   - A Nested array whose elements are themselves arrays of uniform shape S becomes
+    ///     one array with dims `[outer_dims..., S...]` (Kotlin `DisclosedArrayValue`:
+    ///     `⊃(1 2)(3 4) → 2 2⍴1 2 3 4`). A Nested array of scalars collapses to a simple
+    ///     vector (or stays nested when mixed).
+    ///
+    /// Dyadic `A ⊃ B` = nested pick (selector `A`, array `B`, NOT reuse of `⊇`):
+    ///   - left must be rank 0 or 1;
+    ///   - each member of `A` is a coordinate; a scalar member while `curr` is not rank-1
+    ///     errors "Mismatched dimensions for selection"; a vector member whose length !=
+    ///     `curr.rank` errors "Dimensions does not match"; out-of-range errors
+    ///     "Selection index out of bounds".
+    fn reveal(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        match left_val {
+            None => {
+                // --- Monadic disclose ---
+                let v = right_val.force(self)?;
+                match v.as_ref() {
+                    // 0-d / scalar: unwrap the single boxed value.
+                    APLValue::Array(a) if a.dimensions.is_empty() => {
+                        let el = a.elements();
+                        if el.is_empty() {
+                            Ok(Rc::new(APLValue::Null))
+                        } else {
+                            Ok(Rc::new(el[0].as_ref().clone()))
+                        }
+                    }
+                    // Simple array (Long/Double/Char) of any rank: identity.
+                    APLValue::Array(a) if !matches!(a.data, ArrayData::Nested(_)) => {
+                        Ok(Rc::new(v.as_ref().clone()))
+                    }
+                    APLValue::Array(a) => {
+                        // Nested array: inspect the elements.
+                        let outer = a.dimensions.clone();
+                        let elems = match &a.data {
+                            ArrayData::Nested(e) => e.clone(),
+                            _ => unreachable!(),
+                        };
+                        if elems.is_empty() {
+                            // Empty nested -> empty simple vector (rank preserved as 1).
+                            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                                vec![0],
+                                ArrayData::Nested(vec![]),
+                            )))));
+                        }
+                        // All elements are arrays of uniform (inner) shape S?
+                        let mut inner_shape: Option<Vec<usize>> = None;
+                        let mut uniform_arrays = true;
+                        let mut all_scalar = true;
+                        for e in &elems {
+                            match e.as_ref() {
+                                APLValue::Array(ea) => {
+                                    all_scalar = false;
+                                    let s = ea.dimensions.clone();
+                                    match &inner_shape {
+                                        Some(prev) if *prev != s => uniform_arrays = false,
+                                        Some(_) => {}
+                                        None => inner_shape = Some(s),
+                                    }
+                                }
+                                _ => {
+                                    // scalar / box element
+                                    if inner_shape.is_some() {
+                                        uniform_arrays = false;
+                                    }
+                                }
+                            }
+                        }
+                        if all_scalar {
+                            // Vector of scalars: collapse to a simple vector when uniform,
+                            // else keep the nested vector (re-uses the simple-vector builder).
+                            return self.make_simple_or_nested(outer, elems);
+                        }
+                        if uniform_arrays {
+                            if let Some(s) = inner_shape {
+                                // Drop the outer axis: dims = [outer..., S...].
+                                let mut new_dims = outer.clone();
+                                new_dims.extend(s.iter().copied());
+                                // Concatenate every element's flat elements.
+                                let mut out: Vec<AplRef<APLValue>> = Vec::new();
+                                for e in &elems {
+                                    if let APLValue::Array(ea) = e.as_ref() {
+                                        for x in ea.elements() {
+                                            out.push(Rc::new(x.as_ref().clone()));
+                                        }
+                                    }
+                                }
+                                return self.make_simple_or_nested(new_dims, out);
+                            }
+                        }
+                        // Mixed / ragged: disclose one level (ravel elements into a vector).
+                        let mut out = Vec::new();
+                        for e in &elems {
+                            self.collect_elements(e, &mut out);
+                        }
+                        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                            vec![out.len()],
+                            ArrayData::Nested(out),
+                        )))))
+                    }
+                    // Bare scalar / string / null: identity (unwrapped).
+                    other => Ok(Rc::new(other.clone())),
+                }
+            }
+            Some(l) => {
+                // --- Dyadic nested pick ---
+                let a = l.force(self)?;
+                if a.dimensions().len() > 1 {
+                    return Err(AplError::runtime(
+                        "⊃: Left argument to pick should be rank 0 or 1".into(),
+                    ));
+                }
+                let mut curr = right_val.force(self)?;
+                for idx in a.elements() {
+                    let idx = idx.force(self)?;
+                    let (d, index) = match idx.as_ref() {
+                        APLValue::Array(ia) => {
+                            // vector coordinate: its length must equal curr.rank
+                            let coord = ia.dimensions.clone();
+                            if coord.len() != curr.dimensions().len() {
+                                return Err(AplError::runtime(
+                                    "⊃: Dimensions does not match".into(),
+                                ));
+                            }
+                            let mut flat = 0usize;
+                            let r = curr.dimensions().len();
+                            let mut stride = vec![1usize; r];
+                            if r > 1 {
+                                for k in (0..r - 1).rev() {
+                                    stride[k] = stride[k + 1] * curr.dimensions()[k + 1];
+                                }
+                            }
+                            for k in 0..r {
+                                let i = self.index_to_i64(ia.elements()[k].as_ref())?;
+                                let n = curr.dimensions()[k] as i64;
+                                let adj = if i < 0 { i.rem_euclid(n) } else { i };
+                                if adj < 0 || adj >= n {
+                                    return Err(AplError::runtime(
+                                        "⊃: Selection index out of bounds".into(),
+                                    ));
+                                }
+                                flat += (adj as usize) * stride[k];
+                            }
+                            (coord, flat)
+                        }
+                        _ => {
+                            // scalar coordinate: curr must be rank 1
+                            if curr.dimensions().len() != 1 {
+                                return Err(AplError::runtime(
+                                    "⊃: Mismatched dimensions for selection".into(),
+                                ));
+                            }
+                            let i = self.index_to_i64(idx.as_ref())?;
+                            let n = curr.dimensions()[0] as i64;
+                            let adj = if i < 0 { i.rem_euclid(n) } else { i };
+                            if adj < 0 || adj >= n {
+                                return Err(AplError::runtime(
+                                    "⊃: Selection index out of bounds".into(),
+                                ));
+                            }
+                            (curr.dimensions().clone(), adj as usize)
+                        }
+                    };
+                    let size: usize = d.iter().product();
+                    if index >= size {
+                        return Err(AplError::runtime(
+                            "⊃: Selection index out of bounds".into(),
+                        ));
+                    }
+                    curr = Rc::new(curr.value_at(index).clone());
+                }
+                Ok(curr)
+            }
         }
-        // All scalar elements -> build the most specific Simple vector we can.
+    }
+
+    /// Build a `KapArray` from `dims` + flat `elems`, choosing the most specific Simple
+    /// storage (Long/Double/Char) when every element is uniform, else Nested.
+    fn make_simple_or_nested(
+        &self,
+        dims: Vec<usize>,
+        elems: Vec<AplRef<APLValue>>,
+    ) -> Result<AplRef<APLValue>, AplError> {
         let all_long = elems.iter().all(|e| matches!(e.as_ref(), APLValue::Number(KapNumber::Long(_))));
         let all_double = elems.iter().all(|e| matches!(e.as_ref(), APLValue::Number(KapNumber::Double(_))));
         let all_char = elems.iter().all(|e| matches!(e.as_ref(), APLValue::Char(_)));
         if all_long {
-            let v: Vec<i64> = elems
-                .into_iter()
-                .map(|e| match e.as_ref() {
-                    APLValue::Number(KapNumber::Long(x)) => *x,
-                    _ => unreachable!(),
-                })
-                .collect();
-            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(vec![v.len()], ArrayData::Long(v))))));
+            let v: Vec<i64> = elems.into_iter().map(|e| match e.as_ref() {
+                APLValue::Number(KapNumber::Long(x)) => *x,
+                _ => unreachable!(),
+            }).collect();
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(dims, ArrayData::Long(v))))));
         }
         if all_double {
-            let v: Vec<f64> = elems
-                .into_iter()
-                .map(|e| match e.as_ref() {
-                    APLValue::Number(KapNumber::Double(x)) => *x,
-                    _ => unreachable!(),
-                })
-                .collect();
-            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(vec![v.len()], ArrayData::Double(v))))));
+            let v: Vec<f64> = elems.into_iter().map(|e| match e.as_ref() {
+                APLValue::Number(KapNumber::Double(x)) => *x,
+                _ => unreachable!(),
+            }).collect();
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(dims, ArrayData::Double(v))))));
         }
         if all_char {
-            let v: Vec<char> = elems
-                .into_iter()
-                .map(|e| match e.as_ref() {
-                    APLValue::Char(c) => *c,
-                    _ => unreachable!(),
-                })
-                .collect();
-            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(vec![v.len()], ArrayData::Char(v))))));
+            let v: Vec<char> = elems.into_iter().map(|e| match e.as_ref() {
+                APLValue::Char(c) => *c,
+                _ => unreachable!(),
+            }).collect();
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(dims, ArrayData::Char(v))))));
         }
-        // Mixed / array elements: ravel one level into a Nested vector.
-        let mut out = Vec::new();
-        for e in &elems {
-            self.collect_elements(e, &mut out);
-        }
-        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-            vec![out.len()],
-            ArrayData::Nested(out),
-        )))))
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(dims, ArrayData::Nested(elems))))))
     }
 
     /// Kap's `⌷` (squad / index selection, `AccessFromIndexAPLFunction` in lookup.kt).
@@ -5589,7 +5743,9 @@ mod tests {
 
     #[test]
     fn eval_first() {
-        assert_eq!(eval("⊃ ⍳5"), "0");
+        // `⊃` is Kap's reveal/disclose (DiscloseAPLFunction), NOT "first".
+        // Disclosing a rank-1 vector returns it unchanged.
+        assert_eq!(eval("⊃ ⍳5"), "(0 1 2 3 4)");
     }
 
     #[test]

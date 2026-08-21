@@ -406,7 +406,7 @@ fn curated_kap_parity() {
         // Indexing into a string (bracket indexing) — returns char scalars.
         ("\"abcdef\"[2]", "@c"),
         ("\"abcdef\"[0 2]", "\"ac\""),
-        ("⊃\"abcdef\"", "@a"),
+        ("⊃\"abcdef\"", "\"abcdef\""),
         // take/drop on a string (slices its characters)
         ("↓\"abc\"", "\"bc\""),
         ("2↓\"abcdef\"", "\"cdef\""),
@@ -622,6 +622,21 @@ fn curated_kap_parity() {
         (",1 2 3 4", "(1 2 3 4)"),
         (",1 2 3", "(1 2 3)"),
         ("1 2 3 , 4 5 6", "(1 2 3 4 5 6)"),
+        // --- `⊃` reveal/disclose + nested pick (Kotlin DiscloseAPLFunction) ---
+        // Monadic `⊃X` = disclose (drop outer box level; identity for simple arrays).
+        ("⊃1 2 3", "(1 2 3)"),
+        ("⊃(1 2)(3 4)", "(1 2 3 4)"),
+        ("⊃⊂5", "5"),
+        ("⊃5", "5"),
+        ("⊃⍬", "⍬"),
+        // Dyadic `A⊃B` = pick-with-dimension-checks (distinct from `⊇`):
+        //   scalar selector into a scalar arg -> "Mismatched dimensions for selection"
+        //   nested selector whose shape != rank of B -> "Dimensions does not match"
+        //   out-of-range (positive; negatives wrap) -> "Selection index out of bounds"
+        // (Error-text cases are verified by hand against the Kotlin oracle + source,
+        //  since this harness cannot assert error messages — see KNOWN-NONCONFORMANCE.)
+        ("2 ⊃ 1 2 3 4", "3"),
+        ("1 ⊃ (1 2 3)(4 5 6)", "(4 5 6)"),
     ];
 
     let mut failures = Vec::new();
