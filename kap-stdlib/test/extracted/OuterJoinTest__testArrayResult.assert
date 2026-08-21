@@ -1,11 +1,11 @@
 assertDimension(dimensionsOfSize(2, 4), result)
 assertPairs(
-            result,
-            arrayOf(1, 9),
-            arrayOf(1, 8),
-            arrayOf(1, 7),
-            arrayOf(1, 6),
-            arrayOf(2, 9),
-            arrayOf(2, 8),
-            arrayOf(2, 7),
-            arrayOf(2, 6))
+                result,
+                arrayOf(1, 9),
+                arrayOf(1, 8),
+                arrayOf(1, 7),
+                arrayOf(1, 6),
+                arrayOf(2, 9),
+                arrayOf(2, 8),
+                arrayOf(2, 7),
+                arrayOf(2, 6))

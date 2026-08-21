@@ -1,0 +1,3 @@
+⍝ assert: assertDimension(dimensionsOfSize(3, 2), result)
+⍝ assert: assertArrayContent(arrayOf(6, 7, 8, 9, 10, 11), result)
+(2 3 2 ⍴ ⍳100)[1]

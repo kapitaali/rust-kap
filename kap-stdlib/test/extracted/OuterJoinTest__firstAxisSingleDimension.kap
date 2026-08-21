@@ -1,5 +1,5 @@
 ⍝ assert: assertDimension(dimensionsOfSize(3, 3), result)
 ⍝ assert: assertArrayContent(
-            arrayOf(2565, 2610, 2655, 2700, 2745, 2790, 2835, 2880, 2925),
-            result)
+                arrayOf(2565, 2610, 2655, 2700, 2745, 2790, 2835, 2880, 2925),
+                result)
 (10 ⍴ ⍳1000) +∙× 10 3 3 ⍴ ⍳1000
