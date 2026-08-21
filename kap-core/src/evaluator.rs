@@ -959,6 +959,30 @@ impl Engine {
                 "⌿" => self.adverb_reduce(func, left, right, env, false),
                 "⍀" => self.adverb_scan(func, left, right, env, false),
                 "¨" | "each" => self.adverb_each(func, left, right, env),
+                // `⍨` commute (Kotlin commute.kt CommuteFunctionImpl):
+                // monadic f⍨ y = y f y; dyadic x f⍨ y = y f x (arguments swapped).
+                "⍨" | "commute" => match left {
+                    None => {
+                        let y = self.eval_instr(right, env)?.force(self)?;
+                        self.eval_apply(
+                            func,
+                            &Some(Box::new(Instr::Value(y.clone()))),
+                            &Box::new(Instr::Value(y)),
+                            env,
+                        )
+                    }
+                    Some(l) => {
+                        let x = self.eval_instr(l, env)?.force(self)?;
+                        let y = self.eval_instr(right, env)?.force(self)?;
+                        // x f⍨ y = y f x  → left arg = y, right arg = x.
+                        self.eval_apply(
+                            func,
+                            &Some(Box::new(Instr::Value(y))),
+                            &Box::new(Instr::Value(x)),
+                            env,
+                        )
+                    }
+                },
                 other => Err(AplError::runtime(format!("unknown adverb: {}", other))),
             };
         }
