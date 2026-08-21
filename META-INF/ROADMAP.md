@@ -4,6 +4,18 @@ Consolidated from the dated `PROGRESS-2026*.md` session logs. Tracks the
 open Phase 6 breadth work and deferred items. Branch invariant (enforced
 after every commit): `main == strings == origin/*`.
 
+## ⚠️ Ground truth for Kap behaviour (non-negotiable)
+
+Kap semantics come from exactly **two** sources, never memory/intuition/APL familiarity:
+1. The **Kotlin source** at `~/Apps/array/array` — READ it, never run it (Gradle/JVM broken here).
+2. The **Real Kap binary** — `~/Apps/array/kap-jvm-text/bin/kap-jvm-text`. Evaluate any
+   expression with `printf 'expr\n' | …/kap-jvm-text 2>&1` (result line `⊢ <value>`;
+   extract with `grep -aE '⊢ '`).
+
+**Never answer "what does Kap do for X?" without evaluating X against the oracle first.**
+If the oracle disagrees, the oracle wins. (Case in point: `2 +[0] 3` → `5`, not the port's
+"rank 1" error — Kotlin `eval2Arg` short-circuits scalar+scalar before axis handling.)
+
 ## Current phase: stdlib-kernel (Phase 4) + Phase 6 breadth
 
 Phase 6 breadth is now **effectively complete** — all listed structural/array builtins
