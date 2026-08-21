@@ -151,6 +151,38 @@ defects. Error-text cases verified by hand against the Kotlin oracle + source
 
 ---
 
+## DISPLAY — `≬` / `toList` (Kotlin `ToListFunction`) — IMPLEMENTED (2026-08-21)
+
+`≬` is **not** a compose operator (the old roadmap `∘`/`≬` grouping was a mislabel;
+`∘`/`⍛` are already-done compose trains). It is Kotlin `ToListFunction`
+(div_functions.kt), registered in BOTH `evaluator.rs::is_primitive_name` and
+`parser.rs::is_primitive_op` as `≬` / `toList`, with inverse `fromList`.
+
+- Monadic-only. A scalar or 1-D array is boxed into a rank-0 array whose single
+  element is the value coerced to a Kap *list* (oracle `⟨⟩` type). Unlike `⊂`,
+  `≬` **always** boxes even a primitive scalar (`≬5 → (5)`, not `5`).
+- A rank>1 argument errors: "Argument must be a scalar or 1-dimensional array"
+  (matches the oracle byte-for-byte).
+- Dyadic application errors: "Function cannot be called with two arguments".
+
+Verified against the `kap-jvm-text` oracle (value matches; only `()` vs `⟨⟩` glyph
+differs):
+
+| expr | port | oracle |
+|------|------|--------|
+| `≬ 1 2 3` | `((1 2 3))` | `⟨1 2 3⟩` |
+| `≬ 5` | `(5)` | `⟨5⟩` |
+| `≬ "abc"` | `("abc")` | `⟨"abc"⟩` |
+| `≬ 2 2⍴⍳4` | error: Argument must be a scalar or 1-D | error: same |
+| `3 ≬ 5` | error: cannot be called with two arguments | error: same |
+| `fromList ≬ 1 2 3` | `(1 2 3)` | `⟨1 2 3⟩` |
+
+The `()` vs `⟨⟩` difference is the faithful display-glyph convention (see DISPLAY
+below), not a value defect. Added 3 curated parity rows (value-only; error-text
+rows are noted but not assertable by the harness).
+
+---
+
 ## DISPLAY — glyph conventions (faithful design choice, NOT bugs)
 
 The port deliberately renders in Kap's house glyphs. Values compute correctly;
@@ -195,7 +227,8 @@ Features the engine does not build yet. Most are tracked in `ROADMAP.md`.
   and complex-aware comparisons are missing. This is the dominant `unsupported`
   cluster in the sweep.
 - **Key / major-cell operators** — `⌺` (stencil) and `⌸` (key) unimplemented.
-- **Compose operators** — `∘` / `≬` unimplemented.
+- **Compose operators** — `∘` / `⍛` (compose / reverse-compose trains) are wired;
+  `≬`/`toList` is now implemented (see DISPLAY section).
 - **Axis specifiers** `[axis]` — not accepted for `⌷`, `⊆`, `⍋`/`⍒`, etc.
 - **Dyadic interval `⍸`** (`a ⍸ b`) and inverse `⍸˝` (needs `˝` adverb) —
   returns a clean "not implemented" error.

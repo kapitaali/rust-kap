@@ -637,6 +637,17 @@ fn curated_kap_parity() {
         //  since this harness cannot assert error messages — see KNOWN-NONCONFORMANCE.)
         ("2 ⊃ 1 2 3 4", "3"),
         ("1 ⊃ (1 2 3)(4 5 6)", "(4 5 6)"),
+        // --- `≬` / `toList` + `fromList` (Kotlin `ToListFunction` / `FromListFunction`, div_functions.kt) ---
+        // Monadic: a scalar or 1-D array is boxed into a rank-0 list (oracle `⟨⟩` type).
+        // Unlike `⊂`, `≬` ALWAYS boxes even a primitive scalar. Rank>1 is an error.
+        // The port has no separate list type, so the box displays as `((...))` — that is the
+        // recognised DISPLAY-glyph divergence (curated below uses the port's `()` convention).
+        ("≬ 1 2 3", "((1 2 3))"),
+        ("≬ 5", "(5)"),
+        // Error cases (`≬ 2 2⍴⍳4` -> "Argument must be a scalar or 1-D", `3 ≬ 5` -> "cannot be
+        // called with two arguments") are verified by hand against the oracle + Kotlin
+        // source; this harness cannot assert error messages (see `⊃` block note above).
+        ("fromList ≬ 1 2 3", "(1 2 3)"),
     ];
 
     let mut failures = Vec::new();

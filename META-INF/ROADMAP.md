@@ -15,7 +15,9 @@ coverage at last measure: **~43%** (1091 ok / 278 mismatch / 1186 unsupported).
 Pick one to scope per session:
 
 - `⊆` / `⊇` — partition / shape  **(DONE)**
-- `∘` / `≬` — operators
+- `∘` / `⍛` (compose / reverse-compose trains)  **(DONE)** — `≬` is NOT compose; it is
+  `toList` (see below). `∘`/`⍛` already wired (lexer→parser→ast→evaluator trains).
+- `≬` / `toList` (+ inverse `fromList`)  **(DONE, 2026-08-21)** — see `KNOWN-NONCONFORMANCE.md`.
 - `→` — branch / guard  **(DONE)** — see `KNOWN-NONCONFORMANCE.md` (`→` committed earlier this branch)
 - bracket indexing `x[sel]` (`Instr::Index` → `index_select`)  **(DONE)** — see `KNOWN-NONCONFORMANCE.md`
 - key / major-cell operators: `⌺` / `⌸`, `⍋⍒`-with-axis

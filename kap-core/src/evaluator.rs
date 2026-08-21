@@ -1179,6 +1179,18 @@ impl Engine {
             "→" | "branch" => self.return_arrow(left_val, right_val),
             "⍮" | "pair" => self.pair(left_val, right_val),
             "⌷" | "reveal" => self.access_from_index(left_val, right_val),
+            // `≬` / `toList` (Kotlin `ToListFunction`, div_functions.kt): monadic-only.
+            // Coerces a scalar or 1-D array into a Kap list (a rank-0 box whose single
+            // element is the array). Fluent inverse `fromList` (Kotlin `FromListFunction`)
+            // recovers the array. Dyadic application is an error.
+            "≬" | "toList" => match left_val {
+                None => self.to_list(right_val),
+                Some(_) => Err(AplError::runtime("≬: Function cannot be called with two arguments".into())),
+            },
+            "fromList" => match left_val {
+                None => self.from_list(right_val),
+                Some(_) => Err(AplError::runtime("fromList: Function cannot be called with two arguments".into())),
+            },
             // --- more builtins (Phase 6) ---
             "⌈" | "ceil" => match left_val {
                 None => self.scalar1(right_val, |x| x.ceil(), "⌈"),
@@ -1444,7 +1456,7 @@ impl Engine {
             "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"
                 | "↑" | "↓" | "⊂" | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥"
-                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair" | "⊆" | "⊇" | "→"
+                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair" | "⊆" | "⊇" | "→" | "≬" | "toList" | "fromList"
  )
     }
 
@@ -3427,6 +3439,45 @@ impl Engine {
                 vec![],
                 ArrayData::Nested(vec![v]),
             ))))),
+        }
+    }
+
+    /// Kap's `≬` / `toList` (Kotlin `ToListFunction`, div_functions.kt).
+    ///
+    /// Monadic only: a scalar or 1-D array is boxed into a rank-0 array whose single
+    /// element is the array coerced to a Kap *list* (the `⟨⟩` type). Real Kap returns an
+    /// `APLList` whose `⍴` is `⍬`; the port has no separate list type, so we model it as
+    /// a rank-0 `Nested([v])` box — which displays as `((...))` rather than the oracle's
+    /// `⟨...⟩` (a recognised DISPLAY-glyph divergence, not a value defect). Unlike `⊂`,
+    /// `≬` ALWAYS boxes even a primitive scalar (`≬5` → a 0-D box of `5`, not `5`).
+    /// A rank>1 argument is an error ("Argument must be a scalar or 1-dimensional array").
+    fn to_list(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        let v = right_val.force(self)?;
+        let dims = v.dimensions();
+        if dims.len() > 1 {
+            return Err(AplError::runtime(
+                "≬: Argument must be a scalar or 1-dimensional array".into(),
+            ));
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![],
+            ArrayData::Nested(vec![Rc::new(v.as_ref().clone())]),
+        )))))
+    }
+
+    /// Kap's `fromList` (Kotlin `FromListFunction`, div_functions.kt) — the inverse of
+    /// `≬`: recovers the array from a rank-0 list box. The port's list box is just a
+    /// rank-0 `Nested([v])`, so `fromList` discloses that single element. (The curated
+    /// parity cases only exercise `≬`; `fromList` is wired for completeness/consistency
+    /// with the Kotlin registration pair.)
+    fn from_list(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        let v = right_val.force(self)?;
+        match v.as_ref() {
+            APLValue::Array(a) if a.dimensions.is_empty() => {
+                let mut elems = a.elements();
+                Ok(elems.remove(0))
+            }
+            _ => Err(AplError::runtime("fromList: Argument is not a list".into())),
         }
     }
 
