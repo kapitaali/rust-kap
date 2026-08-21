@@ -98,14 +98,19 @@ Pick one to scope per session:
     only port gaps are `use`, `⍞`, `⫇`, `,[axis]`.
 - format family  **(DONE, 2026-08-21)** — see `KNOWN-NONCONFORMANCE.md` (`⍕` monadic
   flatten + dyadic `$s`/`$h`/`$$` directives all match the oracle).
-- **Axis specifiers `[axis]` for `⍉` / dyadic `+`/`-`/etc.** — NEW open gap surfaced by
-  Elias's 2026-08-21 test pull. His new `TransposeTest__mismatchingAxisCount*` and
-  `ScalarTest__additionWithAxis*` / `ArrayLookupBracketsTest__shortIndexList*` cases exercise
-  `0 1 ⍉ 3 4 5 ⍴ ⍳60` and `10 20 30 40 +[0] 4 3 2 ⍴ 100+⍳24`. The port's lexer already
-  accepts `[axis]`; `index_select` already handles bracket-axis, but **`⍉` with explicit axes
-  and dyadic `+[axis]` are NOT yet implemented** (currently error or ignore the axis). These
-  13 new extracted cases (26 files) are now tracked coverage targets in `kap-stdlib/test/extracted/`.
-  (Distinct from `⍋⍒`-with-axis, which is N/A per `NoAxisAPLFunction`.)
+- **Axis specifiers `[axis]`** — partial work done (2026-08-21):
+  - **`⍉` partial-axis: DONE.** The port already supported full axis permutations;
+    the strict length check was relaxed to Kotlin's *prefix-fill* rule (left arg shorter
+    than rank → remaining axes auto-appended in ascending order). `0 1 ⍉ 3 4 5⍴⍳60`
+    → `⟨3 4 5⟩` (identity perm [0,1,2]), matching the oracle. Covers Elias's new
+    `TransposeTest__mismatchingAxisCount*` / `__multiDimensionTransposeWith*LeftArg*` cases.
+    4 curated rows added.
+  - **Dyadic scalar `+[axis]` (and general `f[axis]` for scalar ops): OPEN.** Elias's
+    new `ScalarTest__additionWithAxis*` cases use `10 20 30 40 +[0] 4 3 2⍴…` (axis-0
+    broadcasting). The port's parser treats `[…]` after an operand as bracket-index, so
+    `+[0]` errors. Needs (a) a parser rule attaching an axis to dyadic scalar ops and
+    (b) scalar functions honoring it with broadcasting — a larger feature. Tracked as the
+    next axis sub-target.
 - **`⌷` (squad / index selection) — CRITICAL, currently mis-dispatched to
   `disclose`** (see `KNOWN-NONCONFORMANCE.md`). `2 ⌷ 1 2 3 4` returns the whole
   array instead of `3`. Largest mismatch/unsupported driver. Needs a real

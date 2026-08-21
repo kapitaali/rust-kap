@@ -3100,23 +3100,39 @@ impl Engine {
                                 ))
                             }
                         };
-                        if axes.len() != rank {
-                            return Err(AplError::runtime(format!(
-                                "⍉ axis count {} does not match array rank {}",
-                                axes.len(),
-                                rank
-                            )));
-                        }
                         let mut seen = vec![false; rank];
                         let mut perm = Vec::with_capacity(rank);
                         for &x in &axes {
-                            if x < 0 || x as usize >= rank || seen[x as usize] {
+                            if x < 0 || x as usize >= rank {
+                                return Err(AplError::runtime(
+                                    "⍉ axis index out of range".into(),
+                                ));
+                            }
+                            if seen[x as usize] {
                                 return Err(AplError::runtime(
                                     "⍉ axes must be a permutation of 0..rank-1".into(),
                                 ));
                             }
                             seen[x as usize] = true;
                             perm.push(x as usize);
+                        }
+                        // Kotlin rule: the left arg is a *prefix* of the full axis
+                        // permutation. When it is shorter than the rank, the remaining
+                        // axes are appended in ascending order (skipping those already
+                        // used). So `0 1 ⍉ 3 4 5⍴⍳60` => perm [0,1,2] (identity). A left
+                        // arg longer than the rank is an error.
+                        if axes.len() < rank {
+                            for n in 0..rank {
+                                if !seen[n] {
+                                    perm.push(n);
+                                }
+                            }
+                        } else if axes.len() != rank {
+                            return Err(AplError::runtime(format!(
+                                "⍉ axis count {} does not match array rank {}",
+                                axes.len(),
+                                rank
+                            )));
                         }
                         perm
                     }
