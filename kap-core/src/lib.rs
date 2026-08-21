@@ -149,6 +149,32 @@ impl APLValue {
         }
     }
 
+    /// Render a value by **recursively flattening to scalar leaves and concatenating**
+    /// with no separators and no parentheses. This is Kap's `formatted(FormatStyle.PLAIN)`
+    /// used by **monadic `⍕`**: `⍕ 1 2 3 → "123"`, `⍕(2 2⍴⍳4) → "0123"`,
+    /// `⍕"ab" → "ab"`, `⍕⊂1 2 3 → "123"` (a box is flattened, not parenthesised).
+    /// Strings contribute their characters unquoted. This deliberately differs from
+    /// [`APLValue::format_value`] (which wraps arrays in `( … )` with spaces).
+    pub fn format_plain(&self) -> String {
+        match self {
+            APLValue::Number(n) => n.format(true),
+            APLValue::Char(c) => c.to_string(),
+            APLValue::Str(s) => s.clone(),
+            APLValue::Null => String::new(),
+            APLValue::Array(a) => {
+                a.elements().iter().map(|e| e.format_plain()).collect()
+            }
+            APLValue::Deferred { .. } => "<deferred>".to_string(),
+            APLValue::UserFn { .. } => "<function>".to_string(),
+            APLValue::UserOp { .. } => "<operator>".to_string(),
+            APLValue::Symbol { name, namespace } => match namespace {
+                Some(ns) if ns == "keyword" => format!(":{}", name),
+                Some(ns) => format!("{}:{}", ns, name),
+                None => name.clone(),
+            },
+        }
+    }
+
     /// Render a value for the **REPL / file output** path — Real Kap conformance.
     ///
     /// Unlike [`APLValue::format_value`], this wraps string values in *double

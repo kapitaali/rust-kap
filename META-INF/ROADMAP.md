@@ -21,7 +21,13 @@ Pick one to scope per session:
 - `→` — branch / guard  **(DONE)** — see `KNOWN-NONCONFORMANCE.md` (`→` committed earlier this branch)
 - bracket indexing `x[sel]` (`Instr::Index` → `index_select`)  **(DONE)** — see `KNOWN-NONCONFORMANCE.md`
 - key / major-cell operators: `⌺` / `⌸`, `⍋⍒`-with-axis
-- format family
+  - `⍋⍒`-with-axis is **N/A**: Kotlin `GradeFunction` extends `NoAxisAPLFunction`,
+    so axis specifiers are explicitly unsupported (oracle errors "Function does not
+    support axis specifier"). Nothing to implement — the port correctly rejects it.
+  - `⌺`/`⌸` are **NOT native** (stdlib `use()`-loaded `kap:keys`/`kap:stencil`);
+    out of reach until the stdlib-kernel is built (see DEFERRED/KNOWN).
+- format family  **(DONE, 2026-08-21)** — see `KNOWN-NONCONFORMANCE.md` (`⍕` monadic
+  flatten + dyadic `$s`/`$h`/`$$` directives all match the oracle).
 - **`⌷` (squad / index selection) — CRITICAL, currently mis-dispatched to
   `disclose`** (see `KNOWN-NONCONFORMANCE.md`). `2 ⌷ 1 2 3 4` returns the whole
   array instead of `3`. Largest mismatch/unsupported driver. Needs a real
@@ -81,6 +87,11 @@ Pick one to scope per session:
   consistent with `⊂`/`⊆`), not the oracle's bare scalar. Verified:
   `0⊇1 2 3 4 5 → (1)`, `2⊇… → (3)`, `¯1⊇… → (5)`, `1 0 2⊇10 20 30 40 → (20 10 30)`.
   Registered in BOTH lists. Added 4 curated parity rows.
+- **`⍕` format (monadic flatten + dyadic directives) — FIXED (2026-08-21)** —
+  monadic `⍕` now uses `formatted(PLAIN)` (recursive flatten, no separators/parens;
+  `⍕ 1 2 3 → "123"`), via new `lib.rs::format_plain`. The dyadic `$s`/`$h`/`$$`
+  directive compiler (Kotlin `format.kt`) was already implemented and matches the
+  oracle. 8 new monadic curated parity rows added.
 - **Adverbs `¨` / `/` / `\\` now bind to named user functions** — `dbl¨ 1 2 3`,
   `dbl/ 1 2 3`, `dbl\ …` work (commit `828913a`). Previously `unknown function: ¨`.
 - Dyadic `⍳` index-of + string `cmp` (commit `ee7df32`-era).

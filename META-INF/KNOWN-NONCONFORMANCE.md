@@ -183,6 +183,35 @@ rows are noted but not assertable by the harness).
 
 ---
 
+## DISPLAY — `⍕` monadic format (Kotlin `FormatAPLFunction`) — FIXED (2026-08-21)
+
+Monadic `⍕ x` now uses `formatted(FormatStyle.PLAIN)`: it **recursively flattens
+`x` to its scalar leaves and concatenates them with NO separators and NO
+parentheses** (matching the oracle). Previously the port used `format_value`,
+which wrapped arrays in `( … )` with spaces (`⍕ 1 2 3` → `"(1 2 3)"` instead of
+`"123"`). The dyadic `⍕` directive path (`$s`/`$h`/`$$`, Kotlin `format.kt`) was
+already correct and is unchanged.
+
+Verified against the `kap-jvm-text` oracle (value matches byte-for-byte):
+
+| expr | port | oracle |
+|------|------|--------|
+| `⍕ 1 2 3` | `"123"` | `"123"` |
+| `⍕ 10 20 30` | `"102030"` | `"102030"` |
+| `⍕ (2 2⍴⍳4)` | `"0123"` | `"0123"` |
+| `⍕ ⊂1 2 3` | `"123"` | `"123"` (box flattened) |
+| `⍕ ⊂5` | `"5"` | `"5"` |
+| `⍕ 1.5 2.5` | `"1.52.5"` | `"1.52.5"` |
+| `⍕ "ab" "cd"` | `"abcd"` | `"abcd"` (strings flatten to chars) |
+| `⍕ ⍬` | `""` | `""` |
+
+Implementation: new `APLValue::format_plain` in `lib.rs` (mirrors Kotlin
+`formatted(PLAIN)` — descends into arrays/strings, concatenates scalar leaves);
+`evaluator.rs` `⍕` monadic arm now calls `format_plain` instead of `format_value`.
+Added 8 curated parity rows (monadic flatten cases).
+
+---
+
 ## DISPLAY — glyph conventions (faithful design choice, NOT bugs)
 
 The port deliberately renders in Kap's house glyphs. Values compute correctly;
@@ -226,7 +255,12 @@ Features the engine does not build yet. Most are tracked in `ROADMAP.md`.
   *literals* parse (`3j4`) and some arithmetic works, but the `math:` module
   and complex-aware comparisons are missing. This is the dominant `unsupported`
   cluster in the sweep.
-- **Key / major-cell operators** — `⌺` (stencil) and `⌸` (key) unimplemented.
+- **Key / major-cell operators** — `⌺` (stencil) and `⌸` (key) are **NOT native
+  Kotlin builtins**: they resolve through the `use()`-loaded stdlib (`kap:keys` /
+  `kap:stencil` in `base-functions.kap`), which the port's deferred stdlib-kernel
+  cannot load. They are therefore out of reach until `use()` is implemented. (Confirmed
+  2026-08-21 by reading `engine.kt` — `⌸`/`⌺` appear only in the *lexer symbol set*,
+  not as registered native functions; only `keys`/`map` is native.)
 - **Compose operators** — `∘` / `⍛` (compose / reverse-compose trains) are wired;
   `≬`/`toList` is now implemented (see DISPLAY section).
 - **Axis specifiers** `[axis]` — not accepted for `⌷`, `⊆`, `⍋`/`⍒`, etc.

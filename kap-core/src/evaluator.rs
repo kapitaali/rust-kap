@@ -924,11 +924,14 @@ impl Engine {
             "⍕" | "format" => {
                 // Monadic format-to-string: render any value as a `Str`.
                 // Kap: ⍕8 => "8", ⍕@a => "a", ⍕"foo" => "foo", ⍕⍬ => "" (empty).
+                // Real Kap uses `formatted(FormatStyle.PLAIN)` — recursively flatten
+                // the value to its scalar leaves and concatenate with NO separators
+                // and NO parentheses (⍕ 1 2 3 => "123", ⍕(2 2⍴⍳4) => "0123").
                 if left_val.is_none() {
                     if let APLValue::Null = right_val.as_ref() {
                         Ok(Rc::new(APLValue::Str(String::new())))
                     } else {
-                        Ok(Rc::new(APLValue::Str(right_val.format_value())))
+                        Ok(Rc::new(APLValue::Str(right_val.format_plain())))
                     }
                 } else {
                     // Dyadic format with directives: left is format string, right is args.

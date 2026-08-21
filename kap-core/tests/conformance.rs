@@ -389,6 +389,15 @@ fn curated_kap_parity() {
         ("⍕@a", "\"a\""),
         ("⍕\"foo\"", "\"foo\""),
         ("⍕8", "\"8\""),
+        // Monadic `⍕` uses Kap's `formatted(PLAIN)`: recursively flatten to scalar
+        // leaves and concatenate with NO separators/parentheses (Real Kap).
+        ("⍕ 1 2 3", "\"123\""),
+        ("⍕ 10 20 30", "\"102030\""),
+        ("⍕ (2 2⍴⍳4)", "\"0123\""),
+        ("⍕ ⊂1 2 3", "\"123\""),
+        ("⍕ ⊂5", "\"5\""),
+        ("⍕ 1.5 2.5", "\"1.52.5\""),
+        ("⍕ ⍬", "\"\""),
         // Dyadic `⍕` format directives (Real Kap format.kt / FormatAPLFunction)
         // Each `$s`/`$h` consumes ONE right-arg element; results are Str (quoted).
         ("\"$s a $s b\"⍕(1 2)", "\"1 a 2 b\""),
