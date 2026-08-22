@@ -2769,11 +2769,30 @@ impl Engine {
                 )))))
             }
             // Scalar extension: array <op> scalar, scalar <op> array, array <op> array.
-            (APLValue::Array(xa), APLValue::Number(y)) | (APLValue::Number(y), APLValue::Array(xa)) => {
+            // Scalar extension. NOTE the two cases must pass args to `f` in the
+            // SAME order as the scalar-scalar case above (f(left, right)):
+            //   (array, scalar): each element is a left arg  -> f(elem, scalar)
+            //   (scalar, array): the scalar is the left arg  -> f(scalar, elem)
+            // (A previous single or-pattern called f(elem, scalar) in BOTH,
+            // swapping the operand order whenever the LEFT side was the scalar —
+            // e.g. `16 ⍟ 255 16` computed log_255(16) instead of log_16(255).)
+            (APLValue::Array(xa), APLValue::Number(y)) => {
                 let mut out = Vec::with_capacity(xa.element_count());
                 for e in xa.elements() {
                     if let APLValue::Number(x) = e.as_ref() {
                         out.push(Rc::new(APLValue::Number(f(x, y))));
+                    }
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    xa.dimensions.clone(),
+                    ArrayData::Nested(out),
+                )))))
+            }
+            (APLValue::Number(y), APLValue::Array(xa)) => {
+                let mut out = Vec::with_capacity(xa.element_count());
+                for e in xa.elements() {
+                    if let APLValue::Number(x) = e.as_ref() {
+                        out.push(Rc::new(APLValue::Number(f(y, x))));
                     }
                 }
                 Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
@@ -6955,10 +6974,64 @@ impl Engine {
         let b = right_val;
 
         let a_rank = a.rank();
-        if a_rank > 1 {
+        if a_rank > 2 {
             return Err(AplError::runtime(
-                "Left argument must have rank 0 or 1".into(),
+                "Left argument must have rank 0, 1 or 2".into(),
             ));
+        }
+
+        // Rank-2 left arg: COLUMN j of A is the radix list for B element j (verified
+        // against the oracle: `(2 2⍴8 16 4 4) ⊤ 7 9 → [[0 0][7 9]]`). Encode each
+        // column against its B element and stack the digit rows along axis 0.
+        if a_rank == 2 {
+            let a_dims = a.dimensions();
+            let a_elems = a.elements();
+            let rows = a_dims[0];
+            let cols = a_dims[1];
+            // Per-B-element digit vectors (MSB-first), computed with the successive
+            // division of math-kap's vectorEncode.
+            let b_elems: Vec<i64> = b
+                .elements()
+                .iter()
+                .filter_map(|e| match e.as_ref() {
+                    APLValue::Number(n) => n.as_long().ok(),
+                    _ => None,
+                })
+                .collect();
+            let b_total = b_elems.len();
+            let mut per_elem_digits: Vec<Vec<i64>> = Vec::with_capacity(b_total);
+            for j in 0..cols.min(b_total) {
+                let radices: Vec<i64> = (0..rows)
+                    .filter_map(|r| match a_elems[r * cols + j].as_ref() {
+                        APLValue::Number(n) => n.as_long().ok(),
+                        _ => None,
+                    })
+                    .collect();
+                let mut v = b_elems[j];
+                let mut ds: Vec<i64> = Vec::with_capacity(radices.len());
+                // math-kap vectorEncode peels ↑A (the FIRST radix) each iteration and
+                // PREPENDS the remainder (`rem⍪res`), so the last-peeled remainder ends up
+                // first: collect in natural order, then reverse once.
+                for &rad in radices.iter() {
+                    let r = if rad == 0 { 1 } else { rad };
+                    ds.push(v % r);
+                    v /= r;
+                }
+                ds.reverse();
+                per_elem_digits.push(ds);
+            }
+            // Stack along axis 0: row i = [per_elem_digits[j][i] for j].
+            let n_rows = per_elem_digits.first().map_or(0, |d| d.len());
+            let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(n_rows * cols);
+            for i in 0..n_rows {
+                for d in &per_elem_digits {
+                    out.push(Rc::new(APLValue::Number(KapNumber::Long(d[i]))));
+                }
+            }
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![n_rows, cols],
+                ArrayData::Nested(out),
+            )))));
         }
 
         // Flatten B for iteration; record its shape for the result.
@@ -7002,19 +7075,27 @@ impl Engine {
                     ArrayData::Nested(vec![]),
                 )))));
             }
-            // For each B element, compute digits MSB-first.
+            // For each B element, compute digits MSB-first. Result shape is
+            // (digits, ⍴B): digits along axis 0, B elements along axis 1+, so the
+            // flat fill must INTERLEAVE (digit-major outer loop, element inner),
+            // matching Kotlin vectorEncode's `rem⍪res` row-prepending.
+            let per_elem: Vec<Vec<i64>> = b_elems
+                .iter()
+                .map(|&v0| {
+                    let mut v = v0;
+                    let mut lsbs = Vec::with_capacity(digits);
+                    for _ in 0..digits {
+                        lsbs.push(v % radix);
+                        v /= radix;
+                    }
+                    lsbs.reverse();
+                    lsbs
+                })
+                .collect();
             let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(digits * b_total);
-            for &v0 in &b_elems {
-                let mut v = v0;
-                // Build LSB-first, then reverse to MSB-first.
-                let mut lsbs = Vec::with_capacity(digits);
-                for _ in 0..digits {
-                    lsbs.push(v % radix);
-                    v /= radix;
-                }
-                lsbs.reverse();
-                for d in lsbs {
-                    out.push(Rc::new(APLValue::Number(KapNumber::Long(d))));
+            for di in 0..digits {
+                for col in &per_elem {
+                    out.push(Rc::new(APLValue::Number(KapNumber::Long(col[di]))));
                 }
             }
             let mut out_dims = vec![digits];
@@ -7038,18 +7119,26 @@ impl Engine {
                 .collect();
             radices.reverse();
             let nr = radices.len();
+            // Same interleaved layout as the scalar branch: shape (nr, ⍴B), digits
+            // along axis 0, B elements along the trailing axes.
+            let per_elem: Vec<Vec<i64>> = b_elems
+                .iter()
+                .map(|&v0| {
+                    let mut v = v0;
+                    let mut lsbs = Vec::with_capacity(nr);
+                    for &r in &radices {
+                        let r = if r == 0 { 1 } else { r };
+                        lsbs.push(v % r);
+                        v /= r;
+                    }
+                    lsbs.reverse();
+                    lsbs
+                })
+                .collect();
             let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(nr * b_total);
-            for &v0 in &b_elems {
-                let mut v = v0;
-                let mut lsbs = Vec::with_capacity(nr);
-                for &r in &radices {
-                    let r = if r == 0 { 1 } else { r };
-                    lsbs.push(v % r);
-                    v /= r;
-                }
-                lsbs.reverse();
-                for d in lsbs {
-                    out.push(Rc::new(APLValue::Number(KapNumber::Long(d))));
+            for di in 0..nr {
+                for col in &per_elem {
+                    out.push(Rc::new(APLValue::Number(KapNumber::Long(col[di]))));
                 }
             }
             let mut out_dims = vec![nr];
