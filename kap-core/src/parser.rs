@@ -1282,6 +1282,10 @@ impl<'a> Parser<'a> {
                     Token::OpenParen => paren_op,
                     Token::OpenBracket => true,
                     Token::LambdaToken => true,
+                    // A `{ … }` lambda block is also a function atom in operator
+                    // position (`1 2 {≢⍵}⌸ 3 4`): without this the dyadic loop
+                    // breaks and the trailing adverb is parsed as a bare symbol.
+                    Token::OpenBrace => true,
                     _ => false,
                 },
                 None => false,
@@ -1303,6 +1307,9 @@ impl<'a> Parser<'a> {
                     // to a plain apply with `¨` as the function → "unknown function: ¨".)
                     Self::is_primitive_op(name) || self.is_known_fn(name, namespace)
                 }
+                // A lambda can also be the adverb's function operand:
+                // `{≢⍵}⌸ vals` (Key) binds the lambda into a Derived.
+                Instr::Lambda { .. } | Instr::Block { .. } => true,
                 _ => false,
             };
             if op_is_func {
@@ -1483,8 +1490,10 @@ impl<'a> Parser<'a> {
             | Token::Literal(LiteralValue::Str(_))
             | Token::OpenParen
             | Token::OpenBracket
-            | Token::LambdaToken
             | Token::APLNullSym => true,
+            // NOTE: LambdaToken deliberately NOT a strand operand — a lambda is a
+            // FUNCTION and applies to the preceding strand (`1 2 2 {≢⍵}⌸ v`), it
+            // never joins it as data.
             // A bare symbol is a strand operand (so `a c` -> (a c)) UNLESS it names a
             // function — a function symbol in strand position is applied instead.
             Token::Literal(LiteralValue::Symbol { name, namespace }) => {
@@ -1575,7 +1584,7 @@ impl<'a> Parser<'a> {
     /// Higher-order operators (adverbs) that take a *function* as one operand:
     /// `/` reduce, `\` scan, `¨` each.
     fn is_adverb(name: &str) -> bool {
-        matches!(name, "/" | "reduce" | "\\" | "scan" | "⌿" | "⍀" | "¨" | "each" | "⍨" | "commute" | "∵" | "bitwise")
+        matches!(name, "/" | "reduce" | "\\" | "scan" | "⌿" | "⍀" | "¨" | "each" | "⍨" | "commute" | "∵" | "bitwise" | "⌸" | "key")
     }
 
     /// Try to parse a *train*: a parenthesised sequence of >=2 function expressions,

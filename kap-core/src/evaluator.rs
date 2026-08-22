@@ -1048,6 +1048,11 @@ impl Engine {
                     };
                     return self.bitwise_apply(&fname, left, right, env);
                 }
+                // `⌸` (Key operator): `keys {fn}⌸ values`. Groups `values` by the
+                // corresponding key; for each unique key (first-occurrence order) the
+                // result row is `(key, fn(group))`. The fn is called dyadically with
+                // ⍺=key, ⍵=the enclosed group vector.
+                "⌸" | "key" => return self.key_apply(func, left, right, env),
                 other => Err(AplError::runtime(format!("unknown adverb: {}", other))),
             };
         }
@@ -5652,6 +5657,71 @@ impl Engine {
         Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
             vec![out.len()],
             ArrayData::Nested(out),
+        )))))
+    }
+
+    /// `⌸` (Key operator, oracle-native semantics): `keys {fn}⌸ values`.
+    /// For each unique key of `keys` in first-occurrence order, call `fn` dyadically
+    /// with ⍺=key and ⍵=the enclosed vector of values at matching positions. The
+    /// result is a 2-column matrix whose rows are `(key, fn(group))`.
+    fn key_apply(
+        &self,
+        fn_instr: &Instr,
+        left: &Option<Box<Instr>>,
+        right: &Box<Instr>,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let keys_v = match left {
+            Some(l) => self.eval_instr(l, env)?.force(self)?,
+            None => return Err(AplError::runtime("⌸ requires a left argument (keys)".into())),
+        };
+        let vals = self.eval_instr(right, env)?.force(self)?;
+        // A Str iterates as its characters (oracle: `"aab" {⍵}⌸ 5 6 7` groups by
+        // @a/@b). Split top-level strings into char elements before grouping.
+        let split_str = |v: &AplRef<APLValue>| -> Vec<AplRef<APLValue>> {
+            match v.as_ref() {
+                APLValue::Array(_) => self.flat_elements(v),
+                APLValue::Str(s) => s.chars().map(|c| Rc::new(APLValue::Char(c))).collect(),
+                other => vec![Rc::new(other.clone())],
+            }
+        };
+        let keys = split_str(&keys_v);
+        let values = split_str(&vals);
+        if keys.len() != values.len() {
+            return Err(AplError::runtime(format!(
+                "⌸: key and value lengths differ ({} vs {})",
+                keys.len(),
+                values.len()
+            )));
+        }
+        // Group value indices by unique key (first-occurrence order).
+        let mut order: Vec<AplRef<APLValue>> = Vec::new();
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for (i, k) in keys.iter().enumerate() {
+            match order.iter().position(|o| Self::type_equal(o.as_ref(), k.as_ref())) {
+                Some(g) => groups[g].push(i),
+                None => {
+                    order.push(k.clone());
+                    groups.push(vec![i]);
+                }
+            }
+        }
+        // One row per group: (key, fn(key; group)).
+        let mut rows: Vec<AplRef<APLValue>> = Vec::with_capacity(order.len());
+        for (k, gidx) in order.iter().zip(&groups) {
+            let group_vec = APLValue::Array(Rc::new(KapArray::new(
+                vec![gidx.len()],
+                ArrayData::Nested(gidx.iter().map(|&i| values[i].clone()).collect()),
+            )));
+            let res = self.apply_fn_instr(fn_instr, Some(k), &Rc::new(group_vec), env)?;
+            rows.push(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![2],
+                ArrayData::Nested(vec![k.clone(), res]),
+            )))));
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![order.len(), 2],
+            ArrayData::Nested(rows),
         )))))
     }
 
