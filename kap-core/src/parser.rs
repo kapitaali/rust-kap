@@ -18,7 +18,7 @@
 //!   stranded vec: a run of whitespace-separated primaries at the same level becomes
 //!                 an `Array` (APL stranding) — e.g. `1 2 3` -> Array[1,2,3].
 
-use crate::ast::Instr;
+use crate::ast::{Instr, BooleanOpKind};
 use crate::token::{LiteralValue, SpannedToken, Token};
 use crate::AplError;
 
@@ -110,7 +110,7 @@ impl<'a> Parser<'a> {
                                     | "toUpper" | "toNames" | "enc" | "dec"
                             ))
                         || (ns == "s" && matches!(base, "trimLeft" | "trimRight" | "trim"))
-                        || (ns == "int" && matches!(base, "intern" | "symbolName"))
+                        || (ns == "int" && matches!(base, "intern" | "symbolName" | "throwNative"))
                         || (ns == "regex"
                             && matches!(
                                 base,
@@ -454,7 +454,45 @@ impl<'a> Parser<'a> {
                 self.pos = save;
             }
         }
-        self.parse_apply()
+        // Short-circuit boolean operators `and` / `or` (Kotlin `AndToken`/`OrToken` →
+        // `BooleanAndFunction`/`BooleanOrFunction`) sit at the **lowest precedence**, below
+        // assignment. They are NOT the bitwise `∧`/`∨` functions. `a and b` evaluates `a`
+        // first; if its truthiness decides the result, `b` is not evaluated. The result is
+        // the *raw* operand (not coerced to 0/1). Left-associative, repeatable:
+        // `a and b and c` → `((a and b) and c)`.
+        let mut expr = self.parse_apply()?;
+        loop {
+            // Peek the next token: an `and`/`or` keyword (a bare *symbol* whose name is
+            // exactly "and"/"or") begins a boolean-op chain. Anything else ends the level.
+            let kind = match self.peek() {
+                Some(t) => match &t.token {
+                    Token::Literal(LiteralValue::Symbol { name, namespace })
+                        if namespace.is_none() && name == "and" =>
+                    {
+                        Some(BooleanOpKind::And)
+                    }
+                    Token::Literal(LiteralValue::Symbol { name, namespace })
+                        if namespace.is_none() && name == "or" =>
+                    {
+                        Some(BooleanOpKind::Or)
+                    }
+                    _ => None,
+                },
+                None => None,
+            };
+            let kind = match kind {
+                Some(k) => k,
+                None => break,
+            };
+            self.advance(); // consume `and`/`or`
+            let right = self.parse_apply()?;
+            expr = Instr::BooleanOp {
+                op: kind,
+                left: Box::new(expr),
+                right: Box::new(right),
+            };
+        }
+        Ok(expr)
     }
 
     /// Parse `name ⇐ <fn-expr>` — dynamic function assignment. This is a distinct
@@ -757,6 +795,24 @@ impl<'a> Parser<'a> {
         if let Some(instr) = self.parse_keyword_prefix()? {
             return Ok(instr);
         }
+        // Unary minus on a non-literal operand: `-x`, `-⍵`, `(-padding)`. The lexer already
+        // folds `-<digit>` into a single negative-number literal, so a bare `-` symbol here
+        // (at the START of a value expression) is monadic negation. We handle it HERE —
+        // at the value-expression entry point — NOT in `parse_primary`, because `parse_primary`
+        // is also called to fetch a *dyadic operator* (e.g. the `-` in `3 - 4`), where the
+        // same arm would wrongly hijack the operator into a unary Apply. (Must not fire for
+        // dyadic subtraction, where `-` already has a left operand.)
+        if let Some(Token::Literal(LiteralValue::Symbol { name, namespace })) = self.peek().map(|t| &t.token) {
+            if name == "-" && namespace.is_none() {
+                self.advance();
+                let operand = self.parse_apply()?;
+                return Ok(Instr::Apply {
+                    fn_expr: Box::new(Instr::Symbol { name: "-".to_string(), namespace: None }),
+                    left: None,
+                    right: Box::new(operand),
+                });
+            }
+        }
         let mut first = self.parse_primary()?;
         // A *value* followed by `primitive_op known_op` is a dyadic operator call where the
         // value is the operator's left DATA argument: `10 +foo 2` = `(+foo) applied to (10, 2)`.
@@ -958,6 +1014,7 @@ impl<'a> Parser<'a> {
                             t,
                             Token::Literal(LiteralValue::Symbol { name, .. })
                                 if Self::is_primitive_op(name) || Self::is_adverb(name)
+                                    || name == "⍤"
                         )
                 }
                 None => false,
@@ -967,9 +1024,12 @@ impl<'a> Parser<'a> {
                 _ => false,
             };
             let next_is_adverb = match &next {
-                Some(Token::Literal(LiteralValue::Symbol { name: nn, .. })) => {
-                    Self::is_adverb(nn)
-                }
+                Some(Token::Literal(LiteralValue::Symbol { name: nn, .. })) => Self::is_adverb(nn),
+                _ => false,
+            };
+            // `⍤` is a value-right-arg operator (rank): fn ⍤ <value expr>.
+            let next_is_value_op = match &next {
+                Some(Token::Literal(LiteralValue::Symbol { name: nn, .. })) => nn == "⍤",
                 _ => false,
             };
             let do_monadic = if is_prim {
@@ -1007,6 +1067,66 @@ impl<'a> Parser<'a> {
                     right: Box::new(data),
                 });
             }
+            // Value-right-arg operator: `f⍤rank` (Kotlin APLOperatorValueRightArg,
+            // engine.kt:494). Unlike an adverb, the right operand is a VALUE expression
+            // parsed with parse_apply (so `⊥⍤1` binds rank 1, and `f⍤0 1` binds the
+            // vector `0 1`). The binding itself is a function: it consumes the trailing
+            // data argument like any derived function.
+            if (is_prim || is_known) && next_is_value_op {
+                self.advance(); // consume ⍤
+                // Rank spec: parse ONE primary, then absorb following *numeric literals*
+                // into a strand (`⍤0 1` = vector spec). We must NOT use parse_apply here:
+                // it strands across the data argument (`⍤1 x` would swallow `x`), whereas
+                // Kotlin's APLOperatorValueRightArg.parseAndCombineFunctions uses
+                // parseValue which stops before the trailing function application.
+                let mut spec = self.parse_primary()?;
+                loop {
+                    let more = matches!(
+                        self.peek().map(|t| &t.token),
+                        Some(Token::Literal(LiteralValue::Number(_)))
+                    );
+                    if !more {
+                        break;
+                    }
+                    let elem = self.parse_primary()?;
+                    if let Instr::Array { elements } = &mut spec {
+                        elements.push(elem);
+                    } else {
+                        spec = Instr::Array { elements: vec![spec, elem] };
+                    }
+                }
+                // The bound operator is itself a function: consume the trailing data
+                // operand if one is present (statement boundary / EOF → no data yet;
+                // the binding then evaluates as a stray function, mirroring `+/`).
+                let data = if !self.at_statement_boundary()
+                    && self.peek().map(|t| &t.token) != Some(&Token::CloseParen)
+                    && self.peek().map(|t| &t.token) != Some(&Token::CloseBracket)
+                {
+                    self.parse_apply()?
+                } else {
+                    Instr::Empty
+                };
+                // `f⍤k` (or `f⍤k 0 1`) is a *derived function*. It must NOT be wrapped in an
+                // `Apply` with `first` (the function `f`) as a data operand — that would
+                // turn `256 (⊥⍤1) M` into `(⊥⍤1)(left=⊥)` and lose the real left data `256`.
+                // Instead return the bare `ValueOp` (a function value); the surrounding
+                // parse loop then binds any preceding/following data args normally.
+                let value_op = Instr::ValueOp {
+                    func: Box::new(first),
+                    op_name: "⍤".to_string(),
+                    operand: Box::new(spec),
+                };
+                // If a trailing data argument was present on this same statement, apply it
+                // now as the right operand (mirrors how `+/ 1 2 3` binds its data).
+                if !matches!(data, Instr::Empty) {
+                    return Ok(Instr::Apply {
+                        fn_expr: Box::new(value_op),
+                        left: None,
+                        right: Box::new(data),
+                    });
+                }
+                return Ok(value_op);
+            }
             // Fall through: treat `first` as the LEFT operand of a following dyadic op.
         }
         // Dyadic `L f R` where `first` is a *value* and the next token is a *function atom*
@@ -1028,12 +1148,12 @@ impl<'a> Parser<'a> {
                 // function — treating it as one mis-parses e.g. `(3 (4 5))` and errors
                 // "expected a function in train". So gate the OpenParen case on its being a
                 // paren operator; every other function token is unaffected.
-                let next_fn = self.next_is_function_token();
                 let paren_group_is_fn = match self.peek().map(|t| &t.token) {
                     Some(Token::OpenParen) => self.next_is_paren_operator(),
-                    _ => true,
+                    // Non-paren tokens: defer to the generic function-token check.
+                    _ => self.next_is_function_token(),
                 };
-                if next_fn && paren_group_is_fn {
+                if paren_group_is_fn {
                     let func = self.parse_function_expr()?;
                     // Axis specifier: `f[axis]` (e.g. `+[0]`, `,[0.5]`). Kotlin's
                     // `parseOperator` reads an optional `[axis]` *before* the right
@@ -1103,6 +1223,18 @@ impl<'a> Parser<'a> {
             if self.at_statement_boundary() || matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator)) {
                 break;
             }
+            // Short-circuit boolean `and` / `or` (Kotlin `AndToken`/`OrToken`) sit at a
+            // precedence BELOW the value/strand level, so they must NOT be absorbed into a
+            // strand. Break out here (without consuming the keyword) so the caller
+            // (`parse_assign`'s boolean-op loop) wraps the inner expression in an
+            // `Instr::BooleanOp`. (Without this, `1 and 2` would strand into `[1, and, 2]`.)
+            if matches!(
+                self.peek().map(|t| &t.token),
+                Some(Token::Literal(LiteralValue::Symbol { name, namespace }))
+                    if namespace.is_none() && (name == "and" || name == "or")
+            ) {
+                break;
+            }
             self.skip_newlines();
             if self.at_statement_boundary() || matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator)) {
                 break;
@@ -1131,9 +1263,6 @@ impl<'a> Parser<'a> {
         // Dyadic form: a f b (f c ...). `left` may be a value or a strand. The operator may
         // be a symbol, a parenthesised operator `(+)`, an open-bracket, a lambda, or comma.
         loop {
-            // Stop at a statement boundary: `a + b` on its own line is not the left
-            // operand of a dyadic operator starting the next statement. Check BEFORE
-            // skipping newlines so we see the boundary. A `;` also separates.
             if self.at_statement_boundary() || matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator)) {
                 break;
             }
@@ -1268,6 +1397,7 @@ impl<'a> Parser<'a> {
             }
             let mut kinds: Vec<Kind> = Vec::new();
             let mut valid = true;
+            let mut saw_rank = false;
             loop {
                 match self.peek().map(|t| &t.token) {
                     Some(Token::CloseParen) => break,
@@ -1279,22 +1409,36 @@ impl<'a> Parser<'a> {
                         self.skip_newlines();
                     }
                     Some(Token::Literal(LiteralValue::Symbol { name, namespace })) => {
-                        // A bare symbol is only a *function* member of a paren-train when it
-                        // is a definite function (primitive/known-fn/adverb). A value symbol
-                        // like `x` in `(⌷x)` makes the group `⌷ x` (a monadic application, a
-                        // value) — NOT a function train. Treating it as Func mis-strands
-                        // `(⌷x) (⌷y)` into an apply and errors.
-                        if Self::is_primitive_op(name)
+                        let is_fn = Self::is_primitive_op(name)
                             || self.is_known_fn(name, namespace)
                             || Self::is_adverb(name)
-                            || matches!(name.as_str(), "⊢" | "⊣")
+                            || matches!(name.as_str(), "⊢" | "⊣" | "⍤");
+                        self.advance();
+                        self.skip_newlines();
+                        // A function followed by the rank glyph (`(⊥⍤1)`) absorbs the
+                        // value-op operand — the numbers are the rank SPEC of this one
+                        // derived function, not separate Value members.
+                        if is_fn && self.peek().map(|t| &t.token)
+                            == Some(&Token::Literal(LiteralValue::Symbol {
+                                name: "⍤".to_string(),
+                                namespace: None,
+                            }))
                         {
+                            saw_rank = true;
+                            self.advance(); // consume ⍤
+                            while matches!(
+                                self.peek().map(|t| &t.token),
+                                Some(Token::Literal(LiteralValue::Number(_)))
+                            ) {
+                                self.advance();
+                                self.skip_newlines();
+                            }
+                        }
+                        if is_fn {
                             kinds.push(Kind::Func);
                         } else {
                             kinds.push(Kind::Value);
                         }
-                        self.advance();
-                        self.skip_newlines();
                     }
                     Some(Token::Literal(LiteralValue::SymbolValue { .. })) => {
                         // A symbol *value* (`'abc`) is always a value member of a
@@ -1324,7 +1468,7 @@ impl<'a> Parser<'a> {
                 let all_func = kinds.iter().all(|k| *k == Kind::Func);
                 let single_func = n == 1 && kinds[0] == Kind::Func;
                 let left_bind = n == 2 && kinds[0] == Kind::Value && kinds[1] == Kind::Func;
-                ok = single_func || (n >= 2 && all_func) || left_bind;
+                ok = single_func || (n >= 2 && all_func) || left_bind || saw_rank;
             }
         }
         self.pos = saved;
@@ -1431,7 +1575,7 @@ impl<'a> Parser<'a> {
     /// Higher-order operators (adverbs) that take a *function* as one operand:
     /// `/` reduce, `\` scan, `¨` each.
     fn is_adverb(name: &str) -> bool {
-        matches!(name, "/" | "reduce" | "\\" | "scan" | "⌿" | "⍀" | "¨" | "each" | "⍨" | "commute")
+        matches!(name, "/" | "reduce" | "\\" | "scan" | "⌿" | "⍀" | "¨" | "each" | "⍨" | "commute" | "∵" | "bitwise")
     }
 
     /// Try to parse a *train*: a parenthesised sequence of >=2 function expressions,
@@ -1461,6 +1605,43 @@ impl<'a> Parser<'a> {
                         Ok(e) => e,
                         Err(_) => return None,
                     };
+                    // Rank-operator form `f⍤spec` inside a parenthesised group:
+                    // the member is a function followed by `⍤` and a (numeric) spec.
+                    // Parse it as a ValueOp derived function and use THAT as the member.
+                    if let Some(Token::Literal(LiteralValue::Symbol { name, .. })) = self.peek().map(|t| &t.token) {
+                        if name == "⍤" {
+                            self.advance(); // consume ⍤
+                            let mut spec = match self.parse_primary() {
+                                Ok(s) => s,
+                                Err(_) => return None,
+                            };
+                            // Absorb additional numeric spec elements into a strand.
+                            loop {
+                                let more = matches!(
+                                    self.peek().map(|t| &t.token),
+                                    Some(Token::Literal(LiteralValue::Number(_)))
+                                );
+                                if !more {
+                                    break;
+                                }
+                                let elem = match self.parse_primary() {
+                                    Ok(s) => s,
+                                    Err(_) => return None,
+                                };
+                                if let Instr::Array { elements } = &mut spec {
+                                    elements.push(elem);
+                                } else {
+                                    spec = Instr::Array { elements: vec![spec, elem] };
+                                }
+                            }
+                            funcs.push(Instr::ValueOp {
+                                func: Box::new(e),
+                                op_name: "⍤".to_string(),
+                                operand: Box::new(spec),
+                            });
+                            continue;
+                        }
+                    }
                     funcs.push(e);
                     // Postfix compose/atop inside a parenthesised train: `a ∘ b` / `a ⍛ b`
                     // bind the just-pushed `a` to the next function atom `b` into a single
@@ -1575,7 +1756,7 @@ impl<'a> Parser<'a> {
                     || name == "⊣"
                     || namespace.is_some()
             }
-            Instr::Derived { .. } | Instr::Lambda { .. } | Instr::Train { .. } => true,
+            Instr::Derived { .. } | Instr::Lambda { .. } | Instr::Train { .. } | Instr::ValueOp { .. } => true,
             _ => false,
         }
     }
@@ -1594,6 +1775,36 @@ impl<'a> Parser<'a> {
 
     fn parse_function_expr_impl(&mut self, allow_train: bool) -> Result<Instr, AplError> {
         let left = self.parse_function_atom()?;
+        // Rank-operator form `f⍤spec` is a *derived function* (APLOperatorValueRightArg).
+        // It may appear in function-expression position (e.g. inside a paren group `(f⍤1)`)
+        // and must yield a ValueOp, not be swallowed by the operator/data apply path.
+        if let Some(t) = self.peek() {
+            let is_rank = matches!(&t.token, Token::Literal(LiteralValue::Symbol { name, .. }) if name == "⍤");
+            if is_rank {
+                self.advance(); // consume ⍤
+                let mut spec = self.parse_primary()?;
+                loop {
+                    let more = matches!(
+                        self.peek().map(|t| &t.token),
+                        Some(Token::Literal(LiteralValue::Number(_)))
+                    );
+                    if !more {
+                        break;
+                    }
+                    let elem = self.parse_primary()?;
+                    if let Instr::Array { elements } = &mut spec {
+                        elements.push(elem);
+                    } else {
+                        spec = Instr::Array { elements: vec![spec, elem] };
+                    }
+                }
+                return Ok(Instr::ValueOp {
+                    func: Box::new(left),
+                    op_name: "⍤".to_string(),
+                    operand: Box::new(spec),
+                });
+            }
+        }
         // Postfix compose:  f ∘ g  ->  Train([f, g], compose=true)        (atop)
         //                   f ⍛ g  ->  Train([f, g], reverse=true, compose=true)
         // Postfix fork:     a « b » c  ->  Train([a, b, c])              (fork)
@@ -1740,6 +1951,7 @@ impl<'a> Parser<'a> {
                 | Instr::Derived { .. }
                 | Instr::Lambda { .. }
                 | Instr::Train { .. }
+                | Instr::ValueOp { .. }
         )
     }
 
@@ -1940,7 +2152,9 @@ impl<'a> Parser<'a> {
                     body: Box::new(body),
                 })
             }
-            _ => Err(self.err("unexpected token in primary")),
+            _ => {
+                Err(self.err("unexpected token in primary"))
+            }
         }
     }
 
@@ -2009,7 +2223,7 @@ fn instr_from_symbol(tok: &Token) -> Instr {
 mod tests {
     use super::*;
     use crate::lexer::tokenise;
-    use crate::ast::Instr;
+    use crate::ast::{Instr, BooleanOpKind};
 
     fn parse_one(src: &str) -> Instr {
         let toks = tokenise(src);

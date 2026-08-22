@@ -271,8 +271,16 @@ Features the engine does not build yet. Most are tracked in `ROADMAP.md`.
 - **`regex:replace` lambda form** — only the `(subject; replacement)` *string*
   pair is supported; a replacement *function* is unimplemented.
 - **`use()` file loading / `.kap` stdlib kernel** (`standard-lib.kap`,
-  `base-functions.kap`) — deferred; `s:` string helpers and other stdlib
-  functions are therefore absent from the REPL.
+  `base-functions.kap`) — `use()` **IS** implemented and resolves `kap-stdlib/std/*.kap`
+  (verified 2026-08-22: `use("io.kap") ⋄ io:encodeUtf8Char @€ → (226 130 172)` matches the
+  oracle). Symbols in a `namespace("io")` file land in the `io:` namespace (`io:toHex`,
+  `io:encodeUtf8Char`, `io:base64Encode`), NOT bare names. The remaining stdlib gaps are
+  individual builtins the stdlib bodies call, not `use()` itself:
+  - `io:toHex 255 16` (2-arg form using `isLocallyBound('⍺)`) — port lacks the 2-arg `/⍟`/rank
+    plumbing this needs; returns an error today (oracle: `"F1F0"`).
+  - `io:base64Encode "Hello"` — needs `256 (⊥⍤1) …` (rank-op applied to a char-multidim
+    value) plus `⊤`/`⊤`-on-chars; errors in the port today (oracle: `"SGVsbG8="`).
+  These are stdlib-kernel items, tracked separately from the `∵` operator work.
 
 ---
 

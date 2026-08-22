@@ -8,7 +8,7 @@
 //! (`λ(params) body`). More in later phases.
 
 use crate::array::{ArrayData, KapArray};
-use crate::ast::Instr;
+use crate::ast::{Instr, BooleanOpKind};
 use crate::lexer::tokenise;
 use crate::number::KapNumber;
 use crate::parser;
@@ -539,6 +539,20 @@ impl Engine {
             Instr::Derived { func, .. } => {
                 self.eval_apply(func, &None, &Box::new(Instr::Empty), env)
             }
+            Instr::ValueOp { func, op_name, operand } => {
+                // A value-right-arg operator binding (`f⍤1`) reached as a stray
+                // expression; route through `eval_apply` so its guard handles it.
+                self.eval_apply(
+                    &Instr::ValueOp {
+                        func: func.clone(),
+                        op_name: op_name.clone(),
+                        operand: operand.clone(),
+                    },
+                    &None,
+                    &Box::new(Instr::Empty),
+                    env,
+                )
+            }
             Instr::Train { funcs, reverse, compose } => self.apply_train(
                 funcs,
                 *reverse,
@@ -730,6 +744,32 @@ impl Engine {
                     self.eval_instr(truthy, env)
                 } else {
                     self.eval_instr(falsy, env)
+                }
+            }
+            // Short-circuit boolean `and` / `or` (Kotlin `BooleanAndFunction` /
+            // `BooleanOrFunction`). Evaluate the LEFT operand, then decide:
+            //   `and` → if truthy(left) then right else left   (right NOT evaluated when left is falsy)
+            //   `or`  → if truthy(left) then left else right    (right NOT evaluated when left is truthy)
+            // The result is the *raw* operand value (mirrors the oracle: `1 and 2 → 2`,
+            // `0 and 2 → 0`, `1 or 0 → 1`). This is what makes `16∊decoded and '… int:throwNative …'`
+            // a lazy guard: when the membership check is false the throw is never evaluated.
+            Instr::BooleanOp { op, left, right } => {
+                let l = self.eval_instr(left, env)?.force(self)?;
+                match op {
+                    BooleanOpKind::And => {
+                        if self.truthy(&l) {
+                            self.eval_instr(right, env)
+                        } else {
+                            Ok(l)
+                        }
+                    }
+                    BooleanOpKind::Or => {
+                        if self.truthy(&l) {
+                            Ok(l)
+                        } else {
+                            self.eval_instr(right, env)
+                        }
+                    }
                 }
             }
         }
@@ -944,6 +984,19 @@ impl Engine {
         if let Some((params, split, body)) = lambda {
             return self.apply_user_fn(&params, split, &body, left, right, env, fn_name.as_deref());
         }
+        // --- Value-right-arg operators (e.g. `f⍤1` rank) ---
+        // Kotlin APLOperatorValueRightArg (engine.kt:494 RankOperator). The operand is
+        // a VALUE evaluated at application time. Currently `⍤` (rank) is the only one.
+        if let Instr::ValueOp { func, op_name, operand } = fn_expr {
+            if op_name == "⍤" {
+                let rank_val = self.eval_instr(operand, env)?.force(self)?;
+                return self.apply_rank_op(func, &rank_val, left, right, env);
+            }
+            return Err(AplError::runtime(format!(
+                "unknown value-right-arg operator: {}",
+                op_name
+            )));
+        }
         // --- Derived functions from adverbs (e.g. `+/`, `×¨`) ---
         // `fn_expr` is an `Instr::Derived { func, op }`; `op` is the adverb name (`/`,
         // `\`, `¨`) and `func` is the function operand. `left`/`right` are the data
@@ -983,6 +1036,18 @@ impl Engine {
                         )
                     }
                 },
+                // `∵` (BitwiseOp, Kotlin bitwise_ops.kt): a one-arg operator that derives the
+                // *bitwise* variant of its function operand. `∨∵`→bitwise-OR, `∧∵`→bitwise-AND,
+                // `⌽∵`→bitwise-shift (left = shift count, right = value). Works element-wise over
+                // integer arrays (Kotlin's BitwiseCombineAPLFunction extends MathCombineAPLFunction).
+                "∵" | "bitwise" => {
+                    // Resolve the function operand to a primitive name.
+                    let fname = match func.as_ref() {
+                        Instr::Symbol { name, .. } => name.clone(),
+                        _ => return Err(AplError::runtime("∵ requires a primitive function operand".into())),
+                    };
+                    return self.bitwise_apply(&fname, left, right, env);
+                }
                 other => Err(AplError::runtime(format!("unknown adverb: {}", other))),
             };
         }
@@ -1183,6 +1248,80 @@ impl Engine {
                     ]),
                 );
                 Ok(Rc::new(APLValue::Array(Rc::new(arr))))
+            }
+            // `int:throwNative` (dyadic): `Symbol int:throwNative Message` — throw a native
+            // Kap exception whose type is named by the left symbol and whose message is the
+            // right operand (coerced to a string). Mirrors Kotlin `throw-native.kt`
+            // `ThrowNativeFunction.eval2Arg`:
+            //   kap:KapEvalException    -> Kap eval error (the one io.kap's fromHex uses)
+            //   InvalidDimensionsException -> dimension error
+            //   IllegalArgumentException    -> illegal-argument error
+            //   anything else              -> "Invalid exception name: …"
+            // The REAL Kap REPL renders `throwNative: <message>`; we mirror that prefix so
+            // port error text reads like the oracle (e.g. `throwNative: Invalid characters in
+            // hex string`). The left operand is a *symbol* (typically a quoted symbol literal
+            // `'kap:KapEvalException`); a bare symbol reference also works.
+            "int:throwNative" => {
+                // The left operand is a *symbol*. In Kap a quoted symbol literal
+                // `'kap:KapEvalException` is a single token whose namespace/name carry the
+                // `ns:name` form — but in the port a quoted symbol may arrive with the whole
+                // `ns:name` packed into `name` and `namespace == None` (the lexer doesn't
+                // split a quoted symbol the way it splits a bare `ns:name`). Normalise both
+                // shapes: if `name` itself contains a `:`, split it into (ns, name).
+                let sym = match left_val.as_ref() {
+                    Some(lv) => match lv.as_ref() {
+                        APLValue::Symbol { name, namespace } => {
+                            let (ns, nm) = if name.contains(':') {
+                                let mut parts = name.splitn(2, ':');
+                                (
+                                    parts.next().unwrap_or("default").to_string(),
+                                    parts.next().unwrap_or(name.as_str()).to_string(),
+                                )
+                            } else {
+                                (
+                                    namespace.clone().unwrap_or_else(|| "default".to_string()),
+                                    name.clone(),
+                                )
+                            };
+                            format!("{}:{}", ns, nm)
+                        }
+                        other => {
+                            return Err(AplError::runtime(format!(
+                                "int:throwNative expects a symbol on the left, got: {}",
+                                other.format_value()
+                            )))
+                        }
+                    },
+                    None => {
+                        return Err(AplError::runtime(
+                            "int:throwNative requires a left argument (a symbol)".to_string(),
+                        ))
+                    }
+                };
+                let message = match right_val.as_ref() {
+                    APLValue::Str(s) => s.clone(),
+                    APLValue::Char(c) => c.to_string(),
+                    other => other.format_value(),
+                };
+                let kind = match sym.as_str() {
+                    "kap:KapEvalException" => "throwNative",
+                    "default:InvalidDimensionsException" => "Invalid dimensions",
+                    "default:IllegalArgumentException" => "Illegal argument",
+                    _ => {
+                        return Err(AplError::runtime(format!(
+                            "throwNative: Invalid exception name: {}",
+                            sym
+                        )))
+                    }
+                };
+                // The oracle's KapEvalException path prints `throwNative: <message>`; the
+                // other two print their own canonical label. Match the oracle's rendered form.
+                let rendered = if kind == "throwNative" {
+                    format!("throwNative: {}", message)
+                } else {
+                    format!("{}: {}", kind, message)
+                };
+                Err(AplError::runtime(rendered))
             }
             // `typeof` (monadic): returns a *symbol* naming the Kap class of the
             // argument (Kotlin `TypeofFunction` → `classManager.nameForClass`).
@@ -1458,8 +1597,11 @@ impl Engine {
                 Some(l) => self.interval(l, right_val),
                 None => self.where_fn(right_val),
             },
-            "⊤" | "encode" => self.encode(left_val, right_val),
-            "⊥" | "decode" => self.decode(left_val, right_val),
+            // `⊤`/`⊥` are Kap's BASE-VALUE (mixed-radix) functions, defined in
+            // `math-kap.kap`. They are NOT the byte-array codecs `encode`/`decode`
+            // (which the port does not implement as separate primitives).
+            "⊤" => self.encode(left_val, right_val),
+            "⊥" => self.decode(left_val, right_val),
             // Identity (⊢): monadic → argument; dyadic → right argument.
             "⊢" => match left_val {
                 None => Ok(right_val),
@@ -3129,34 +3271,65 @@ impl Engine {
     fn reshape(&self, left_val: AplRef<APLValue>, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
         // Dyadic `⍴`: `(dims) ⍴ data` builds an array of shape `dims`, filled by
         // cycling through the flat elements of `data` (Kap/APL reshape semantics).
+        // A negative dimension (e.g. `-1`) means "infer this axis from the data length",
+        // exactly one such dimension is allowed.
         let dims_val = left_val.force(self)?;
-        let mut dims: Vec<usize> = Vec::new();
+        let mut raw_dims: Vec<i64> = Vec::new();
         match dims_val.as_ref() {
             APLValue::Array(a) => {
                 for e in a.elements() {
                     if let APLValue::Number(KapNumber::Long(v)) = e.as_ref() {
-                        if *v < 0 {
-                            return Err(AplError::runtime("reshape dimensions must be non-negative".into()));
-                        }
-                        dims.push(*v as usize);
+                        raw_dims.push(*v);
                     } else {
                         return Err(AplError::runtime("reshape dimensions must be integers".into()));
                     }
                 }
             }
-            APLValue::Number(KapNumber::Long(v)) => {
-                if *v < 0 {
-                    return Err(AplError::runtime("reshape dimensions must be non-negative".into()));
-                }
-                dims.push(*v as usize);
-            }
+            APLValue::Number(KapNumber::Long(v)) => raw_dims.push(*v),
             APLValue::Str(s) => {
                 // A string as a reshape shape means its length as a single dimension
                 // (Kap: `"abc"⍴x` ≡ `(3)⍴x`).
-                dims.push(s.chars().count());
+                raw_dims.push(s.chars().count() as i64);
             }
             _ => return Err(AplError::runtime("reshape dimensions must be an array or integer".into())),
         }
+        // Resolve negative dimensions. Kotlin (reshape.kt) allows ONLY `-1` as the
+        // inferred-dimension sentinel; any other negative size is an error
+        // (`Attempt to reshape to dimension with negative size: <n>`).
+        let neg_count = raw_dims.iter().filter(|&&d| d < 0).count();
+        if neg_count > 1 {
+            return Err(AplError::runtime("reshape allows at most one inferred (-1) dimension".into()));
+        }
+        if let Some(&d) = raw_dims.iter().find(|&&d| d < 0 && d != -1) {
+            return Err(AplError::runtime(format!("Attempt to reshape to dimension with negative size: {}", d)));
+        }
+        let data = right_val.force(self)?;
+        let src_elements: Vec<AplRef<APLValue>> = match data.as_ref() {
+            APLValue::Array(a) => a.elements(),
+            other => vec![Rc::new(other.clone())],
+        };
+        let data_len = std::cmp::max(src_elements.len(), 1) as i64;
+        let abs_prod_excl_neg: i64 = raw_dims
+            .iter()
+            .filter(|&&d| d >= 0)
+            .map(|&d| d.max(0))
+            .product::<i64>()
+            .max(1);
+        let dims: Vec<usize> = if neg_count == 1 {
+            raw_dims
+                .iter()
+                .map(|&d| {
+                    if d < 0 {
+                        let inferred = data_len / abs_prod_excl_neg;
+                        inferred.max(0) as usize
+                    } else {
+                        d.max(0) as usize
+                    }
+                })
+                .collect()
+        } else {
+            raw_dims.iter().map(|&d| d.max(0) as usize).collect()
+        };
         if dims.is_empty() {
             return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(vec![], ArrayData::Nested(vec![]))))));
         }
@@ -5194,6 +5367,145 @@ impl Engine {
         )))))
     }
 
+    /// Rank operator `f⍤k` (Kotlin RankOpFunctionImpl, operator.kt:82 + disclose.kt
+    /// AxisMultiDimensionEnclosedValue). Splits each argument into cells whose trailing
+    /// dimension count is `k` (leading dims form the cell frame), applies `func` to every
+    /// cell, and discloses the per-cell results into a frame-shaped array.
+    ///
+    /// Rank-spec rules (computeRankFromOpArg / eval2Arg):
+    ///   * scalar r        → same rank for both sides
+    ///   * 1-elem vector   → same rank for both sides
+    ///   * 2-elem vector   → [leftRank, rightRank]
+    ///   * 3-elem vector   → monadic uses the MIDDLE element
+    /// A negative index counts back from the argument's rank; clamped to [0, rank].
+    fn apply_rank_op(
+        &self,
+        func: &Instr,
+        rank_val: &APLValue,
+        left: &Option<Box<Instr>>,
+        right: &Box<Instr>,
+        env: &Rc<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let spec: Vec<i64> = match rank_val {
+            APLValue::Number(n) => vec![n.as_long().map_err(AplError::runtime)?],
+            APLValue::Array(a) => a
+                .elements()
+                .iter()
+                .map(|e| match e.as_ref() {
+                    APLValue::Number(n) => n
+                        .as_long()
+                        .map_err(|e2| AplError::runtime(format!("⍤: rank spec: {}", e2))),
+                    _ => Err(AplError::runtime("⍤: rank spec must be numeric".into())),
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            _ => return Err(AplError::runtime("⍤: rank spec must be numeric".into())),
+        };
+        let (left_rank, right_rank) = match spec.len() {
+            1 => (spec[0], spec[0]),
+            2 => (spec[0], spec[1]),
+            3 => (spec[1], spec[2]), // monadic path below reads spec[1]
+            _ => {
+                return Err(AplError::runtime(
+                    "⍤: operator argument must be scalar or an array of 1 to 3 elements".into(),
+                ))
+            }
+        };
+        // Split an argument into rank-k cells (Kotlin AxisMultiDimensionEnclosedValue):
+        // the trailing k dims are the cell shape; the leading dims are the frame.
+        let split_cells = |v: &APLValue, idx: i64| -> Result<(Vec<usize>, Vec<usize>, Vec<AplRef<APLValue>>), AplError> {
+            // Returns (frame_dims, cell_dims, flat_elems).
+            let (dims, elems): (Vec<usize>, Vec<AplRef<APLValue>>) = match v {
+                APLValue::Array(a) => (a.dimensions.clone(), a.elements()),
+                APLValue::Str(s) => {
+                    let cs: Vec<AplRef<APLValue>> =
+                        s.chars().map(|c| Rc::new(APLValue::Char(c))).collect();
+                    (vec![cs.len()], cs)
+                }
+                other => (vec![], vec![Rc::new(other.clone())]),
+            };
+            let rank = dims.len();
+            let k = idx.max(0).min(rank as i64) as usize;
+            let frame = dims[..rank - k].to_vec();
+            let cell_dims = dims[rank - k..].to_vec();
+            Ok((frame, cell_dims, elems))
+        };
+        match left {
+            None => {
+                // Monadic: rank = spec[1] when 3 elements, else the single value.
+                let idx = if spec.len() == 3 { spec[1] } else { spec[0] };
+                let rv = self.eval_instr(right, env)?.force(self)?;
+                let (frame, cell_dims, elems) = split_cells(rv.as_ref(), idx)?;
+                let cell_size: usize = cell_dims.iter().product();
+                let cell_size = cell_size.max(1);
+                let mut results = Vec::with_capacity(elems.len() / cell_size);
+                for cell in elems.chunks(cell_size) {
+                    let cell_val = self.make_simple_or_nested(cell_dims.clone(), cell.to_vec())?;
+                    let r = self.eval_apply(func, &None, &Box::new(Instr::Value(cell_val)), env)?;
+                    results.push(r);
+                }
+                // Disclose: frame dims × per-cell results (Kotlin discloseValue).
+                if frame.is_empty() {
+                    return Ok(results.into_iter().next().unwrap_or_else(|| Rc::new(APLValue::Null)));
+                }
+                self.make_simple_or_nested(frame.clone(), results)
+            }
+            Some(l) => {
+                let lv = self.eval_instr(l, env)?.force(self)?;
+                let rv = self.eval_instr(right, env)?.force(self)?;
+                let (lframe, lcell_dims, lelems) = split_cells(lv.as_ref(), left_rank)?;
+                let (rframe, rcell_dims, relems) = split_cells(rv.as_ref(), right_rank)?;
+                let lcell: usize = lcell_dims.iter().product::<usize>().max(1);
+                let rcell: usize = rcell_dims.iter().product::<usize>().max(1);
+                // Frame sizes must agree (Kotlin ForEachFunctionDescriptor.compute2Arg).
+                let ln: usize = lelems.len() / lcell;
+                let rn: usize = relems.len() / rcell;
+                if ln != rn && ln != 1 && rn != 1 {
+                    return Err(AplError::runtime(
+                        "⍤: cell frame sizes do not match".into(),
+                    ));
+                }
+                let n = ln.max(rn);
+                let mut results = Vec::with_capacity(n);
+                for i in 0..n {
+                    let li = if ln == 1 { 0 } else { i };
+                    let ri = if rn == 1 { 0 } else { i };
+                    // Guard the cell slices: if an argument has no elements (e.g. the
+                    // right operand of `⍤` evaluated to an empty array), return a proper
+                    // error rather than panicking on an out-of-range slice.
+                    if lelems.is_empty() || relems.is_empty() {
+                        return Err(AplError::runtime(
+                            "⍤: rank-operator argument is empty".into(),
+                        ));
+                    }
+                    let ls = li * lcell;
+                    let rs = ri * rcell;
+                    if ls + lcell > lelems.len() || rs + rcell > relems.len() {
+                        return Err(AplError::runtime(
+                            "⍤: cell frame does not match argument shape".into(),
+                        ));
+                    }
+                    let lcell_val =
+                        self.make_simple_or_nested(lcell_dims.clone(), lelems[ls..ls + lcell].to_vec())?;
+                    let rcell_val =
+                        self.make_simple_or_nested(rcell_dims.clone(), relems[rs..rs + rcell].to_vec())?;
+                    let r = self.eval_apply(
+                        func,
+                        &Some(Box::new(Instr::Value(lcell_val))),
+                        &Box::new(Instr::Value(rcell_val)),
+                        env,
+                    )?;
+                    results.push(r);
+                }
+                // Result frame: the non-singleton frame (Kotlin broadcasts a singleton).
+                let frame = if ln == 1 { rframe } else { lframe };
+                if frame.is_empty() {
+                    return Ok(results.into_iter().next().unwrap_or_else(|| Rc::new(APLValue::Null)));
+                }
+                self.make_simple_or_nested(frame.clone(), results)
+            }
+        }
+    }
+
     /// Each `f¨array` (monadic) or `a f¨ b` (dyadic, element-wise with scalar extension).
     fn adverb_each(
         &self,
@@ -5457,6 +5769,106 @@ impl Engine {
         }
     }
 
+    /// Bitwise `∵` operator (Kotlin bitwise_ops.kt BitwiseOp). Derives the *bitwise*
+    /// variant of the primitive function named by `fname` and applies it to `left`/`right`.
+    /// Supported operands: `∨` (bitwise-OR), `∧` (bitwise-AND), `⌽` (bitwise-shift, where the
+    /// left arg is the shift count and the right arg is the value: `count ⌽∵ value`).
+    /// Works element-wise over integer scalars/arrays with scalar extension (mirrors
+    /// Kotlin's MathCombineAPLFunction broadcast).
+    fn bitwise_apply(
+        &self,
+        fname: &str,
+        left: &Option<Box<Instr>>,
+        right: &Box<Instr>,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let right_val = self.eval_instr(right, env)?.force(self)?;
+        let left_val = match left {
+            Some(l) => Some(self.eval_instr(l, env)?.force(self)?),
+            None => None,
+        };
+        // Echo shape: if both operands were scalars, return a scalar.
+        let scalar_only = left_val.as_ref().map_or(false, |l| matches!(l.as_ref(), APLValue::Number(_)))
+            && matches!(right_val.as_ref(), APLValue::Number(_));
+        // Collect integer operands into flat i64 vectors (scalar → length 1).
+        let to_long_vec = |v: &APLValue, sym: &str| -> Result<Vec<i64>, AplError> {
+            match v {
+                APLValue::Number(n) => Ok(vec![n.as_long().map_err(|e| AplError::runtime(e))?]),
+                APLValue::Array(a) => {
+                    let mut out = Vec::with_capacity(a.element_count());
+                    for e in a.elements() {
+                        match e.as_ref() {
+                            APLValue::Number(n) => out.push(n.as_long().map_err(|e| AplError::runtime(e))?),
+                            _ => return Err(AplError::runtime(format!("{} requires integers", sym))),
+                        }
+                    }
+                    Ok(out)
+                }
+                other => Err(AplError::runtime(format!("{} requires integers, got {}", sym, other.class_name()))),
+            }
+        };
+        let combine = |x: i64, y: i64| -> Result<i64, AplError> {
+            match fname {
+                "∨" | "or" => Ok(x | y),
+                "∧" | "and" => Ok(x & y),
+                "⌽" | "rotate" | "rotateright" => {
+                    // Kotlin's BigInt.shl(a) treats a negative shift count as a *right* shift
+                    // by |a| (and the intermediate is arbitrary-precision, so no overflow).
+                    if x >= 0 {
+                        Ok(y << x)
+                    } else {
+                        Ok(y >> (-x))
+                    }
+                }
+                "⊻" | "xor" => Ok(x ^ y),
+                other => Err(AplError::runtime(format!("∵ does not support {} (bitwise not yet implemented)", other))),
+            }
+        };
+        // `⌽∵` is a *shift*: the left arg is the (signed) shift count, right is the value.
+        // All others are pairwise on the two integer operands.
+        let result_vec: Vec<i64> = match fname {
+            "⌽" | "rotate" | "rotateright" => {
+                let l = left_val.ok_or_else(|| AplError::runtime("⌽∵ needs two args".into()))?;
+                let lvec = to_long_vec(&l, "⌽∵")?;
+                let rvec = to_long_vec(&right_val, "⌽∵")?;
+                let n = lvec.len().max(rvec.len());
+                if !(lvec.len() == n || lvec.len() == 1) || !(rvec.len() == n || rvec.len() == 1) {
+                    return Err(AplError::runtime("⌽∵ length mismatch".into()));
+                }
+                (0..n)
+                    .map(|i| {
+                        let x = lvec[if lvec.len() == 1 { 0 } else { i }];
+                        let y = rvec[if rvec.len() == 1 { 0 } else { i }];
+                        combine(x, y)
+                    })
+                    .collect::<Result<Vec<i64>, AplError>>()?
+            }
+            _ => {
+                let l = left_val.ok_or_else(|| AplError::runtime(format!("{}∵ needs two args", fname)))?;
+                let lvec = to_long_vec(&l, fname)?;
+                let rvec = to_long_vec(&right_val, fname)?;
+                let n = lvec.len().max(rvec.len());
+                if !(lvec.len() == n || lvec.len() == 1) || !(rvec.len() == n || rvec.len() == 1) {
+                    return Err(AplError::runtime(format!("{}∵ length mismatch", fname)));
+                }
+                (0..n)
+                    .map(|i| {
+                        let x = lvec[if lvec.len() == 1 { 0 } else { i }];
+                        let y = rvec[if rvec.len() == 1 { 0 } else { i }];
+                        combine(x, y)
+                    })
+                    .collect::<Result<Vec<i64>, AplError>>()?
+            }
+        };
+        if scalar_only {
+            return Ok(Rc::new(APLValue::Number(KapNumber::Long(result_vec[0]))));
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![result_vec.len()],
+            ArrayData::Long(result_vec),
+        )))))
+    }
+
     /// Membership `a ∊ b`: for each element of `a`, 1 if present in `b`, else 0.
     /// Returns a vector (same shape as `a`) of 0/1.
     fn membership(
@@ -5487,7 +5899,11 @@ impl Engine {
             }
             other => {
                 let hit = if keys.contains(&other.format_value()) { 1 } else { 0 };
-                out.push(Rc::new(APLValue::Number(KapNumber::Long(hit))));
+                // Scalar left operand → scalar result (Kap returns a result with the
+                // *shape of the left argument*, so a scalar membership is a scalar 0/1,
+                // not a length-1 vector). This matters for short-circuit `and`/`or`
+                // guards, whose `truthy` treats a non-empty array as true.
+                return Ok(Rc::new(APLValue::Number(KapNumber::Long(hit))));
             }
         }
         Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
@@ -6377,96 +6793,272 @@ impl Engine {
         )))))
     }
 
-    /// Encode `base ⊤ value`: represent `value` in the mixed radix given by `base`
-
-    /// (a vector of radices, most significant first). Returns a vector.
-    fn encode(
-        &self,
-        left_val: Option<AplRef<APLValue>>,
-        right_val: AplRef<APLValue>,
-    ) -> Result<AplRef<APLValue>, AplError> {
-        let base = left_val.ok_or_else(|| AplError::runtime("⊤ needs two args".into()))?;
-        let radices: Vec<i64> = match base.as_ref() {
-            APLValue::Array(a) => a
-                .elements()
-                .iter()
-                .filter_map(|e| match e.as_ref() {
-                    APLValue::Number(n) => n.as_long().ok(),
-                    _ => None,
-                })
-                .collect(),
-            APLValue::Number(n) => match n.as_long() {
-                Ok(v) => vec![v],
-                Err(_) => return Err(AplError::runtime("⊤ base must be integer".into())),
-            },
-            _ => return Err(AplError::runtime("⊤ base must be a number".into())),
-        };
-        let total: i64 = match right_val.as_ref() {
-            APLValue::Number(n) => n.as_long().unwrap_or(0),
-            _ => return Err(AplError::runtime("⊤ value must be a number".into())),
-        };
-        // Standard APL mixed-radix: digits d_k = floor(total / prod(radices[k+1..])) mod radices[k]
-        let mut prod_after = 1i64;
-        for r in radices.iter().rev() {
-            prod_after *= (*r).max(1);
-        }
-        let mut out = Vec::with_capacity(radices.len());
-        let mut rem = total;
-        for r in &radices {
-            let r = (*r).max(1);
-            prod_after /= r;
-            let digit = (rem / prod_after) % r;
-            out.push(Rc::new(APLValue::Number(KapNumber::Long(digit))));
-            rem %= prod_after;
-        }
-        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-            vec![out.len()],
-            ArrayData::Nested(out),
-        )))))
-    }
-
-    /// Decode `base ⊥ digits`: mixed-radix value of `digits` under radices `base`.
+    /// Decode `A ⊥ B` and encode `A ⊤ B` \u2014 Kap's **base-value** (mixed-radix)
+    /// functions. These mirror `~/Apps/array/array/standard-lib/math-kap.kap`
+    /// (lines 64-103): they are NOT the byte-array codecs `encode`/`decode`.
+    ///
+    /// Semantics verified side-by-side against `kap-jvm-text`:
+    /// - `256 ⊥ 104 105 0` → `6842624`
+    /// - `2 ⊥ 3 3⍴1 2 3 4 5 6` → `⟨13 20 27⟩` (shape `⟨3⟩`)
+    /// - `(2 2 2) ⊥ 1 2 3` → `11`
+    /// - `64 ⊤ 66051` → `⟨16 8 3⟩`
+    /// - `(4⍴64) ⊤ 6842624` → `⟨26 6 36 0⟩` (shape `⟨4⟩`)
+    ///
+    /// Algorithm (Kotlin `+⌿ (×⍀ ¯1↓1⍪(0×B) (+⍤¯1) ⌽A) × ⊖B`, general form):
+    /// the DIGIT axis is always `B`'s axis 0; each digit at position `j` along
+    /// that axis is weighted by `A^(L-1-j)` (scalar `A`) or `Π_{k=j}^{L-1} A[k]`
+    /// (vector `A`), and the weighted digits are summed over axis 0. The result
+    /// shape is `B`'s shape with axis 0 removed. A scalar `B` (rank 0) returns
+    /// `B` unchanged.
     fn decode(
         &self,
         left_val: Option<AplRef<APLValue>>,
         right_val: AplRef<APLValue>,
     ) -> Result<AplRef<APLValue>, AplError> {
-        let base = left_val.ok_or_else(|| AplError::runtime("⊥ needs two args".into()))?;
-        let radices: Vec<i64> = match base.as_ref() {
-            APLValue::Array(a) => a
-                .elements()
-                .iter()
-                .filter_map(|e| match e.as_ref() {
-                    APLValue::Number(n) => n.as_long().ok(),
-                    _ => None,
-                })
-                .collect(),
-            APLValue::Number(n) => match n.as_long() {
-                Ok(v) => vec![v],
-                Err(_) => return Err(AplError::runtime("⊥ base must be integer".into())),
-            },
-            _ => return Err(AplError::runtime("⊥ base must be a number".into())),
-        };
-        let digits: Vec<i64> = match right_val.as_ref() {
-            APLValue::Array(a) => a
-                .elements()
-                .iter()
-                .filter_map(|e| match e.as_ref() {
-                    APLValue::Number(n) => n.as_long().ok(),
-                    _ => None,
-                })
-                .collect(),
-            APLValue::Number(n) => match n.as_long() {
-                Ok(v) => vec![v],
-                Err(_) => return Err(AplError::runtime("⊥ digits must be integer".into())),
-            },
-            _ => return Err(AplError::runtime("⊥ digits must be a number".into())),
-        };
-        let mut total = 0i64;
-        for (r, d) in radices.iter().zip(digits.iter()) {
-            total = total * (*r).max(1) + d;
+        let a = left_val.ok_or_else(|| AplError::runtime("⊥ needs two args".into()))?;
+        let b = right_val;
+
+        // Left arg A must be rank 0 (scalar radix) or rank 1 (radix vector).
+        let a_rank = a.rank();
+        if a_rank > 1 {
+            return Err(AplError::runtime(
+                "Left argument must have rank 0 or 1".into(),
+            ));
         }
-        Ok(Rc::new(APLValue::Number(KapNumber::Long(total))))
+
+        let b_rank = b.rank();
+        // Scalar B → the digit axis is degenerate; the Kotlin `+⌿ (×⍀ …) × ⊖B`
+        // reduces to B × Σ_{j} (Π_{k=0}^{j-1} ⌽A[k]) — i.e. the prefix cumulative
+        // products of the reversed radix vector, summed.
+        if b_rank == 0 {
+            let bval = match b.as_ref() {
+                APLValue::Number(n) => n.as_long().map_err(|e| AplError::runtime(e))?,
+                _ => return Err(AplError::runtime("⊥ digits must be a number".into())),
+            };
+            let aelems = a.elements();
+            let mut rev: Vec<i64> = aelems
+                .iter()
+                .filter_map(|e| match e.as_ref() {
+                    APLValue::Number(n) => n.as_long().ok(),
+                    _ => None,
+                })
+                .collect();
+            rev.reverse();
+            let mut cum: i64 = 1;
+            let mut s: i64 = 0;
+            for &x in &rev {
+                s += cum;
+                cum = cum * if x == 0 { 1 } else { x };
+            }
+            let total = bval * s;
+            return Ok(Rc::new(APLValue::Number(KapNumber::Long(total))));
+        }
+
+        // Digit axis = axis 0 of B; its length L.
+        let b_dims = b.dimensions();
+        let l = b_dims[0];
+
+        // Build per-position weights along axis 0.
+        let weights: Vec<KapNumber> = match a.as_ref() {
+            APLValue::Number(n) => {
+                let base = n.as_long().map_err(|e| AplError::runtime(e))?;
+                let base = if base == 0 { 1 } else { base };
+                // weight[j] = base^(L-1-j)
+                let mut w = Vec::with_capacity(l);
+                for j in 0..l {
+                    let exp = (l - 1 - j) as u32;
+                    w.push(KapNumber::Long(base.pow(exp)));
+                }
+                w
+            }
+            APLValue::Array(_) => {
+                let aelems = a.elements();
+                // weight[j] = Π_{k=j+1}^{L-1} A[k]  (product of radices AFTER position j;
+                // A[j] itself is the per-digit multiplier, not part of the accumulation).
+                let mut suffix: KapNumber = KapNumber::Long(1);
+                let mut w = vec![KapNumber::Long(0); l];
+                for j in (0..l).rev() {
+                    w[j] = suffix.clone();
+                    let ak = aelems
+                        .get(j % aelems.len())
+                        .and_then(|e| match e.as_ref() {
+                            APLValue::Number(n) => n.as_long().ok(),
+                            _ => None,
+                        })
+                        .ok_or_else(|| {
+                            AplError::runtime("⊥ radix vector must contain integers".into())
+                        })?;
+                    let ak_n = if ak == 0 { KapNumber::Long(1) } else { KapNumber::Long(ak) };
+                    suffix = suffix.mul(&ak_n);
+                }
+                w
+            }
+            _ => {
+                return Err(AplError::runtime("⊥ base must be a number".into()));
+            }
+        };
+
+        // Result shape = B dims with axis 0 removed.
+        let out_dims: Vec<usize> = b_dims[1..].to_vec();
+        let out_total: usize = if out_dims.is_empty() { 1 } else { out_dims.iter().product() };
+        let b_strides = strides(&b_dims);
+
+        let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(out_total);
+        for pos in 0..out_total {
+            // coordinate over output axes (axes 1..rank-1)
+            let mut rem = pos;
+            let mut out_coords = vec![0usize; out_dims.len()];
+            for k in 0..out_dims.len() {
+                out_coords[k] = rem / b_strides[k + 1];
+                rem %= b_strides[k + 1];
+            }
+            let mut acc: KapNumber = KapNumber::Long(0);
+            for j in 0..l {
+                // flat index into B for coordinate [j, out_coords...]
+                let mut bflat = j * b_strides[0];
+                for k in 0..out_coords.len() {
+                    bflat += out_coords[k] * b_strides[k + 1];
+                }
+                let bval = match b.value_at(bflat) {
+                    APLValue::Number(n) => n.as_long().ok(),
+                    _ => None,
+                };
+                if let Some(d) = bval {
+                    acc = acc.add(&KapNumber::Long(d).mul(&weights[j]));
+                }
+            }
+            out.push(Rc::new(APLValue::Number(acc)));
+        }
+
+        if out_dims.is_empty() {
+            Ok(out.into_iter().next().unwrap_or_else(|| Rc::new(APLValue::Null)))
+        } else {
+            Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                out_dims,
+                ArrayData::Nested(out),
+            )))))
+        }
+    }
+
+    /// Encode `A ⊤ B`: represent `B` in the mixed radix `A`.
+    /// - Scalar `A`: repeated division by `A` (scalarEncode); digit count is the
+    ///   number of divisions needed by the **largest** element of `B` (min 1;
+    ///   `0` yields an empty result `⍬`). Digits are stored most-significant-first.
+    /// - Vector `A`: each element of `B` is decomposed by the radices `A`
+    ///   (most-significant-first). The result shape is `(⍴A) ,⍴ B`.
+    fn encode(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let a = left_val.ok_or_else(|| AplError::runtime("⊤ needs two args".into()))?;
+        let b = right_val;
+
+        let a_rank = a.rank();
+        if a_rank > 1 {
+            return Err(AplError::runtime(
+                "Left argument must have rank 0 or 1".into(),
+            ));
+        }
+
+        // Flatten B for iteration; record its shape for the result.
+        let b_dims = b.dimensions();
+        let b_elems: Vec<i64> = b
+            .elements()
+            .iter()
+            .filter_map(|e| match e.as_ref() {
+                APLValue::Number(n) => n.as_long().ok(),
+                _ => None,
+            })
+            .collect();
+        let b_total = b_elems.len();
+
+        if a_rank == 0 {
+            // Scalar radix: scalarEncode.
+            let radix = match a.as_ref() {
+                APLValue::Number(n) => n.as_long().map_err(|e| AplError::runtime(e))?,
+                _ => return Err(AplError::runtime("⊤ radix must be an integer".into())),
+            };
+            let radix = if radix == 0 { 1 } else { radix };
+            // digit count = max over B of divisions by radix (min 1; 0 → empty).
+            let max_val: i64 = b_elems.iter().copied().max().unwrap_or(0);
+            let digits = if max_val <= 0 {
+                0
+            } else {
+                let mut v = max_val;
+                let mut d = 0;
+                while v > 0 {
+                    v /= radix;
+                    d += 1;
+                }
+                d
+            };
+            if digits == 0 {
+                // Result shape: (0, ⍴B) \u2014 an empty leading axis.
+                let mut out_dims = vec![0usize];
+                out_dims.extend(b_dims.iter().copied());
+                return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    out_dims,
+                    ArrayData::Nested(vec![]),
+                )))));
+            }
+            // For each B element, compute digits MSB-first.
+            let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(digits * b_total);
+            for &v0 in &b_elems {
+                let mut v = v0;
+                // Build LSB-first, then reverse to MSB-first.
+                let mut lsbs = Vec::with_capacity(digits);
+                for _ in 0..digits {
+                    lsbs.push(v % radix);
+                    v /= radix;
+                }
+                lsbs.reverse();
+                for d in lsbs {
+                    out.push(Rc::new(APLValue::Number(KapNumber::Long(d))));
+                }
+            }
+            let mut out_dims = vec![digits];
+            out_dims.extend(b_dims.iter().copied());
+            Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                out_dims,
+                ArrayData::Nested(out),
+            )))))
+        } else {
+            // Vector radix: the Kotlin `⊤` calls `vectorEncode` on `(⌽A)` — the
+            // radices are reversed (most-significant-first for the output, but the
+            // successive-division peels from the reversed front, and B becomes the
+            // running quotient each step). Reversing `radices` here is equivalent.
+            let aelems = a.elements();
+            let mut radices: Vec<i64> = aelems
+                .iter()
+                .filter_map(|e| match e.as_ref() {
+                    APLValue::Number(n) => n.as_long().ok(),
+                    _ => None,
+                })
+                .collect();
+            radices.reverse();
+            let nr = radices.len();
+            let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(nr * b_total);
+            for &v0 in &b_elems {
+                let mut v = v0;
+                let mut lsbs = Vec::with_capacity(nr);
+                for &r in &radices {
+                    let r = if r == 0 { 1 } else { r };
+                    lsbs.push(v % r);
+                    v /= r;
+                }
+                lsbs.reverse();
+                for d in lsbs {
+                    out.push(Rc::new(APLValue::Number(KapNumber::Long(d))));
+                }
+            }
+            let mut out_dims = vec![nr];
+            out_dims.extend(b_dims.iter().copied());
+            Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                out_dims,
+                ArrayData::Nested(out),
+            )))))
+        }
     }
 
     /// Load a library file and evaluate it in the current namespace.
@@ -6754,9 +7346,9 @@ mod tests {
 
     #[test]
     fn eval_modulo() {
-        assert_eq!(eval("7 | 3"), "1");
-        assert_eq!(eval("8 | 3"), "2");
-        assert_eq!(eval("10 | 3"), "1");
+        assert_eq!(eval("7 | 3"), "3");
+        assert_eq!(eval("8 | 3"), "3");
+        assert_eq!(eval("10 | 3"), "3");
     }
 
     #[test]

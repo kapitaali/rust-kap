@@ -515,29 +515,30 @@ impl KapNumber {
     }
 
     /// Kap residue/modulo: `|` is the modulus such that `a = (a|b) + b * floor(a/b)`.
-    /// For positive divisor this matches `a % b`; sign follows the divisor (Kap/APL rule).
+    /// `a|b` returns the residue of `b` modulo `a` (so `a` is the modulus, `b` the value);
+    /// the result lies in `[0, |a|)` and takes the sign of `a` (Kap/APL rule). Concretely
+    /// `self|other` = `other.rem_euclid(self)`.
     pub fn modulo(&self, other: &KapNumber) -> KapNumber {
         use KapNumber::*;
         match (self, other) {
-            (Long(a), Long(b)) if *b != 0 => Long(a.rem_euclid(*b)),
-            (Long(a), BigInt(b)) if *b != num_bigint::BigInt::from(0) => {
-                // Fall through to Double for the big-int divisor case (keeps it simple
-                // and matches Kap's residue semantics for typical inputs).
-                let a = *a as f64;
+            (Long(a), Long(b)) if *a != 0 => Long(b.rem_euclid(*a)),
+            (Long(a), BigInt(b)) if *a != 0 => {
+                // `self` (the modulus) is a Long; compute `other rem_euclid self`.
                 let b = b.to_string().parse::<f64>().unwrap_or(0.0);
-                if b == 0.0 {
+                let a = *a as f64;
+                if a == 0.0 {
                     Double(0.0)
                 } else {
-                    Double(a.rem_euclid(b))
+                    Double(b.rem_euclid(a))
                 }
             }
             _ => {
                 let a = self.as_double();
                 let b = other.as_double();
-                if b == 0.0 {
+                if a == 0.0 {
                     return Double(0.0);
                 }
-                Double(a.rem_euclid(b))
+                Double(b.rem_euclid(a))
             }
         }
     }

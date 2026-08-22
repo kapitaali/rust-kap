@@ -127,6 +127,12 @@ pub enum Instr {
     /// `[axis]` follows the function. `eval_apply` unwraps it and threads the axis into
     /// the builtin (currently only scalar arithmetic functions support an axis).
     AxisApplied { func: Box<Instr>, axis: Box<Instr> },
+    /// A *value-right-arg operator* binding: `f⍤rank` (Kotlin `APLOperatorValueRightArg`,
+    /// engine.kt:494 `registerNativeOperator("⍤", RankOperator())`). Unlike an adverb,
+    /// the right operand is a VALUE expression evaluated at application time. The
+    /// evaluator resolves this as the rank operator: split each argument into cells of
+    /// rank `k` and apply `func` to every cell, disclosing the result.
+    ValueOp { func: Box<Instr>, op_name: String, operand: Box<Instr> },
     /// An empty array / nil.
     Empty,
     /// Array *pick* / selection: `array[selector]`. `selector` is an index expression
@@ -136,6 +142,21 @@ pub enum Instr {
     /// multi-element selection is a vector of the picked elements. Binds tightly to the
     /// preceding primary (postfix), so `a b (c d)[0] e` indexes `(c d)`, not the whole strand.
     Index { array: Box<Instr>, selector: Box<Instr> },
+    /// Short-circuit boolean operator: `and` / `or` (Kotlin `AndToken`/`OrToken` →
+    /// `BooleanAndFunction`/`BooleanOrFunction`). These are *not* the bitwise `∧`/`∨`
+    /// functions — they sit at the **lowest precedence** (below assignment) and evaluate
+    /// the left operand first; if its truthiness decides the result, the right operand is
+    /// NOT evaluated (lazy). The result is the *raw* operand value, not a coerced 0/1.
+    ///   `a and b` → if truthy(a) then b else a
+    ///   `a or  b` → if truthy(a) then a else b
+    BooleanOp { op: BooleanOpKind, left: Box<Instr>, right: Box<Instr> },
+}
+
+/// Which short-circuit boolean operator a `BooleanOp` represents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BooleanOpKind {
+    And,
+    Or,
 }
 
 impl Instr {
