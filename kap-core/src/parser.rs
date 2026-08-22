@@ -1727,12 +1727,21 @@ impl<'a> Parser<'a> {
             // 1-member train — wrap it so it applies to the surrounding left/right args.
             // Anything else (e.g. an array `(1 2)`, a value group `(1+2)`) is *not* a train.
             Some(Instr::Train { funcs, reverse: false, compose: false })
-        } else if funcs.iter().all(|f| matches!(f, Instr::Symbol { .. })) {
+        } else if funcs.iter().all(|f| matches!(f, Instr::Symbol { .. }))
+            && !matches!(&funcs[0], Instr::Symbol { name, namespace: None } if Self::is_primitive_op(name))
+        {
             // A parenthesised group of *only* plain symbols (e.g. `(a b c)`) is a
             // vector of symbols (a list literal), NOT a function train. This is what
             // `declare(:export (name1 name2 …))` and `declare(:const (…))` expect —
             // `declare`'s argument is a list of symbol names, not a train. (Kotlin
             // treats `(sym1 sym2 …)` of bare symbols as a symbol-array list literal.)
+            //
+            // BUT if the FIRST member is a primitive function glyph (`(⍴ x)`,
+            // `(≠ keys)`), the group is really a parenthesised *monadic application*
+            // (Kotlin parseExpr handles it via processFn with leftArgs empty).
+            // Returning None here makes the caller fall back to normal expression
+            // parsing; classifying it as a symbol list wrongly evaluates `⍴` as a
+            // variable ("undefined symbol: ⍴").
             Some(Instr::Array { elements: funcs })
         } else {
             None
@@ -2011,7 +2020,25 @@ impl<'a> Parser<'a> {
                         let tok = t.token.clone();
                         self.advance();
                         if let Token::Literal(LiteralValue::Symbol { name, namespace }) = tok {
-                            Ok(Instr::DynamicRef { name, namespace })
+                            let dr = Instr::DynamicRef { name, namespace };
+                            // A trailing adverb binds the dynamic ref as the derived
+                            // function's operand: `⍞fn¨ arr` = each over ⍞fn.
+                            if let Some(Token::Literal(LiteralValue::Symbol { name: adv, .. })) =
+                                self.peek().map(|t| &t.token)
+                            {
+                                if Self::is_adverb(adv) {
+                                    let adv = adv.clone();
+                                    self.advance();
+                                    return Ok(Instr::Derived {
+                                        func: Box::new(dr),
+                                        op: Box::new(Instr::Symbol {
+                                            name: adv,
+                                            namespace: None,
+                                        }),
+                                    });
+                                }
+                            }
+                            Ok(dr)
                         } else {
                             unreachable!()
                         }

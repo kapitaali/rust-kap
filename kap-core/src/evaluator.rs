@@ -1128,11 +1128,32 @@ impl Engine {
                     APLValue::Str(s) => s.clone(),
                     _ => return Err(AplError::runtime("⍎ requires a string argument".into())),
                 };
-                let val = self.eval_string_in_env(&s, env)?.force(self)?;
-                match val.as_ref() {
-                    APLValue::Number(_) => Ok(Rc::new(val.as_ref().clone())),
-                    _ => Err(AplError::runtime("execute result is not a number".into())),
+                // Kap's number syntax includes rationals: `⍎"3/7"` → the rational 3r7
+                // (the oracle parses `n/m` as a rational literal, not a replicate).
+                // Try the plain eval first; if it fails or yields a non-number and the
+                // string is exactly `int/int`, build the rational directly.
+                if let Ok(val) = self.eval_string_in_env(&s, env)?.force(self) {
+                    if let APLValue::Number(_) = val.as_ref() {
+                        return Ok(Rc::new(val.as_ref().clone()));
+                    }
                 }
+                let t = s.trim();
+                if let Some((num, den)) = t.split_once('/') {
+                    if let (Ok(n), Ok(d)) = (num.trim().parse::<i64>(), den.trim().parse::<i64>()) {
+                        if d != 0 {
+                            return Ok(Rc::new(APLValue::Number(
+                                KapNumber::Rational(num_rational::BigRational::new(
+                                    num_bigint::BigInt::from(n),
+                                    num_bigint::BigInt::from(d),
+                                )),
+                            )));
+                        }
+                    }
+                }
+                Err(AplError::runtime(format!(
+                    "⍎: Value cannot be parsed as a number: '{}'",
+                    s
+                )))
             }
             // `io:print` / `io:println`: write the value's *plain* (unquoted) rendering
             // to stdout and return the value unchanged. The REPL then displays the
@@ -1452,12 +1473,84 @@ impl Engine {
                 };
                 self.use_file(&name, env)
             }
-            "÷" | "/" => match left_val {
+            "÷" => match left_val {
                 None => self.scalar1(right_val, |x| x.recip(), "÷"),
                 Some(_) => self.num2(left_val, right_val, |a, b| a.div(b), "÷"),
             },
-            "=" => self.cmp2(left_val, right_val, |o| o == Ordering::Equal, "="),
-            "≠" => self.cmp2(left_val, right_val, |o| o != Ordering::Equal, "≠"),
+            // Dyadic `/` with an integer left arg is REPLICATE (Kotlin
+            // ReplicateAPLFunction): `3/7 → ⟨7 7 7⟩`, `1 0 1 2/10 20 30 40 →
+            // ⟨10 30 40 40⟩`.
+            "/" => match left_val {
+                None => self.scalar1(right_val, |x| x.recip(), "/"),
+                Some(_) => self.replicate(left_val, right_val),
+            },
+            "=" => match left_val {
+                // Monadic `=` (self-classify, Kotlin EqualsAPLFunction.eval1Arg): for each
+                // major cell of the ravelled argument, the index (in first-occurrence
+                // order) of the cell's class — using type-qualified equality (`≡` rules,
+                // so 10 ≠ 10.0). `= ⍬ → ⍬`.
+                None => {
+                    let v = right_val.force(self)?;
+                    // A Str iterates as its characters (oracle: `= "abc" → ⟨0 1 2⟩`).
+                    let elems: Vec<AplRef<APLValue>> = match v.as_ref() {
+                        APLValue::Array(a) => a.elements(),
+                        APLValue::Str(s) => {
+                            s.chars().map(|c| Rc::new(APLValue::Char(c))).collect()
+                        }
+                        other => vec![Rc::new(other.clone())],
+                    };
+                    if elems.is_empty() {
+                        return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                            vec![0],
+                            ArrayData::Long(vec![]),
+                        )))));
+                    }
+                    // First-occurrence classes with type-strict comparison.
+                    let mut classes: Vec<AplRef<APLValue>> = Vec::new();
+                    let mut out: Vec<i64> = Vec::with_capacity(elems.len());
+                    for e in &elems {
+                        let found = classes.iter().position(|c| {
+                            Self::type_equal(c.as_ref(), e.as_ref())
+                        });
+                        match found {
+                            Some(i) => out.push(i as i64),
+                            None => {
+                                out.push(classes.len() as i64);
+                                classes.push(e.clone());
+                            }
+                        }
+                    }
+                    Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        vec![out.len()],
+                        ArrayData::Long(out),
+                    )))))
+                }
+                Some(_) => self.cmp2(left_val, right_val, |o| o == Ordering::Equal, "="),
+            },
+            "≠" => match left_val {
+                // Monadic `≠` (unique-mask, Kotlin NotEqualsAPLFunction.eval1Arg):
+                // 1 for the first occurrence of each distinct element, else 0.
+                None => {
+                    let v = right_val.force(self)?;
+                    let elems: Vec<AplRef<APLValue>> = match v.as_ref() {
+                        APLValue::Array(a) => a.elements(),
+                        APLValue::Str(s) => {
+                            s.chars().map(|c| Rc::new(APLValue::Char(c))).collect()
+                        }
+                        other => vec![Rc::new(other.clone())],
+                    };
+                    let mut out: Vec<i64> = Vec::with_capacity(elems.len());
+                    for (i, e) in elems.iter().enumerate() {
+                        let seen = elems[..i].iter().any(|p| Self::type_equal(p.as_ref(), e.as_ref()));
+                        out.push(if seen { 0 } else { 1 });
+                    }
+                    Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        vec![out.len()],
+                        ArrayData::Long(out),
+                    )))))
+                }
+                Some(_) => self.cmp2(left_val, right_val, |o| o != Ordering::Equal, "≠"),
+            },
             "<" => self.cmp2(left_val, right_val, |o| o == Ordering::Less, "<"),
             ">" => self.cmp2(left_val, right_val, |o| o == Ordering::Greater, ">"),
             "≤" => self.cmp2(left_val, right_val, |o| o != Ordering::Greater, "≤"),
@@ -5786,6 +5879,53 @@ impl Engine {
             }
             other => Err(AplError::runtime(format!("{} requires booleans, got {}", sym, other.class_name()))),
         }
+    }
+
+    /// Dyadic replicate `A / B` (Kotlin ReplicateAPLFunction): each element of B is
+    /// repeated according to the corresponding integer in A (0 drops, negative is an
+    /// error). Scalar A extends. Result is the flattened repetition (rank 1 for a
+    /// vector B; per-axis replication of higher ranks is out of scope here).
+    fn replicate(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let l = left_val.ok_or_else(|| AplError::runtime("/ needs two args".into()))?;
+        let counts: Vec<i64> = match l.force(self)?.as_ref() {
+            APLValue::Array(a) => {
+                let mut v = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    match e.as_ref() {
+                        APLValue::Number(n) => v.push(n.as_long().map_err(|e| AplError::runtime(e))?),
+                        _ => return Err(AplError::runtime("/: left argument must be integers".into())),
+                    }
+                }
+                v
+            }
+            APLValue::Number(n) => vec![n.as_long().map_err(|e| AplError::runtime(e))?],
+            _ => return Err(AplError::runtime("/: left argument must be integers".into())),
+        };
+        if counts.iter().any(|&c| c < 0) {
+            return Err(AplError::runtime("Negative number of copies requested".into()));
+        }
+        let items: Vec<AplRef<APLValue>> = match right_val.as_ref() {
+            APLValue::Array(a) => a.elements(),
+            other => vec![Rc::new(other.clone())],
+        };
+        // Scalar right extends to the length of counts.
+        let n = counts.len().max(items.len());
+        let mut out: Vec<AplRef<APLValue>> = Vec::new();
+        for i in 0..n {
+            let c = if counts.len() == 1 { counts[0] } else { counts[i] };
+            let item = if items.len() == 1 { items[0].clone() } else { items[i].clone() };
+            for _ in 0..c {
+                out.push(item.clone());
+            }
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![out.len()],
+            ArrayData::Nested(out),
+        )))))
     }
 
     /// Bitwise `∵` operator (Kotlin bitwise_ops.kt BitwiseOp). Derives the *bitwise*
