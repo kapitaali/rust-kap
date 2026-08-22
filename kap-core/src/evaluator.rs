@@ -4808,9 +4808,98 @@ impl Engine {
                 if matches!(s.as_ref(), APLValue::Null) {
                     return Ok(b);
                 }
-                self.pick(&b, &s)
+                self.squad(&b, &s)
             }
         }
+    }
+
+    /// Dyadic `⌷` (squad / index selection, oracle-native semantics):
+    /// each element of the left argument indexes the corresponding axis of `B`;
+    /// axes without a specifier are kept WHOLE (`1 ⌷ 3 3⍴⍳9` → row `⟨3 4 5⟩`).
+    /// A full-length numeric vector is a coordinate pick (`(2 2) ⌷ m` → `8`,
+    /// `2 1 ⌷ m` → `7`). Scalars select-and-drop their axis (`2 ⌷ v` → `3`).
+    /// Negative indices count from the end (shared `check_and_adjust_selected_index`).
+    fn squad(
+        &self,
+        b_val: &AplRef<APLValue>,
+        sel_val: &AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let b = b_val.force(self)?;
+        // Target -> (dims, flat elements). A Str is a rank-1 char vector.
+        let (bdims, belems): (Vec<usize>, Vec<AplRef<APLValue>>) = match b.as_ref() {
+            APLValue::Array(arr) => (arr.dimensions.clone(), arr.elements()),
+            APLValue::Str(s) => (
+                vec![s.chars().count()],
+                s.chars().map(|c| Rc::new(APLValue::Char(c)) as AplRef<APLValue>).collect(),
+            ),
+            other => (vec![], vec![Rc::new(other.clone())]),
+        };
+        let r = bdims.len();
+        // Row-major strides for B.
+        let mut stride = vec![1usize; r];
+        if r > 1 {
+            for k in (0..r - 1).rev() {
+                stride[k] = stride[k + 1] * bdims[k + 1];
+            }
+        }
+        // Per-axis selections: Some(index) fixes the axis, None keeps it whole.
+        // Null specs also mean "keep whole" (Kotlin makeAllIndexList).
+        let mut fixed: Vec<Option<usize>> = vec![None; r];
+        let sel_elems: Vec<AplRef<APLValue>> = match sel_val.as_ref() {
+            APLValue::Array(arr) => arr.elements(),
+            other => vec![Rc::new(other.clone())],
+        };
+        if sel_elems.len() > r {
+            return Err(AplError::runtime(format!(
+                "too many index axes ({} specifiers for rank-{})",
+                sel_elems.len(),
+                r
+            )));
+        }
+        for (k, sp) in sel_elems.iter().enumerate() {
+            let sp = sp.force(self)?;
+            if matches!(sp.as_ref(), APLValue::Null) {
+                continue; // keep whole
+            }
+            let i = self.index_to_i64(sp.as_ref())?;
+            let adj = check_and_adjust_selected_index(i, bdims[k])?;
+            fixed[k] = Some(adj);
+        }
+        // Kept axes (whole) in order; their dims form the result shape.
+        let out_dims: Vec<usize> = (0..r).filter(|&k| fixed[k].is_none()).map(|k| bdims[k]).collect();
+        let base: usize = fixed
+            .iter()
+            .enumerate()
+            .filter_map(|(k, f)| f.map(|v| v * stride[k]))
+            .sum();
+        if out_dims.is_empty() {
+            // Full coordinate: single element.
+            return Ok(Rc::new(belems[base].as_ref().clone()));
+        }
+        // Iterate the kept axes row-major, gathering elements.
+        let kept_axes: Vec<usize> = (0..r).filter(|&k| fixed[k].is_none()).collect();
+        let total: usize = out_dims.iter().product();
+        let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(total);
+        let mut counters = vec![0usize; kept_axes.len()];
+        for _ in 0..total {
+            let mut flat = base;
+            for (j, &k) in kept_axes.iter().enumerate() {
+                flat += counters[j] * stride[k];
+            }
+            out.push(Rc::new(belems[flat].as_ref().clone()));
+            // odometer increment (last kept axis fastest)
+            for j in (0..counters.len()).rev() {
+                counters[j] += 1;
+                if counters[j] < out_dims[j] {
+                    break;
+                }
+                counters[j] = 0;
+            }
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            out_dims,
+            ArrayData::Nested(out),
+        )))))
     }
     /// coordinate* into `B` (a scalar index for rank-1 `B`, a coordinate vector for
     /// higher-rank `B`), with negative-index support (`¯1` = last). Mirrors Kotlin
