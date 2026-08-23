@@ -1869,26 +1869,11 @@ impl<'a> Parser<'a> {
         if funcs.len() >= 2 && (all_funcs || left_bind) && (funcs.len() >= 3 || two_train || left_bind) {
             Some(Instr::Train { funcs, reverse: false, compose: false })
         } else if funcs.len() == 1 && Self::is_function_expr(&funcs[0]) {
-            // A single parenthesised function `(-)`, `(-⍛+)`, `((×-))` is a valid
-            // 1-member train — wrap it so it applies to the surrounding left/right args.
-            // Anything else (e.g. an array `(1 2)`, a value group `(1+2)`) is *not* a train.
             Some(Instr::Train { funcs, reverse: false, compose: false })
         } else if !funcs.is_empty()
             && funcs.iter().all(|f| matches!(f, Instr::Symbol { .. }))
             && !matches!(&funcs[0], Instr::Symbol { name, namespace: None } if Self::is_primitive_op(name))
         {
-            // A parenthesised group of *only* plain symbols (e.g. `(a b c)`) is a
-            // vector of symbols (a list literal), NOT a function train. This is what
-            // `declare(:export (name1 name2 …))` and `declare(:const (…))` expect —
-            // `declare`'s argument is a list of symbol names, not a train. (Kotlin
-            // treats `(sym1 sym2 …)` of bare symbols as a symbol-array list literal.)
-            //
-            // BUT if the FIRST member is a primitive function glyph (`(⍴ x)`,
-            // `(≠ keys)`), the group is really a parenthesised *monadic application*
-            // (Kotlin parseExpr handles it via processFn with leftArgs empty).
-            // Returning None here makes the caller fall back to normal expression
-            // parsing; classifying it as a symbol list wrongly evaluates `⍴` as a
-            // variable ("undefined symbol: ⍴").
             Some(Instr::Array { elements: funcs })
         } else {
             None
@@ -1910,7 +1895,7 @@ impl<'a> Parser<'a> {
                 Self::is_primitive_op(name)
                     || name == "⊢"
                     || name == "⊣"
-                    || namespace.is_some()
+                    || (namespace.is_some() && namespace.as_deref() != Some("keyword"))
             }
             Instr::Derived { .. } | Instr::OpCall { .. } | Instr::Lambda { .. } | Instr::Train { .. } | Instr::ValueOp { .. } => true,
             _ => false,
@@ -2101,6 +2086,14 @@ impl<'a> Parser<'a> {
 
     /// Whether an expression is a *function* suitable for a train operand.
     fn is_function_expr(e: &Instr) -> bool {
+        // Keyword-namespaced symbols (`:export`, `:const`, `:local`) are *values*
+        // (symbol-list elements for `declare`), never functions — a lone `(:export)`
+        // or `:export` member must not be wrapped as a 1-train.
+        if let Instr::Symbol { namespace, .. } = e {
+            if namespace.as_deref() == Some("keyword") {
+                return false;
+            }
+        }
         matches!(
             e,
             Instr::Symbol { .. }

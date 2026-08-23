@@ -451,6 +451,17 @@ impl NamespaceRegistry {
                 return Some(v);
             }
         }
+        // Fall back to the `kap` namespace (the standard-library namespace). Kap's
+        // `base-functions.kap`/`structure.kap`/`math*.kap` define their symbols in the
+        // `kap` namespace via `namespace("kap")`; the user session can reference those
+        // symbols bare (Kotlin's `kap` namespace is the default user-visible one). This
+        // mirrors the `default` fallback above — it only triggers when `kap` is not
+        // already the current/imported namespace.
+        if cur != "kap" {
+            if let Some(v) = self.ns_lookup("kap", name) {
+                return Some(v);
+            }
+        }
         None
     }
     /// Collect names bound to `UserFn` values across all namespaces (used by the parser's
