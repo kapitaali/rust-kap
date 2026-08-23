@@ -393,6 +393,13 @@ impl<'a> Parser<'a> {
                             left_args.push(self.expand_macro(&m)?);
                             continue;
                         }
+                        // defsyntax/defsyntaxsub DEFINITIONS are keyword-forms only
+                        // legacy parse_expr knows; bail to it from statement start
+                        // BEFORE the name can strand as an operand.
+                        if matches!(name.as_str(), "defsyntax" | "defsyntaxsub") {
+                            self.pos = start;
+                            return self.parse_expr();
+                        }
                     }
                     // parser.kt:961–964: a Name immediately followed by `⇐` is the
                     // SHORT-FORM fn definition (`name ⇐ rhs`) — handled BEFORE any
