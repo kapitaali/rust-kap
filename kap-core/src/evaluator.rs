@@ -12,7 +12,7 @@ use crate::ast::{SyntaxMacro, Instr, BooleanOpKind};
 use crate::lexer::tokenise;
 use crate::number::KapNumber;
 use crate::parser;
-use crate::token::LiteralValue;
+use crate::token::{LiteralValue, Token};
 use unicode_segmentation::UnicodeSegmentation;
 use std::cmp::Ordering;
 use libm::lgamma;
@@ -433,6 +433,66 @@ impl Engine {
                     last = self.eval_instr(&instr, env)?;
                 }
                 None => break,
+            }
+        }
+        Ok(last)
+    }
+
+    /// Like `eval_string_in_env`, but a parse/eval error on one statement does NOT abort the
+    /// whole input — it is reported (to stderr) and evaluation continues with the next
+    /// statement. Mirrors Real Kap's `use()` behaviour, where a single failing line (e.g. a
+    /// `declare(:const …)` that conflicts with a previously-defined constant) does not prevent
+    /// later definitions in the same file from taking effect. The final result is the last
+    /// successfully-evaluated statement, or `Null` if every statement errored.
+    fn eval_string_in_env_tolerant(
+        &self,
+        src: &str,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let toks = tokenise(src);
+        let mut pos = 0;
+        let mut last: AplRef<APLValue> = Rc::new(APLValue::Null);
+        loop {
+            let fn_names: Vec<String> = env.function_names();
+            let op_names: Vec<String> = env.operator_names();
+            let macros = self.macros.borrow().clone();
+            let mut p = parser::Parser {
+                toks: &toks,
+                pos,
+                known_functions: fn_names,
+                known_ops: op_names,
+                macros,
+            };
+            match p.parse_statements() {
+                Ok(Some(instr)) => {
+                    pos = p.pos;
+                    match self.eval_instr(&instr, env) {
+                        Ok(v) => last = v,
+                        Err(e) => {
+                            eprintln!("warning: use(): statement failed: {}", e);
+                        }
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    // Parse error: advance past this statement so we don't loop forever on a
+                    // broken token stream. Best-effort skip to the next newline/separator.
+                    eprintln!("warning: use(): statement failed: {}", e);
+                    let mut skipped = false;
+                    while pos < toks.len() {
+                        match &toks[pos].token {
+                            Token::Newline | Token::StatementSeparator | Token::ListSeparator => {
+                                pos += 1;
+                                skipped = true;
+                                break;
+                            }
+                            _ => pos += 1,
+                        }
+                    }
+                    if !skipped {
+                        break;
+                    }
+                }
             }
         }
         Ok(last)
@@ -7719,8 +7779,9 @@ impl Engine {
             name: basename,
         };
         // Evaluate the file in the *current* namespace so its top-level
-        // `∇`/`⇐` definitions land where the `use` call appears.
-        self.eval_string_in_env(&content, env)
+        // `∇`/`⇐` definitions land where the `use` call appears. Per-statement errors are
+        // tolerated (mirrors Real Kap: one bad line doesn't abort the whole library file).
+        self.eval_string_in_env_tolerant(&content, env)
     }
 }
 
