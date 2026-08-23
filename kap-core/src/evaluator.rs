@@ -563,8 +563,19 @@ impl Engine {
                         namespace: Some("keyword".to_string()),
                     }));
                 }
-                let found = env
-                    .lookup(name, namespace)
+                let bound = env.lookup(name, namespace);
+                // P1-M4 (common.kt:173 IllegalContextForFunction): an UNBOUND primitive
+                // in value position has no arguments to bind. Fires BEFORE the lookup
+                // error because primitive glyphs are not pre-bound in the environment.
+                // A user/library REBINDING of the name (stdlib shadows ⊥/⊤) wins. The
+                // parser cannot reject this — an ambivalent fn VALUE is legal inside fn
+                // contexts (`foo ⇐ -`, train members) — so it fires at eval.
+                if bound.is_none() && namespace.is_none() && Self::is_primitive_name(name) {
+                    return Err(AplError::runtime(
+                        "No arguments specified for function".to_string(),
+                    ));
+                }
+                let found = bound
                     .ok_or_else(|| AplError::runtime(format!("undefined symbol: {}", name)))?;
                 // B2 (code_analysis_03): an operator is never a first-class value in Real Kap.
                 // Kotlin resolves names function-first, then throws InvalidOperatorArgument for
@@ -595,6 +606,20 @@ impl Engine {
                 let mut vals = Vec::with_capacity(elements.len());
                 for e in elements {
                     vals.push(self.eval_instr(e, env)?);
+                }
+                // P1-M4 (common.kt:173): a strand whose LAST member is an unbound
+                // primitive (`c +`) is Kotlin's "fn with leftArgs and no right arg"
+                // case, which errors `No arguments specified for function` (oracle-
+                // verified). The parser cannot distinguish it from a legitimate
+                // fn-value strand, so it is detected here.
+                if let Some(last) = elements.last() {
+                    if let Instr::Symbol { name, namespace: None } = last {
+                        if Self::is_primitive_name(name) && env.lookup(name, &None).is_none() {
+                            return Err(AplError::runtime(
+                                "No arguments specified for function".to_string(),
+                            ));
+                        }
+                    }
                 }
                 Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
                     vec![vals.len()],

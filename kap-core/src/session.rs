@@ -121,9 +121,13 @@ mod tests {
     #[test]
     fn parse_errors_carry_real_position() {
         // A parse error must report the real line/col, not 0:0.
+        // (`c +` used to be the probe, but under Kotlin semantics it is NOT a parse
+        // error — it constructs a left-bind/ambivalent-fn value and fails at eval;
+        // oracle: `c +` → runtime "No arguments specified for function". So use a
+        // genuinely malformed token that errors in BOTH parsers.)
         let e = Engine::new();
-        match e.eval_string("a ← 3\nb ← 4\nc +") {
-            Err(AplError::Parse { line, col, .. }) => assert_eq!((line, col), (3, 4)),
+        match e.eval_string("a ← 3\nb ← 4\n1 @") {
+            Err(AplError::Parse { line, col, .. }) => assert_eq!((line, col), (3, 3)),
             other => panic!("expected Parse error, got {:?}", other),
         }
     }

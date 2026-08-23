@@ -279,7 +279,9 @@ impl<'a> Parser<'a> {
                             return self.parse_expr();
                         }
                     };
-                    if Self::is_function_expr(&group) && !self.at_statement_boundary() {
+                    if Self::is_function_expr(&group) {
+                        // parser.kt:984 feeds a function-valued group to processFn
+                        // unconditionally; with no data following, :460 yields fn VALUE.
                         return self.finish_fn_call(group, &mut left_args);
                     }
                     // Value group: restore nothing (parse_primary consumed it correctly)
@@ -319,11 +321,21 @@ impl<'a> Parser<'a> {
                         .clone()
                         .map(|ns| format!("{}:{}", ns, name))
                         .unwrap_or_else(|| name.clone());
-                    // Primitives/operators still need the legacy dyadic-loop machinery —
-                    // fall back from statement start until M4 ports parseOperator.
-                    if Self::is_primitive_op(&qual) || Self::is_adverb(&name) {
-                        self.pos = start;
-                        return self.parse_expr();
+                    // P1-M4: an OPERATOR name (adverb or user op) in the MAIN dispatch
+                    // loop is invalid — Kotlin throws InvalidOperatorArgument here
+                    // (parser.kt:970). Operators are consumed only inside parseOperator,
+                    // bound to a function BEFORE any data operand (`data ⌸ fn`).
+                    if namespace.is_none()
+                        && (Self::is_adverb(&name) || self.known_ops.iter().any(|n| n == &name))
+                    {
+                        return Err(self.err(&format!("Operator without left function: {}", name)));
+                    }
+                    // P1-M4: primitives now flow through processFn + parseOperator
+                    // (parser.kt:969 → :437), replacing the blanket fallback.
+                    if Self::is_primitive_op(&qual) {
+                        self.advance();
+                        let fn_instr = Instr::Symbol { name, namespace };
+                        return self.finish_fn_call(fn_instr, &mut left_args);
                     }
                     let is_fn = namespace.is_some()
                         || self.is_known_fn(&name, &namespace)
@@ -358,6 +370,81 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// P1-M4 port of Kotlin `parseOperator` (:1273–1319): loop over trailing operator
+    /// bindings on a just-parsed function. Order per Kotlin: optional `[axis]` first,
+    /// then adverb (Derived) / user-operator (OpCall) binding. An operator followed by
+    /// NOTHING is incomplete application (B1 semantics).
+    fn bind_operators_kotlin(&mut self, mut cur: Instr) -> Result<Instr, AplError> {
+        loop {
+            self.skip_newlines();
+            // parseAxis (:1321): `f[axis]` wraps into AxisApplied.
+            if let Some(t) = self.peek() {
+                if matches!(t.token, Token::OpenBracket) {
+                    let axis_ok = matches!(
+                        &cur,
+                        Instr::Symbol { name, .. }
+                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪")
+                    );
+                    if axis_ok {
+                        self.advance();
+                        let axis = self.parse_apply()?;
+                        // Consume `]` — without this the closer blocks the boundary
+                        // check and the right argument never parses.
+                        self.expect(Token::CloseBracket, "expected ] after axis specifier")?;
+                        cur = Instr::AxisApplied {
+                            func: Box::new(cur),
+                            axis: Box::new(axis),
+                        };
+                        continue;
+                    }
+                }
+            }
+            let binding = match self.peek().map(|t| t.token.clone()) {
+                Some(Token::Literal(LiteralValue::Symbol { name, namespace }))
+                    if Self::is_adverb(&name) =>
+                {
+                    Some((name, namespace, false))
+                }
+                Some(Token::Literal(LiteralValue::Symbol { name, namespace }))
+                    if self.known_ops.iter().any(|n| n == &name) =>
+                {
+                    Some((name, namespace, true))
+                }
+                _ => None,
+            };
+            let (op_name, ns, is_user_op) = match binding {
+                Some(b) => b,
+                None => break,
+            };
+            self.advance();
+            self.skip_newlines();
+            if is_user_op {
+                let right_fn = if self.next_is_function_token() && !self.at_statement_boundary() {
+                    Some(Box::new(self.parse_primary()?))
+                } else {
+                    None
+                };
+                if right_fn.is_none() && self.at_statement_boundary() {
+                    return Err(self.err(&format!("Operator without left function: {}", op_name)));
+                }
+                cur = Instr::OpCall {
+                    op: Box::new(Instr::Symbol { name: op_name, namespace: ns }),
+                    left_fn: Box::new(cur),
+                    right_fn,
+                };
+            } else {
+                if self.at_statement_boundary() {
+                    return Err(self.err(&format!("Operator without left function: {}", op_name)));
+                }
+                cur = Instr::Derived {
+                    func: Box::new(cur),
+                    op: Box::new(Instr::Symbol { name: op_name, namespace: ns }),
+                };
+            }
+        }
+        Ok(cur)
+    }
+
     /// P1-M3 port of Kotlin `processFn` (:432–495) valence resolution. Called with the
     /// just-parsed function-shaped instr and the CURRENT accumulated left args:
     /// - right empty & left empty  → the fn itself (ambivalent fn value, :460)
@@ -366,6 +453,8 @@ impl<'a> Parser<'a> {
     /// - right value & left n      → FunctionCall2Arg, ⍺ = the SINGLE left arg or a
     ///   strand of several (makeResultList semantics, :474)
     fn finish_fn_call(&mut self, fn_instr: Instr, left_args: &mut Vec<Instr>) -> Result<Instr, AplError> {
+        // parseOperator FIRST (parser.kt:437): bind axis / adverbs / user operators.
+        let fn_instr = self.bind_operators_kotlin(fn_instr)?;
         self.skip_newlines();
         let has_right = !self.at_statement_boundary()
             && !matches!(
