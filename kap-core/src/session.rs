@@ -65,6 +65,13 @@ impl Session {
     pub fn set_lib_paths<S: AsRef<std::path::Path>>(&self, paths: &[S]) {
         self.engine.set_lib_paths(paths);
     }
+
+    /// Load the standard library at startup (`use("standard-lib.kap")`), mirroring
+    /// Kotlin repl-builder.kt `loadStdLibrary`. Errors are returned to the caller —
+    /// kap-cli decides whether a failed stdlib load is fatal.
+    pub fn load_standard_lib(&self) -> Result<AplRef<APLValue>, AplError> {
+        self.eval("use(\"standard-lib.kap\")")
+    }
 }
 
 #[cfg(test)]

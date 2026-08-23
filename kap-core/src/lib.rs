@@ -538,6 +538,12 @@ pub struct Engine {
     /// `--lib-path` CLI flag). Consulted first by `use(...)` when resolving a file
     /// by basename — the port's analog of kap-jvm-text's `--lib-path`.
     pub lib_paths: std::rc::Rc<std::cell::RefCell<Vec<std::path::PathBuf>>>,
+    /// Registered `defsyntax` / `defsyntaxsub` macros (session-global, like Kotlin's
+    /// `engine.customSyntaxSubRules`). `defsyntax` inside a `use(...)` file registers
+    /// here so the macro is visible to statements parsed *after* that file loads. Keyed
+    /// by bare trigger name (namespace stripped) — sufficient for the stdlib's usage.
+    pub macros:
+        std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, crate::ast::SyntaxMacro>>>,
 }
 
 impl Engine {

@@ -8,7 +8,7 @@
 //! (`λ(params) body`). More in later phases.
 
 use crate::array::{ArrayData, KapArray};
-use crate::ast::{Instr, BooleanOpKind};
+use crate::ast::{SyntaxMacro, Instr, BooleanOpKind};
 use crate::lexer::tokenise;
 use crate::number::KapNumber;
 use crate::parser;
@@ -417,11 +417,15 @@ impl Engine {
             // body that references its own name parses as an application (recursion).
             let fn_names: Vec<String> = env.function_names();
             let op_names: Vec<String> = env.operator_names();
+            // Snapshot the live macro registry so a `defsyntax` defined earlier in the
+            // session (e.g. inside an earlier `use()`) is visible to later statements.
+            let macros = self.macros.borrow().clone();
             let mut p = parser::Parser {
                 toks: &toks,
                 pos,
                 known_functions: fn_names,
                 known_ops: op_names,
+                macros,
             };
             match p.parse_statements()? {
                 Some(instr) => {
@@ -517,6 +521,23 @@ impl Engine {
                     Err(AplError::runtime("assignment target must be a symbol".into()))
                 }
             }
+            Instr::DestructAssign { names, value } => {
+                // `(a b c) ← expr` — bind each LHS symbol to the corresponding element of
+                // the (vector) RHS. Mirrors Kap's multi-target assignment.
+                let v = self.eval_instr(value, env)?;
+                let elems = v.elements();
+                if elems.len() != names.len() {
+                    return Err(AplError::runtime(format!(
+                        "destructuring assignment expected {} values, got {}",
+                        names.len(),
+                        elems.len()
+                    )));
+                }
+                for (i, (nm, ns)) in names.iter().enumerate() {
+                    env.assign(nm, ns, elems[i].clone());
+                }
+                Ok(v)
+            }
             Instr::AxisApplied { func, axis } => {
                 // An axis-applied function always appears as the `fn_expr` of an `Apply`,
                 // where `eval_apply` unwraps it. Reached directly only as a stray top-level
@@ -595,6 +616,52 @@ impl Engine {
                     }
                 }
                 Ok(Rc::new(APLValue::Null))
+            }
+            Instr::DefSyntax {
+                name,
+                namespace,
+                rules,
+                body,
+            } => {
+                // Register a parse-time macro (Kotlin `CustomSyntax`). Keyed by bare trigger
+                // name; the parser's macro table drives inline expansion at parse time.
+                let qual = match namespace {
+                    Some(ns) => format!("{}:{}", ns, name),
+                    None => name.clone(),
+                };
+                let macro_def = SyntaxMacro {
+                    rules: rules.clone(),
+                    body: body.clone(),
+                };
+                self.macros.borrow_mut().insert(qual, macro_def);
+                Ok(Rc::new(APLValue::Null))
+            }
+            Instr::DefSyntaxSub {
+                name,
+                namespace,
+                rules,
+                body,
+            } => {
+                let qual = match namespace {
+                    Some(ns) => format!("{}:{}", ns, name),
+                    None => name.clone(),
+                };
+                let macro_def = SyntaxMacro {
+                    rules: rules.clone(),
+                    body: body.clone(),
+                };
+                self.macros.borrow_mut().insert(qual, macro_def);
+                Ok(Rc::new(APLValue::Null))
+            }
+            Instr::MacroExpand { body, bindings } => {
+                // Evaluate each binding instr to a value, define the bound var in a child env,
+                // then evaluate the macro body (Kotlin `CallWithVarInstruction`).
+                let child = Environment::child(&env);
+                for (var, instr) in bindings {
+                    let v = self.eval_instr(instr, env)?;
+                    child.define(var, &None, v);
+                }
+                self.eval_instr(body, &child)
             }
             Instr::Train { .. } => {
                 // A standalone train (no args) is an error; trains apply via eval_apply.
@@ -885,12 +952,15 @@ impl Engine {
         }
         // Resolve the function: a builtin name, a direct lambda, or a user function
         // bound to a symbol.
-        let fn_name: Option<String> = match fn_expr {
-            Instr::Symbol { name, namespace } => Some(match namespace {
-                Some(ns) => format!("{}:{}", ns, name),
-                None => name.clone(),
-            }),
-            _ => None,
+        let (fn_name, fn_namespace): (Option<String>, Option<Option<String>>) = match fn_expr {
+            Instr::Symbol { name, namespace } => (
+                Some(match namespace {
+                    Some(ns) => format!("{}:{}", ns, name),
+                    None => name.clone(),
+                }),
+                Some(namespace.clone()),
+            ),
+            _ => (None, None),
         };
         let lambda = match fn_expr {
             Instr::Lambda { params, body } => Some((
@@ -1074,6 +1144,37 @@ impl Engine {
                 return Err(AplError::runtime("only symbol/lambda functions supported yet".into()));
             }
         };
+        // User/native function definitions take precedence over hardcoded builtins
+        // (Kap semantics: a library `∇`/`⇐` redefinition of a primitive name — e.g.
+        // `math-kap.kap`'s `⊥`/`⊤` — shadows the builtin in that namespace). Only
+        // consult the builtin table when no user/native function is bound to this name.
+        if let Some(ns_opt) = fn_namespace.clone().flatten() {
+            if let Some(v) = env.lookup(&name, &Some(ns_opt)) {
+                if let APLValue::UserFn { params, split, body, env: fenv } = v.as_ref() {
+                    return self.apply_user_fn(
+                        params,
+                        *split,
+                        body,
+                        left,
+                        right,
+                        fenv,
+                        Some(&name),
+                    );
+                }
+            }
+        } else if let Some(v) = env.lookup(&name, &None) {
+            if let APLValue::UserFn { params, split, body, env: fenv } = v.as_ref() {
+                return self.apply_user_fn(
+                    params,
+                    *split,
+                    body,
+                    left,
+                    right,
+                    fenv,
+                    Some(&name),
+                );
+            }
+        }
         // For dyadic, force left then right; for monadic, only right.
         let right_val = self.eval_instr(right, env)?.force(self)?;
         let left_val = match left {
@@ -1274,6 +1375,51 @@ impl Engine {
                     ]),
                 );
                 Ok(Rc::new(APLValue::Array(Rc::new(arr))))
+            }
+            // `int:unwindProtect` (monadic, Kotlin UnwindProtectAPLFunction): the argument
+            // is a 2-element vector `[fn, handler]` of lambdas. Run fn (⍵=⍬); run handler
+            // afterwards; if fn threw a Kap error, rethrow it after the handler. Used by
+            // structure.kap's `defsyntax unwindProtect`, which the stdlib needs at load.
+            "int:unwindProtect" => {
+                // Kotlin strands `int:unwindProtect statement handler` into a 2-vector
+                // `[statement, handler]` (monadic call on a stranded pair). The stdlib's
+                // `defsyntax unwindProtect (:function statement :function handler) {
+                // int:unwindProtect statement handler }` relies on this. So accept BOTH:
+                //   - monadic: right_val is the 2-element vector, OR
+                //   - dyadic (stranded): left_val=statement, right_val=handler.
+                let arg: AplRef<APLValue> = match left_val {
+                    Some(lv) => {
+                        // Stranded form: build the 2-vector [left, right].
+                        let l = lv.force(self)?;
+                        let r = right_val.force(self)?;
+                        Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                            vec![2],
+                            ArrayData::Nested(vec![l, r]),
+                        ))))
+                    }
+                    None => right_val.force(self)?,
+                };
+                let parts: Vec<AplRef<APLValue>> = match arg.as_ref() {
+                    APLValue::Array(a) => a.elements(),
+                    _ => return Err(AplError::runtime(
+                        "Invalid dimensions in unwindProtect call".into(),
+                    )),
+                };
+                if parts.len() != 2 {
+                    return Err(AplError::runtime(
+                        "Invalid dimensions in unwindProtect call".into(),
+                    ));
+                }
+                let null = Rc::new(APLValue::Null);
+                // Run the main fn (⍵=⍬); capture but don't propagate yet.
+                let main_res: Result<AplRef<APLValue>, AplError> = {
+                    let fn_instr = self.apl_to_instr(parts[0].as_ref())?;
+                    self.apply_fn_instr(&fn_instr, None, &null, env)
+                };
+                // Handler always runs (⍵=⍬).
+                let handler_instr = self.apl_to_instr(parts[1].as_ref())?;
+                self.apply_fn_instr(&handler_instr, None, &null, env)?;
+                main_res
             }
             // `int:throwNative` (dyadic): `Symbol int:throwNative Message` — throw a native
             // Kap exception whose type is named by the left symbol and whose message is the

@@ -150,6 +150,38 @@ pub enum Instr {
     ///   `a and b` → if truthy(a) then b else a
     ///   `a or  b` → if truthy(a) then a else b
     BooleanOp { op: BooleanOpKind, left: Box<Instr>, right: Box<Instr> },
+    /// `defsyntax name (rules…) { body }` — register a parse-time macro. The macro
+    /// definition is evaluated at runtime (into the engine's syntax registry) and
+    /// produces no value. The body `Instr` is stored so it can be re-parsed/expanded
+    /// when the macro trigger name is later encountered as a call.
+    DefSyntax {
+        name: String,
+        namespace: Option<String>,
+        rules: Vec<SyntaxRule>,
+        body: std::rc::Rc<Instr>,
+    },
+    /// `defsyntaxsub name (rules…) { body }` — a sub-rule used by a parent macro's
+    /// `:repeat (sym subName)` clause. Registered into the engine's sub-syntax registry.
+    DefSyntaxSub {
+        name: String,
+        namespace: Option<String>,
+        rules: Vec<SyntaxRule>,
+        body: std::rc::Rc<Instr>,
+    },
+    /// Destructuring assignment `(a b c) ← expr` — bind each LHS symbol to the
+    /// corresponding element of the (vector) RHS (Kotlin `AssignmentInstruction` with
+    /// multiple targets). `names` are the bare/grouped targets in order.
+    DestructAssign {
+        names: Vec<(String, Option<String>)>,
+        value: Box<Instr>,
+    },
+    /// A macro *expansion*: splice `body` with `bindings` (var name → already-parsed
+    /// `Instr`) defined in a child scope. Faithful port of Kotlin's
+    /// `CallWithVarInstruction` (built by `processCustomSyntax`).
+    MacroExpand {
+        body: std::rc::Rc<Instr>,
+        bindings: Vec<(String, Box<Instr>)>,
+    },
 }
 
 /// Which short-circuit boolean operator a `BooleanOp` represents.
@@ -157,6 +189,52 @@ pub enum Instr {
 pub enum BooleanOpKind {
     And,
     Or,
+}
+
+/// A single `defsyntax` rule, mirroring Kotlin `syntax.kt`'s `SyntaxRule` subclasses.
+/// Only the rule kinds the stdlib actually uses are modelled:
+/// `:function`/`:nfunction`/`:nexprfunction` (a `{…}` block parsed as a no-param lambda),
+/// `:value` (a `(…)` parenthesised expression), `:string` (a string literal),
+/// `:special :openBrace|:closeBrace|:newline` (a literal token), `:optional (…)`
+/// (try the inner rules), and `:repeat (name subName)` (repeat a sub-macro while it matches).
+#[derive(Debug, Clone)]
+pub enum SyntaxRule {
+    /// A `{…}` function block → bound to `var` as a no-param `Instr::Lambda`.
+    Function { var: String },
+    /// Same, but the body is evaluated in the *current* environment (no new env). For our
+    /// purposes identical to `Function` (we don't re-bind lexical scopes per rule).
+    NFunction { var: String },
+    /// An expression-function `(…)` → bound to `var` as the parsed inner `Instr`.
+    ExprFunction { var: String },
+    NExprFunction { var: String },
+    /// A `(…)` value expression → bound to `var`.
+    Value { var: String },
+    /// A string literal → bound to `var` as a `Str` literal.
+    String { var: String },
+    /// A literal special token (`{`, `}`, newline) that must be consumed verbatim.
+    Special { token: SpecialToken },
+    /// Optional rules: if the next token matches the head rule's shape, consume them.
+    Optional { inner: Vec<SyntaxRule> },
+    /// Repeat a named sub-macro while it matches, binding `var` to the vector of results.
+    Repeat { var: String, sub: String },
+}
+
+/// The literal tokens a `:special` rule can demand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecialToken {
+    OpenBrace,
+    CloseBrace,
+    Newline,
+}
+
+/// A registered `defsyntax` macro (Kotlin `CustomSyntax`). `submacros` holds the
+/// `defsyntaxsub` definitions referenced by `:repeat` clauses (keyed by bare sub-name).
+/// The body is an `Rc<Instr>` so the macro can be cloned into the per-statement parser
+/// snapshot without cloning the (non-`Clone`) `Instr` tree.
+#[derive(Debug, Clone)]
+pub struct SyntaxMacro {
+    pub rules: Vec<SyntaxRule>,
+    pub body: std::rc::Rc<Instr>,
 }
 
 impl Instr {

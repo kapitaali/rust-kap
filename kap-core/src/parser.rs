@@ -17,8 +17,8 @@
 //!   elements    := expr (; expr)*             // explicit list / array literal
 //!   stranded vec: a run of whitespace-separated primaries at the same level becomes
 //!                 an `Array` (APL stranding) — e.g. `1 2 3` -> Array[1,2,3].
-
-use crate::ast::{Instr, BooleanOpKind};
+//!
+use crate::ast::{SyntaxMacro, SyntaxRule, SpecialToken, Instr, BooleanOpKind};
 use crate::token::{LiteralValue, SpannedToken, Token};
 use crate::AplError;
 
@@ -40,12 +40,14 @@ pub fn parse(
     tokens: &[SpannedToken],
     known_functions: &[&str],
     known_ops: &[&str],
+    macros: &std::collections::HashMap<String, crate::ast::SyntaxMacro>,
 ) -> (Vec<Instr>, Vec<AplError>) {
     let mut p = Parser {
         toks: tokens,
         pos: 0,
         known_functions: known_functions.iter().map(|s| s.to_string()).collect(),
         known_ops: known_ops.iter().map(|s| s.to_string()).collect(),
+        macros: macros.clone(),
     };
     let mut stmts = Vec::new();
     let mut errors = Vec::new();
@@ -75,6 +77,10 @@ pub struct Parser<'a> {
     /// Seeded/regrown like `known_functions` so an operator call (`X foo Y`) parses the
     /// operator name as an operator rather than a stranded value.
     pub known_ops: Vec<String>,
+    /// Registered `defsyntax` macros (session-global, mirrored from `Engine::macros`).
+    /// When a bare symbol matches a trigger name here, the parser expands the macro inline
+    /// (Kotlin `syntax.kt`'s `processCustomSyntax`). Keyed by bare trigger name.
+    pub macros: std::collections::HashMap<String, crate::ast::SyntaxMacro>,
 }
 
 impl<'a> Parser<'a> {
@@ -110,7 +116,7 @@ impl<'a> Parser<'a> {
                                     | "toUpper" | "toNames" | "enc" | "dec"
                             ))
                         || (ns == "s" && matches!(base, "trimLeft" | "trimRight" | "trim"))
-                        || (ns == "int" && matches!(base, "intern" | "symbolName" | "throwNative"))
+                        || (ns == "int" && matches!(base, "intern" | "symbolName" | "throwNative" | "unwindProtect"))
                         || (ns == "regex"
                             && matches!(
                                 base,
@@ -220,6 +226,12 @@ impl<'a> Parser<'a> {
         // assignment positions, e.g. `x ← if (…) …` or `⊢ if (…) …`), otherwise the
         // keyword strands as a bare symbol and errors as "undefined symbol".
         if let Some(instr) = self.parse_keyword_prefix()? {
+            return Ok(instr);
+        }
+        // `defsyntax` / `defsyntaxsub` direct the parser (Kotlin `processDefsyntax`).
+        // The form is `name (the macro trigger) defsyntax (rules…) { body }`. Detect a
+        // leading symbol immediately followed by the `defsyntax`/`defsyntaxsub` keyword.
+        if let Some(instr) = self.parse_defsyntax_directive()? {
             return Ok(instr);
         }
         let base = self.parse_assign()?;
@@ -414,6 +426,53 @@ impl<'a> Parser<'a> {
     /// assign := symbol ← apply  (left-associative target)
     fn parse_assign(&mut self) -> Result<Instr, AplError> {
         let save = self.pos;
+        // Destructuring assignment: `(a b c) ← expr` — bind each LHS symbol to the
+        // corresponding element of the (vector) RHS. Kap supports this (Kotlin
+        // `AssignmentInstruction` with multiple targets). Detect `( name name … ) ←`.
+        self.skip_newlines();
+        if matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenParen)) {
+            let open = self.pos;
+            self.advance();
+            // gather bare symbols until the matching `)`
+            let mut names: Vec<(String, Option<String>)> = Vec::new();
+            let mut ok = true;
+            loop {
+                self.skip_newlines();
+                match self.peek() {
+                    Some(t) => match &t.token {
+                        Token::Literal(LiteralValue::Symbol { name, namespace }) => {
+                            names.push((name.clone(), namespace.clone()));
+                            self.advance();
+                        }
+                        Token::CloseParen => {
+                            self.advance();
+                            break;
+                        }
+                        _ => {
+                            ok = false;
+                            break;
+                        }
+                    },
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                self.skip_newlines();
+                if matches!(self.peek(), Some(t) if matches!(t.token, Token::LeftArrow)) {
+                    self.advance();
+                    let value = self.parse_apply()?;
+                    return Ok(Instr::DestructAssign {
+                        names,
+                        value: Box::new(value),
+                    });
+                }
+            }
+            // Not a destructuring assignment; rewind and fall through to normal parsing.
+            self.pos = open;
+        }
         // lookahead: symbol ← ...
         if let Some(t) = self.peek() {
             if let Token::Literal(LiteralValue::Symbol { .. }) = &t.token {
@@ -696,12 +755,11 @@ impl<'a> Parser<'a> {
         }
         self.skip_newlines();
         let body = self.parse_block_body()?; // expects `{ … }`
-        // Validation (Kap semantics):
-        //  * a native (primitive) operator/function name cannot be redefined.
-        //  * parameter names must be distinct (no duplicated arguments).
-        if Self::is_primitive_op(&name) {
-            return Err(self.err(&format!("cannot redefine primitive function '{}'", name)));
-        }
+        // NOTE: Kap allows a library `∇`/`⇐` definition to *shadow* a primitive name in
+        // its own namespace (e.g. `math-kap.kap` redefines `⊥`/`⊤`). We deliberately do
+        // NOT reject redefinition of primitive names here; the evaluator resolves a bound
+        // user/native function before falling back to the hardcoded builtin table, so the
+        // stdlib version wins. (Parameter-name distinctness is still enforced below.)
         {
             let mut seen = std::collections::HashSet::new();
             for p in left_params.iter().chain(right_params.iter()) {
@@ -1651,6 +1709,85 @@ impl<'a> Parser<'a> {
                             continue;
                         }
                     }
+                    // Operator-derivation: a function member immediately followed by an operator
+                    // glyph (a known *user* operator OR a builtin adverb) binds as an OpCall /
+                    // Derived function rather than a train member. e.g. `(≠⌸)` ->
+                    // OpCall{op:⌸, left_fn:≠}, `(×/)` -> Derived{func:×, op:/},
+                    // `(f¨)` -> Derived{func:f, op:¨}. This mirrors the flat `parse_apply`
+                    // operator-call detection, but here the operands are parenthesised.
+                    // NOTE: copy the name into an owned `String` *before* any `&mut self`
+                    // call (e.g. `parse_primary`/`next_is_function_token`) — holding the
+                    // immutable `peek()` borrow open across those would violate the borrow
+                    // checker.
+                    let op_name: Option<String> = match self.peek().map(|t| &t.token) {
+                        Some(Token::Literal(LiteralValue::Symbol { name, .. })) => {
+                            let is_user_op = self.known_ops.iter().any(|n| n == name);
+                            if is_user_op || Self::is_adverb(name) {
+                                Some(name.clone())
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let Some(name) = op_name {
+                        // A keyword-namespaced symbol (`namespace == "keyword"`, e.g.
+                        // `:export`, `:const`) is NEVER an operator operand — it is a
+                        // declaration keyword. If the preceding member `e` is a keyword
+                        // symbol, do NOT bind it as the left operand of the operator;
+                        // instead let `e` stand as a plain member (so `(:export ⌸)` →
+                        // `[keyword:export, ⌸]`, a symbol-array list literal for
+                        // `declare`, not a `Derived{:export, ⌸}` that would try to
+                        // *apply* the keyword).
+                        let e_is_keyword = matches!(
+                            e,
+                            Instr::Symbol {
+                                namespace: Some(ref ns),
+                                ..
+                            } if ns == "keyword"
+                        );
+                        if e_is_keyword {
+                            funcs.push(e);
+                            continue;
+                        }
+                        let is_user_op = self.known_ops.iter().any(|n| n == &name);
+                        self.advance();
+                        self.skip_newlines();
+                        // A 2-arg user operator (`∇ (x op y) a`) consumes a second
+                        // function operand (`-foo+`). Builtin adverbs (`/`, `¨`, `⌸`)
+                        // take only the single left function operand.
+                        let right_fn = if is_user_op
+                            && self.next_is_function_token()
+                            && !self.at_statement_boundary()
+                        {
+                            match self.parse_primary() {
+                                Ok(p) => Some(Box::new(p)),
+                                Err(_) => return None,
+                            }
+                        } else {
+                            None
+                        };
+                        let derived = if is_user_op {
+                            Instr::OpCall {
+                                op: Box::new(Instr::Symbol {
+                                    name: name.clone(),
+                                    namespace: None,
+                                }),
+                                left_fn: Box::new(e),
+                                right_fn,
+                            }
+                        } else {
+                            Instr::Derived {
+                                func: Box::new(e),
+                                op: Box::new(Instr::Symbol {
+                                    name: name.clone(),
+                                    namespace: None,
+                                }),
+                            }
+                        };
+                        funcs.push(derived);
+                            continue;
+                        }
                     funcs.push(e);
                     // Postfix compose/atop inside a parenthesised train: `a ∘ b` / `a ⍛ b`
                     // bind the just-pushed `a` to the next function atom `b` into a single
@@ -1736,7 +1873,8 @@ impl<'a> Parser<'a> {
             // 1-member train — wrap it so it applies to the surrounding left/right args.
             // Anything else (e.g. an array `(1 2)`, a value group `(1+2)`) is *not* a train.
             Some(Instr::Train { funcs, reverse: false, compose: false })
-        } else if funcs.iter().all(|f| matches!(f, Instr::Symbol { .. }))
+        } else if !funcs.is_empty()
+            && funcs.iter().all(|f| matches!(f, Instr::Symbol { .. }))
             && !matches!(&funcs[0], Instr::Symbol { name, namespace: None } if Self::is_primitive_op(name))
         {
             // A parenthesised group of *only* plain symbols (e.g. `(a b c)`) is a
@@ -1774,7 +1912,7 @@ impl<'a> Parser<'a> {
                     || name == "⊣"
                     || namespace.is_some()
             }
-            Instr::Derived { .. } | Instr::Lambda { .. } | Instr::Train { .. } | Instr::ValueOp { .. } => true,
+            Instr::Derived { .. } | Instr::OpCall { .. } | Instr::Lambda { .. } | Instr::Train { .. } | Instr::ValueOp { .. } => true,
             _ => false,
         }
     }
@@ -1967,6 +2105,7 @@ impl<'a> Parser<'a> {
             e,
             Instr::Symbol { .. }
                 | Instr::Derived { .. }
+                | Instr::OpCall { .. }
                 | Instr::Lambda { .. }
                 | Instr::Train { .. }
                 | Instr::ValueOp { .. }
@@ -1980,6 +2119,16 @@ impl<'a> Parser<'a> {
             Token::Literal(LiteralValue::Symbol { name, namespace }) => {
                 let name = name.clone();
                 let namespace = namespace.clone();
+                // A registered `defsyntax` macro: expand inline (Kotlin `processCustomSyntax`).
+                // Must be checked BEFORE the plain-symbol path, because a macro trigger is a
+                // bare symbol that should consume its argument tokens per the rule list.
+                if namespace.is_none() {
+                    if let Some(m) = self.macros.get(&name) {
+                        let m = m.clone();
+                        self.advance(); // consume the trigger symbol
+                        return self.expand_macro(&m);
+                    }
+                }
                 self.advance();
                 Ok(Instr::Symbol { name, namespace })
             }
@@ -2100,6 +2249,27 @@ impl<'a> Parser<'a> {
                             return Ok(Instr::Array { elements: elems });
                         }
                         _ => return Err(self.err("expected ')' after ';'-separated vector")),
+                    }
+                }
+                // A `⋄` (statement separator) inside the group makes it a statement sequence
+                // `(a ⋄ b ⋄ c)` — like a block, returns the value of the last statement.
+                if matches!(self.peek().map(|t| &t.token), Some(Token::StatementSeparator)) {
+                    let mut body = vec![e];
+                    while matches!(
+                        self.peek().map(|t| &t.token),
+                        Some(Token::StatementSeparator)
+                    ) {
+                        self.advance();
+                        self.skip_newlines();
+                        body.push(self.parse_expr()?);
+                        self.skip_newlines();
+                    }
+                    match self.peek() {
+                        Some(t) if matches!(t.token, Token::CloseParen) => {
+                            self.advance();
+                            return Ok(Instr::Block { body });
+                        }
+                        _ => return Err(self.err("expected ')' after '⋄'-separated group")),
                     }
                 }
                 match self.peek() {
@@ -2244,12 +2414,453 @@ impl<'a> Parser<'a> {
         }
         Ok(base)
     }
+
+    /// Detect `defsyntax name (rules…) { body }` / `defsyntaxsub name (rules…) { body }`
+    /// (Kotlin `processDefsyntax`/`processDefsyntaxSub`) and parse accordingly. The Kotlin
+    /// form puts the keyword FIRST: `defsyntax triggerName (rules) { body }`. Returns `None`
+    /// if the current position is not a defsyntax directive.
+    fn parse_defsyntax_directive(&mut self) -> Result<Option<Instr>, AplError> {
+        // Must begin with the `defsyntax` / `defsyntaxsub` keyword symbol.
+        self.skip_newlines();
+        let kw = match self.peek() {
+            Some(t) => t.clone(),
+            None => return Ok(None),
+        };
+        let is_directive = match &kw.token {
+            Token::Literal(LiteralValue::Symbol { name, namespace }) => {
+                (name == "defsyntax" || name == "defsyntaxsub") && namespace.is_none()
+            }
+            _ => false,
+        };
+        if !is_directive {
+            return Ok(None);
+        }
+        let is_sub = match &kw.token {
+            Token::Literal(LiteralValue::Symbol { name, .. }) => name == "defsyntaxsub",
+            _ => false,
+        };
+        self.advance(); // consume the keyword
+        // Next symbol is the macro trigger name.
+        self.skip_newlines();
+        let trigger_tok = match self.peek() {
+            Some(t) => t.clone(),
+            None => return Err(self.err("expected a macro trigger name after defsyntax")),
+        };
+        let (trigger, ns) = match &trigger_tok.token {
+            Token::Literal(LiteralValue::Symbol { name, namespace }) => {
+                (name.clone(), namespace.clone())
+            }
+            _ => return Err(self.err("expected a symbol as the macro trigger name")),
+        };
+        self.advance(); // consume the trigger name
+        let rules = self.parse_syntax_rules()?;
+        self.skip_newlines();
+        if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenBrace)) {
+            return Err(self.err("expected '{' before defsyntax body"));
+        }
+        let body = self.parse_block()?;
+        if is_sub {
+            Ok(Some(Instr::DefSyntaxSub {
+                name: trigger,
+                namespace: ns,
+                rules,
+                body: std::rc::Rc::new(body),
+            }))
+        } else {
+            Ok(Some(Instr::DefSyntax {
+                name: trigger,
+                namespace: ns,
+                rules,
+                body: std::rc::Rc::new(body),
+            }))
+        }
+    }
+
+    /// Parse a `(rule rule …)` syntax-rule list (Kotlin `processPairs`). Each rule is a
+    /// `:keyword name` pair (or `:special :token`). The parser is currently positioned just
+    /// *after* the opening `(` of the rule list.
+    fn parse_syntax_rules(&mut self) -> Result<Vec<SyntaxRule>, AplError> {
+        if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenParen)) {
+            return Err(self.err("expected '(' for syntax rule list"));
+        }
+        self.advance();
+        let mut rules = Vec::new();
+        loop {
+            self.skip_newlines();
+            match self.peek() {
+                Some(t) if matches!(t.token, Token::CloseParen) => {
+                    self.advance();
+                    break;
+                }
+                Some(t) => {
+                    if let Token::Literal(LiteralValue::Symbol { name, namespace }) = &t.token {
+                        if namespace.as_deref() != Some("keyword") {
+                            return Err(self.err("syntax rule tag must be a :keyword"));
+                        }
+                        let tag = name.clone();
+                        self.advance();
+                        match tag.as_str() {
+                            "function" | "nfunction" | "exprfunction" | "nexprfunction" => {
+                                let var = self.expect_keyword_var()?;
+                                let rule = match tag.as_str() {
+                                    "function" => SyntaxRule::Function { var },
+                                    "nfunction" => SyntaxRule::NFunction { var },
+                                    "exprfunction" => SyntaxRule::ExprFunction { var },
+                                    _ => SyntaxRule::NExprFunction { var },
+                                };
+                                rules.push(rule);
+                            }
+                            "value" | "string" => {
+                                let var = self.expect_keyword_var()?;
+                                rules.push(if tag == "value" {
+                                    SyntaxRule::Value { var }
+                                } else {
+                                    SyntaxRule::String { var }
+                                });
+                            }
+                            "special" => {
+                                let sp = self.expect_keyword_var()?;
+                                let token = match sp.as_str() {
+                                    "openBrace" => SpecialToken::OpenBrace,
+                                    "closeBrace" => SpecialToken::CloseBrace,
+                                    "newline" => SpecialToken::Newline,
+                                    other => return Err(self.err(&format!("unknown special token: {}", other))),
+                                };
+                                rules.push(SyntaxRule::Special { token });
+                            }
+                            "optional" => {
+                                let inner = self.parse_syntax_rules()?;
+                                rules.push(SyntaxRule::Optional { inner });
+                            }
+                            "repeat" => {
+                                if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenParen)) {
+                                    return Err(self.err("expected '(' after :repeat"));
+                                }
+                                self.advance();
+                                self.skip_newlines();
+                                let var = self.expect_keyword_var()?;
+                                self.skip_newlines();
+                                let sub = match self.peek() {
+                                    Some(t) => match &t.token {
+                                        Token::Literal(LiteralValue::Symbol { name, .. }) => {
+                                            let s = name.clone();
+                                            self.advance();
+                                            s
+                                        }
+                                        _ => return Err(self.err("expected sub-macro name in :repeat")),
+                                    },
+                                    None => return Err(self.err("expected sub-macro name in :repeat")),
+                                };
+                                self.skip_newlines();
+                                if !matches!(self.peek(), Some(t) if matches!(t.token, Token::CloseParen)) {
+                                    return Err(self.err("expected ')' after :repeat"));
+                                }
+                                self.advance();
+                                rules.push(SyntaxRule::Repeat { var, sub });
+                            }
+                            other => return Err(self.err(&format!("unknown syntax rule tag: {}", other))),
+                        }
+                    } else {
+                        return Err(self.err("expected a :keyword syntax rule tag"));
+                    }
+                }
+                None => return Err(self.err("unexpected end of input in syntax rule list")),
+            }
+        }
+        Ok(rules)
+    }
+
+    /// Expect a bare symbol and return its name (the bound var of a rule tag).
+    fn expect_keyword_var(&mut self) -> Result<String, AplError> {
+        self.skip_newlines();
+        match self.peek() {
+            Some(t) => match &t.token {
+                Token::Literal(LiteralValue::Symbol { name, .. }) => {
+                    let n = name.clone();
+                    self.advance();
+                    Ok(n)
+                }
+                _ => Err(self.err("expected a variable name in syntax rule")),
+            },
+            None => Err(self.err("expected a variable name in syntax rule")),
+        }
+    }
+
+    /// Expand a registered macro at the current position (Kotlin `processCustomSyntax`).
+    /// The trigger symbol has *already* been consumed; we now consume the rule list's
+    /// tokens, binding each rule's var to a parsed `Instr`, and return
+    /// `MacroExpand { body, bindings }`.
+    fn expand_macro(&mut self, m: &SyntaxMacro) -> Result<Instr, AplError> {
+        let mut bindings: Vec<(String, Box<Instr>)> = Vec::new();
+        for rule in &m.rules {
+            match rule {
+                SyntaxRule::Function { var } | SyntaxRule::NFunction { var } => {
+                    self.skip_newlines();
+                    if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenBrace)) {
+                        return Err(self.err(&format!("expected '{{' for :function rule '{}'", var)));
+                    }
+                    let body = self.parse_block()?;
+                    bindings.push((
+                        var.clone(),
+                        Box::new(Instr::Lambda { params: vec![], body: Box::new(body) }),
+                    ));
+                }
+                SyntaxRule::ExprFunction { var } | SyntaxRule::NExprFunction { var } => {
+                    self.skip_newlines();
+                    if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenParen)) {
+                        return Err(self.err(&format!("expected '(' for :exprfunction rule '{}'", var)));
+                    }
+                    self.advance();
+                    let inner = self.parse_expr()?;
+                    self.skip_newlines();
+                    if !matches!(self.peek(), Some(t) if matches!(t.token, Token::CloseParen)) {
+                        return Err(self.err(&format!("expected ')' after :exprfunction rule '{}'", var)));
+                    }
+                    self.advance();
+                    bindings.push((var.clone(), Box::new(inner)));
+                }
+                SyntaxRule::Value { var } => {
+                    self.skip_newlines();
+                    if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenParen)) {
+                        return Err(self.err(&format!("expected '(' for :value rule '{}'", var)));
+                    }
+                    self.advance();
+                    let inner = self.parse_expr()?;
+                    self.skip_newlines();
+                    if !matches!(self.peek(), Some(t) if matches!(t.token, Token::CloseParen)) {
+                        return Err(self.err(&format!("expected ')' after :value rule '{}'", var)));
+                    }
+                    self.advance();
+                    bindings.push((var.clone(), Box::new(inner)));
+                }
+                SyntaxRule::String { var } => {
+                    self.skip_newlines();
+                    match self.peek() {
+                        Some(t) => match &t.token {
+                            Token::Literal(LiteralValue::Str(s)) => {
+                                let s = s.clone();
+                                self.advance();
+                                bindings.push((
+                                    var.clone(),
+                                    Box::new(Instr::Literal(LiteralValue::Str(s))),
+                                ));
+                            }
+                            _ => return Err(self.err(&format!("expected a string for :string rule '{}'", var))),
+                        },
+                        None => return Err(self.err(&format!("expected a string for :string rule '{}'", var))),
+                    }
+                }
+                SyntaxRule::Special { token } => {
+                    self.skip_newlines();
+                    let expected = match token {
+                        SpecialToken::OpenBrace => Token::OpenBrace,
+                        SpecialToken::CloseBrace => Token::CloseBrace,
+                        SpecialToken::Newline => Token::Newline,
+                    };
+                    match self.peek() {
+                        Some(t) if t.token == expected => {
+                            self.advance();
+                        }
+                        _ => return Err(self.err("syntax rule :special token mismatch")),
+                    }
+                }
+                SyntaxRule::Optional { inner } => {
+                    if self.optional_matches(inner) {
+                        for r in inner {
+                            self.apply_optional_rule(r)?;
+                        }
+                    }
+                }
+                SyntaxRule::Repeat { var, sub } => {
+                    // Sub-macros are registered globally (see DefSyntaxSub arm), so look the
+                    // bare name up in the parser's macro table.
+                    let sub_macro = match self.macros.get(sub) {
+                        Some(s) => s.clone(),
+                        None => return Err(self.err(&format!("unknown sub-macro '{}' in :repeat", sub))),
+                    };
+                    let mut results: Vec<Instr> = Vec::new();
+                    while self.sub_macro_matches(&sub_macro) {
+                        results.push(self.expand_sub_macro(&sub_macro)?);
+                    }
+                    bindings.push((
+                        var.clone(),
+                        Box::new(Instr::Array { elements: results }),
+                    ));
+                }
+            }
+        }
+        Ok(Instr::MacroExpand {
+            body: m.body.clone(),
+            bindings,
+        })
+    }
+
+    /// Whether the next token(s) begin a match for the head rule of `inner`.
+    fn optional_matches(&self, inner: &[SyntaxRule]) -> bool {
+        match inner.first() {
+            Some(SyntaxRule::Function { .. }) | Some(SyntaxRule::NFunction { .. }) => {
+                matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenBrace))
+            }
+            Some(SyntaxRule::Value { .. })
+            | Some(SyntaxRule::ExprFunction { .. })
+            | Some(SyntaxRule::NExprFunction { .. }) => {
+                matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenParen))
+            }
+            Some(SyntaxRule::String { .. }) => {
+                matches!(self.peek(), Some(t) if matches!(t.token, Token::Literal(LiteralValue::Str(_))))
+            }
+            Some(SyntaxRule::Special { token }) => {
+                let expected = match token {
+                    SpecialToken::OpenBrace => Token::OpenBrace,
+                    SpecialToken::CloseBrace => Token::CloseBrace,
+                    SpecialToken::Newline => Token::Newline,
+                };
+                matches!(self.peek(), Some(t) if t.token == expected)
+            }
+            _ => false,
+        }
+    }
+
+    /// Apply a single optional inner rule, consuming its tokens (bindings are discarded).
+    fn apply_optional_rule(&mut self, rule: &SyntaxRule) -> Result<(), AplError> {
+        match rule {
+            SyntaxRule::Function { var } | SyntaxRule::NFunction { var } => {
+                self.skip_newlines();
+                let _ = self.parse_block()?;
+                let _ = var;
+                Ok(())
+            }
+            SyntaxRule::Value { var } | SyntaxRule::ExprFunction { var } | SyntaxRule::NExprFunction { var } => {
+                self.skip_newlines();
+                if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenParen)) {
+                    return Err(self.err(&format!("expected '(' in optional :value rule '{}'", var)));
+                }
+                self.advance();
+                let _ = self.parse_expr()?;
+                self.skip_newlines();
+                if !matches!(self.peek(), Some(t) if matches!(t.token, Token::CloseParen)) {
+                    return Err(self.err(&format!("expected ')' in optional :value rule '{}'", var)));
+                }
+                self.advance();
+                Ok(())
+            }
+            SyntaxRule::String { var } => {
+                self.skip_newlines();
+                match self.peek() {
+                    Some(t) => match &t.token {
+                        Token::Literal(LiteralValue::Str(_)) => {
+                            self.advance();
+                            Ok(())
+                        }
+                        _ => Err(self.err(&format!("expected string in optional :string '{}'", var))),
+                    },
+                    None => Err(self.err(&format!("expected string in optional :string '{}'", var))),
+                }
+            }
+            SyntaxRule::Special { token } => {
+                let expected = match token {
+                    SpecialToken::OpenBrace => Token::OpenBrace,
+                    SpecialToken::CloseBrace => Token::CloseBrace,
+                    SpecialToken::Newline => Token::Newline,
+                };
+                if !matches!(self.peek(), Some(t) if t.token == expected) {
+                    return Err(self.err("optional :special token mismatch"));
+                }
+                self.advance();
+                Ok(())
+            }
+            SyntaxRule::Optional { .. } | SyntaxRule::Repeat { .. } => Ok(()),
+        }
+    }
+
+    /// Whether the next token begins a match for the sub-macro (its head rule).
+    fn sub_macro_matches(&self, sub: &SyntaxMacro) -> bool {
+        match sub.rules.first() {
+            Some(r) => self.optional_matches(std::slice::from_ref(r)),
+            None => false,
+        }
+    }
+
+    /// Expand a sub-macro once (used by `:repeat`). The sub-macro's rules form one entry;
+    /// the result is a `MacroExpand` pair that yields a 2-vector like `(cond fn)`.
+    fn expand_sub_macro(&mut self, sub: &SyntaxMacro) -> Result<Instr, AplError> {
+        let mut bindings: Vec<(String, Box<Instr>)> = Vec::new();
+        for rule in &sub.rules {
+            match rule {
+                SyntaxRule::Function { var } | SyntaxRule::NFunction { var } => {
+                    self.skip_newlines();
+                    let body = self.parse_block()?;
+                    bindings.push((
+                        var.clone(),
+                        Box::new(Instr::Lambda { params: vec![], body: Box::new(body) }),
+                    ));
+                }
+                SyntaxRule::Value { var } | SyntaxRule::ExprFunction { var } | SyntaxRule::NExprFunction { var } => {
+                    self.skip_newlines();
+                    if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenParen)) {
+                        return Err(self.err(&format!("expected '(' in sub :value rule '{}'", var)));
+                    }
+                    self.advance();
+                    let inner = self.parse_expr()?;
+                    self.skip_newlines();
+                    if !matches!(self.peek(), Some(t) if matches!(t.token, Token::CloseParen)) {
+                        return Err(self.err(&format!("expected ')' in sub :value rule '{}'", var)));
+                    }
+                    self.advance();
+                    bindings.push((var.clone(), Box::new(inner)));
+                }
+                SyntaxRule::String { var } => {
+                    self.skip_newlines();
+                    match self.peek() {
+                        Some(t) => match &t.token {
+                            Token::Literal(LiteralValue::Str(s)) => {
+                                let s = s.clone();
+                                self.advance();
+                                bindings.push((
+                                    var.clone(),
+                                    Box::new(Instr::Literal(LiteralValue::Str(s))),
+                                ));
+                            }
+                            _ => return Err(self.err(&format!("expected string in sub :string '{}'", var))),
+                        },
+                        None => return Err(self.err(&format!("expected string in sub :string '{}'", var))),
+                    }
+                }
+                SyntaxRule::Special { token } => {
+                    let expected = match token {
+                        SpecialToken::OpenBrace => Token::OpenBrace,
+                        SpecialToken::CloseBrace => Token::CloseBrace,
+                        SpecialToken::Newline => Token::Newline,
+                    };
+                    if !matches!(self.peek(), Some(t) if t.token == expected) {
+                        return Err(self.err("sub :special token mismatch"));
+                    }
+                    self.advance();
+                }
+                SyntaxRule::Optional { inner } => {
+                    if self.optional_matches(inner) {
+                        for r in inner {
+                            self.apply_optional_rule(r)?;
+                        }
+                    }
+                }
+                SyntaxRule::Repeat { .. } => {}
+            }
+        }
+        Ok(Instr::MacroExpand {
+            body: sub.body.clone(),
+            bindings,
+        })
+    }
 }
 
 /// Build a Symbol Instr from a token's LiteralValue::Symbol.
 fn instr_from_symbol(tok: &Token) -> Instr {
     if let Token::Literal(LiteralValue::Symbol { name, namespace }) = tok {
-        Instr::Symbol { name: name.clone(), namespace: namespace.clone() }
+        Instr::Symbol {
+            name: name.clone(),
+            namespace: namespace.clone(),
+        }
     } else {
         Instr::Empty
     }
@@ -2263,7 +2874,7 @@ mod tests {
 
     fn parse_one(src: &str) -> Instr {
         let toks = tokenise(src);
-        let (stmts, errs) = parse(&toks, &[], &[]);
+        let (stmts, errs) = parse(&toks, &[], &[], &std::collections::HashMap::new());
         assert!(errs.is_empty(), "parse errors for {:?}: {:?}", src, errs);
         assert_eq!(stmts.len(), 1, "expected one statement for {:?}", src);
         stmts.into_iter().next().unwrap()
@@ -2320,7 +2931,7 @@ mod tests {
         // (Kotlin errors with `Unexpected token: CloseParen`). The parser must return a
         // parse error, not panic on an out-of-bounds index (regression: parser.rs:559).
         let toks = tokenise("∇ (a;b) () (c;d) { a+b+c+d }");
-        let (_stmts, errs) = parse(&toks, &[], &[]);
+        let (_stmts, errs) = parse(&toks, &[], &[], &std::collections::HashMap::new());
         assert!(
             !errs.is_empty(),
             "empty parameter group should produce a parse error, not panic"

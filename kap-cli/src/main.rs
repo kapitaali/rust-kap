@@ -64,6 +64,17 @@ fn main() {
         session.set_lib_paths(&lib_paths);
     }
 
+    // Startup stdlib load (Kotlin repl-builder.kt loadStdLibrary): unless
+    // `--no-standard-lib` is given, evaluate `use("standard-lib.kap")` before any
+    // user code so `⎕A`, `when`, `split`, … are pre-defined. A failed load is
+    // non-fatal for the REPL but reported on stderr.
+    let no_stdlib = args.iter().any(|a| a == "--no-standard-lib");
+    if !no_stdlib {
+        if let Err(e) = session.load_standard_lib() {
+            eprintln!("warning: standard library failed to load: {}", e);
+        }
+    }
+
     match positional {
         Some(path) => {
             // File mode: read, evaluate once, print the last result (REPL-style

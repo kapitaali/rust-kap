@@ -74,6 +74,71 @@ loaded file is a regression test: if it parses and its functions run, that surfa
 The `test/` dir doubles as the D5 Kap-native harness (run `test.kap` + `test/*Test.kap`, parse the
 `TESTS total=N pass=M fail=K` summary).
 
+#### Tier C status + the `defsyntax` blocker (2026-08-22)
+
+The CLI wiring is DONE in the working tree (uncommitted): `Session::load_standard_lib()`,
+startup `use("standard-lib.kap")`, `--no-standard-lib` opt-out. **Blocker:** the load dies
+inside `structure.kap` line 4 — the port has no `defsyntax`. The chain is
+`standard-lib.kap → structure.kap → defsyntax unwindProtect → parse failure → whole stdlib
+load aborts → ⎕A undefined`. Also fixed en route: an empty-paren panic in
+`try_parse_train` (`!funcs.is_empty()` guard) and native `int:unwindProtect`
+(`[fn;handler]` 2-vector, handler always runs, error rethrown after).
+
+## defsyntax strategy (unblocks structure.kap → full stdlib chain)
+
+Kotlin ground truth: `syntax/syntax.kt` (326 lines — `CustomSyntax`,
+`SyntaxRule` subclasses), `parser.kt` (`processSyntaxDef` / macro-expansion hook),
+`functions.kt` (syntax registration). A `defsyntax name (rule…) { body }` defines a
+**parse-time macro**: when the parser meets `name`, it runs the rule list against
+upcoming tokens, binds rule variables to parsed pieces, and splices the *body* as a
+new statement. `defsyntaxsub` is the same but for a sub-rule used inside another
+definition's `(entryList …)` repeats.
+
+The port does NOT need the general system — only what the stdlib actually uses.
+Scope per file, in this order:
+
+1. **Inventory first.** `grep -h '^defsyntax' kap-stdlib/std/*.kap` and read each
+   definition. Known set today:
+   - `structure.kap`: `unwindProtect (:function statement :function handler)` and
+     `when` / `whenInner` (`:special`, `:optional`, `:repeat`, `:openBrace`,
+     `:closeBrace`, `:newline` rules).
+   - also check `thread.kap`, `time.kap`, `util.kap` before designing the rule set.
+   Decide the minimal `SyntaxRule` subset from this inventory, not from Kotlin's class tree.
+2. **Parse-time representation.** Add `Instr::SyntaxDef { name, rules, body }` +
+   `defsyntax`/`defsyntaxsub` keyword handling in `parse_expr` (like the existing
+   `namespace`/`declare` directive arms). Parse the rule list into a small enum:
+   - `Rule::Function(name)` — `:function` (a function atom follows)
+   - `Rule::Value(name)` — a value expression follows
+   - `Rule::Special(token)` — `:special` + literal token (`{`, `}`, newline, …)
+   - `Rule::Optional(inner)` — `:optional (…)`
+   - `Rule::Repeat(name, inner)` — `:repeat (x y)`
+   - `Rule::OpenBrace/CloseBrace/Newline` sugar if it keeps the inventory clean.
+3. **Registration at eval time.** Evaluating `SyntaxDef` stores the compiled rule
+   list + body in the engine (analog of Kotlin's syntax registry): a
+   `RefCell<HashMap<String, SyntaxMacro>>` on `Engine`. Namespaced like everything else.
+4. **Expansion hook in the parser.** At every point where a bare symbol is consumed
+   (`parse_primary` symbol arm / dyadic-operator gate), check the registry FIRST:
+   if the name is a registered macro, run rule matching against the token stream
+   (this is the one place the parser needs lookahead/backtracking — mirror Kotlin's
+   `isValid` → `processRule` two-phase so a failed match restores `self.pos`).
+   Successful match yields bindings (name → already-parsed `Instr`) plus the
+   remaining tokens; the expansion then parses the *body source* with those bindings
+   substituted (simplest faithful approach: keep the macro body as raw tokens and
+   re-lex/re-parse per call — no hygiene needed for these stdlib macros).
+5. **Bootstrap order.** Implement just enough for `unwindProtect` + `whenInner`
+   + `when` first (they are pure parse-to-parse splices over existing features:
+   `⍞cond ⍬`, `while`, `and`). Probe `use("structure.kap")` loads clean, then
+   `use("standard-lib.kap")` end-to-end, then extend the rule set for whatever
+   thread/time/util still need.
+6. **Tests.** Curated rows: a hand-written `defsyntax` defining a trivial macro,
+   then `when` usage (`when { cond stmt } else-shape` vs oracle), and
+   `int:unwindProtect` success/error paths (handler runs, error propagates).
+
+Pitfall: Kotlin expands macros during parsing but evaluates rule *bodies* lazily per
+use site with that site's environment — do NOT pre-evaluate the body at definition
+time. And keep `defsyntax` names out of the ordinary variable namespace (separate map),
+so `declare(:export …)` doesn't try to export them as values.
+
 ### Mechanics notes (faithful port)
 
 - `use` must resolve relative to a registered library directory (the Kotlin `resolveLibraryFile`
