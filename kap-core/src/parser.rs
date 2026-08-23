@@ -48,6 +48,7 @@ pub fn parse(
         known_functions: known_functions.iter().map(|s| s.to_string()).collect(),
         known_ops: known_ops.iter().map(|s| s.to_string()).collect(),
         macros: macros.clone(),
+        kotlin_close_stack: Vec::new(),
     };
     let mut stmts = Vec::new();
     let mut errors = Vec::new();
@@ -81,6 +82,11 @@ pub struct Parser<'a> {
     /// When a bare symbol matches a trigger name here, the parser expands the macro inline
     /// (Kotlin `syntax.kt`'s `processCustomSyntax`). Keyed by bare trigger name.
     pub macros: std::collections::HashMap<String, crate::ast::SyntaxMacro>,
+    /// P1-M5: stack of closing tokens for nested Kotlin-path group parses. While
+    /// non-empty, `finish_fn_call` parses the right argument with the SAME
+    /// accumulator loop (respecting the close token), mirroring Kotlin's
+    /// `parseExprToplevel(CloseParen)` context threading (:977).
+    pub kotlin_close_stack: Vec<Token>,
 }
 
 impl<'a> Parser<'a> {
@@ -229,10 +235,46 @@ impl<'a> Parser<'a> {
                 Some(t) => t.clone(),
                 None => break,
             };
-            // END_EXPR_TOKEN_LIST (parser.kt:1342), statement-level subset.
+            // END_EXPR_TOKEN_LIST (parser.kt:1342), statement-level subset. M5: when
+            // nested inside a group, its close token also ends the accumulation.
+            if let Some(top) = self.kotlin_close_stack.last() {
+                if std::mem::discriminant(&tok.token) == std::mem::discriminant(top) {
+                    break;
+                }
+            }
             match &tok.token {
                 Token::EndOfFile | Token::StatementSeparator => break,
                 _ => {}
+            }
+            // Short-circuit `and` / `or`: the lexer emits them as plain SYMBOL names
+            // (no dedicated tokens); the legacy parser string-matches at
+            // parse_expr:1756. Infix over the accumulated left args.
+            if let Token::Literal(LiteralValue::Symbol {
+                name: nn,
+                namespace: None,
+            }) = &tok.token
+            {
+                if nn == "and" || nn == "or" {
+                    let is_and = nn == "and";
+                    self.advance();
+                    let rhs = self.parse_value_kotlin()?;
+                    let lhs = if left_args.len() == 1 {
+                        left_args.pop().unwrap()
+                    } else {
+                        Instr::Array {
+                            elements: left_args,
+                        }
+                    };
+                    return Ok(Instr::BooleanOp {
+                        op: if is_and {
+                            BooleanOpKind::And
+                        } else {
+                            BooleanOpKind::Or
+                        },
+                        left: Box::new(lhs),
+                        right: Box::new(rhs),
+                    });
+                }
             }
             match &tok.token {
                 Token::Literal(LiteralValue::Number(n)) => {
@@ -269,16 +311,29 @@ impl<'a> Parser<'a> {
                     return self.finish_fn_call(lam, &mut left_args);
                 }
                 Token::OpenParen => {
-                    // parser.kt:984: parse the group toplevel; a FUNCTION result feeds
-                    // processFn with the accumulated left args (`(10+) 1`, `(≠⌸) v`).
+                    // parser.kt:977 parseExprToplevel(CloseParen): M5 parses the group
+                    // CONTENT with this same accumulator loop under a close-token stack,
+                    // so literal-first forks (`(1↑⍴)`) chain via left-bind exactly as
+                    // Kotlin builds them, and a fn result feeds processFn (:984).
                     let save = self.pos;
-                    let group = match self.parse_primary() {
-                        Ok(g) => g,
-                        Err(_) => {
-                            self.pos = start;
-                            return self.parse_expr();
+                    self.advance(); // consume (
+                    let group = {
+                        self.kotlin_close_stack.push(Token::CloseParen);
+                        let g = self.parse_value_kotlin();
+                        self.kotlin_close_stack.pop();
+                        match g {
+                            Ok(g) => g,
+                            Err(_) => {
+                                self.pos = start;
+                                return self.parse_expr();
+                            }
                         }
                     };
+                    // Consume the closing paren of the group.
+                    if let Err(_) = self.expect(Token::CloseParen, "expected ) after group") {
+                        self.pos = start;
+                        return self.parse_expr();
+                    }
                     if Self::is_function_expr(&group) {
                         // parser.kt:984 feeds a function-valued group to processFn.
                         // CRITICAL: when the group's own parse ended as an FnParseResult
@@ -297,12 +352,31 @@ impl<'a> Parser<'a> {
                 }
                 Token::LeftArrow => {
                     // `x ← v` (parser.kt:997 → processAssignment): target = last leftArg.
+                    // Destructuring `(a b c) ← v`: the target is a value group of
+                    // symbols → DestructAssign (matches the legacy path's behaviour).
                     let target = match left_args.pop() {
                         Some(t) => t,
                         None => return Err(self.err("assignment without a target")),
                     };
                     self.advance(); // consume ←
                     let value = self.parse_expr()?;
+                    if let Instr::Array { elements } = &target {
+                        if elements.iter().all(|e| matches!(e, Instr::Symbol { .. })) {
+                            let names = elements
+                                .iter()
+                                .map(|e| match e {
+                                    Instr::Symbol { name, namespace } => {
+                                        (name.clone(), namespace.clone())
+                                    }
+                                    _ => unreachable!(),
+                                })
+                                .collect();
+                            return Ok(Instr::DestructAssign {
+                                names,
+                                value: Box::new(value),
+                            });
+                        }
+                    }
                     return Ok(Instr::Assign {
                         target: Box::new(target),
                         value: Box::new(value),
@@ -319,6 +393,35 @@ impl<'a> Parser<'a> {
                             left_args.push(self.expand_macro(&m)?);
                             continue;
                         }
+                    }
+                    // parser.kt:961–964: a Name immediately followed by `⇐` is the
+                    // SHORT-FORM fn definition (`name ⇐ rhs`) — handled BEFORE any
+                    // function/value classification (and before the group arm can
+                    // bind the name as a left arg). Lookahead 1 token.
+                    if namespace.is_none()
+                        && self
+                            .toks
+                            .get(self.pos + 1)
+                            .map(|t| matches!(t.token, Token::DynassignToken))
+                            == Some(true)
+                    {
+                        self.advance(); // consume the name
+                        self.advance(); // consume ⇐
+                        let value = self.parse_function_expr_impl(true)?;
+                        // B2: a bare known-operator RHS is invalid.
+                        if let Instr::Symbol { name: rhs, namespace: None } = &value {
+                            if self.known_ops.iter().any(|n| n == rhs) {
+                                return Err(self.err(&format!(
+                                    "Operator without left function: {}",
+                                    rhs
+                                )));
+                            }
+                        }
+                        return Ok(Instr::FnAssign {
+                            name,
+                            namespace,
+                            value: Box::new(value),
+                        });
                     }
                     let qual = namespace
                         .clone()
@@ -459,22 +562,63 @@ impl<'a> Parser<'a> {
         // parseOperator FIRST (parser.kt:437): bind axis / adverbs / user operators.
         let fn_instr = self.bind_operators_kotlin(fn_instr)?;
         self.skip_newlines();
-        let has_right = !self.at_statement_boundary()
+        // M5: boundary check must respect a nested close token. Inside `(f …)` the
+        // CloseParen is NOT "no right arg" — Kotlin's parseValue() recurses and only
+        // stops at its endToken (:441 parseExprToplevel(FunctionCallCloseParen)).
+        let at_close = matches!(self.peek().map(|t| &t.token), Some(t)
+            if self.kotlin_close_stack.last().map(|c| {
+                std::mem::discriminant(c) == std::mem::discriminant(t)
+            }) == Some(true));
+        let has_right = !at_close
+            && !self.at_statement_boundary()
             && !matches!(
                 self.peek().map(|t| &t.token),
                 Some(Token::StatementSeparator) | Some(Token::EndOfFile)
             );
         if !has_right {
-            // No data follows: bare fn evaluates to itself (parser.kt:460); any
-            // accumulated left operands strand after it (value-position fn ref).
+            // parser.kt:459–466: empty right + empty left ⇒ fn ITSELF (ambivalent fn
+            // value); empty right + non-empty left ⇒ makeLeftBindFunctionParseResult
+            // (:462) — LeftAssignedFunction (functions.kt:628): binds strand(leftArgs)
+            // as ⍺, errors on a 2nd arg (LeftAssigned2ArgException).
             if left_args.is_empty() {
                 return Ok(fn_instr);
             }
-            let mut elems = std::mem::take(left_args);
-            elems.push(fn_instr);
-            return Ok(Instr::Array { elements: elems });
+            // makeResultList (:206/:515): a SINGLE left arg passes UNWRAPPED —
+            // LeftBind(10, +) binds ⍺=10, NOT ⍺=(10). Several strand.
+            let bound = if left_args.len() == 1 {
+                left_args.pop().unwrap()
+            } else {
+                Instr::Array {
+                    elements: std::mem::take(left_args),
+                }
+            };
+            return Ok(Instr::Train {
+                funcs: vec![bound, fn_instr],
+                reverse: false,
+                compose: false,
+            });
         }
-        let right = self.parse_apply()?;
+        // M5: nested context parses the right argument with the SAME accumulator loop
+        // so it stops at this group's close token instead of running past it.
+        let right = if self.kotlin_close_stack.is_empty() {
+            self.parse_apply()?
+        } else {
+            let r = self.parse_value_kotlin()?;
+            let at_close_now = matches!(self.peek().map(|t| &t.token), Some(t)
+                if self.kotlin_close_stack.last().map(|c| {
+                    std::mem::discriminant(c) == std::mem::discriminant(t)
+                }) == Some(true));
+            if at_close_now && Self::is_function_expr(&r) {
+                // parser.kt:479–491 FnParseResult branch: right is a FUNCTION ⇒
+                // Chain2(parsedFn, right) — atop composition, returned as a fn value.
+                return Ok(Instr::Train {
+                    funcs: vec![fn_instr, r],
+                    reverse: false,
+                    compose: false,
+                });
+            }
+            r
+        };
         if left_args.is_empty() {
             // FunctionCall1Arg (parser.kt:468): monadic, ⍵ = right.
             return Ok(Instr::Apply {

@@ -455,6 +455,7 @@ impl Engine {
                 known_functions: fn_names,
                 known_ops: op_names,
                 macros,
+                kotlin_close_stack: Vec::new(),
             };
             match p.parse_statements()? {
                 Some(instr) => {
@@ -491,6 +492,7 @@ impl Engine {
                 known_functions: fn_names,
                 known_ops: op_names,
                 macros,
+                kotlin_close_stack: Vec::new(),
             };
             match p.parse_statements() {
                 Ok(Some(instr)) => {
