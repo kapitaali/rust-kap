@@ -382,11 +382,40 @@ fn unicode_char_name(c: char) -> Option<String> {
 }
 
 impl Engine {
+    /// B6 (code_analysis_03 / Kotlin `Namespace.checkAssign`): error if the target
+    /// symbol is a read-only constant. Checks the explicitly-named namespace, then the
+    /// current namespace, then `kap` (where the native quad constants live) — mirroring
+    /// how bare-name lookup falls through to the owning namespace. Error text matches
+    /// the oracle verbatim: `Assignment to constant variable: <ns>:<name>`.
+    fn check_not_constant(
+        &self,
+        name: &str,
+        ns: &Option<String>,
+        env: &Rc<Environment>,
+    ) -> Result<(), AplError> {
+        let reg = &env.ns_registry;
+        let mut candidates: Vec<String> = Vec::new();
+        if let Some(n) = ns {
+            candidates.push(n.clone());
+        }
+        candidates.push(reg.current_ns());
+        candidates.push("kap".to_string());
+        for c in candidates {
+            if reg.is_constant(&c, name) {
+                return Err(AplError::runtime(format!(
+                    "Assignment to constant variable: {}:{}",
+                    c, name
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Stateless "single expression" mode (Mode 1): evaluate `src` in a *fresh*
     /// environment. Any variables assigned inside `src` do not persist.
     /// For persistent state across evaluations, use [`crate::Session`] instead.
     pub fn eval_string(&self, src: &str) -> Result<AplRef<APLValue>, AplError> {
-        let env = Rc::new(Environment::default());
+        let env = Environment::new_root();
         self.eval_string_in_env(src, &env)
     }
 
@@ -584,6 +613,11 @@ impl Engine {
             Instr::Assign { target, value } => {
                 if let Instr::Symbol { name, namespace } = target.as_ref() {
                     let v = self.eval_instr(value, env)?;
+                    // B6 (code_analysis_03): a read-only constant rejects assignment with
+                    // Kotlin's exact error (oracle: `⎕A ← 5` → "Assignment to constant
+                    // variable: kap:⎕A"). The constant is registered under its owning
+                    // namespace; a bare name resolves there via current-ns/default fallback.
+                    self.check_not_constant(name, namespace, env)?;
                     // `←` updates the nearest enclosing binding (closure-safe), falling
                     // back to defining locally when the name is new in this scope.
                     env.assign(name, namespace, v.clone());
@@ -605,6 +639,7 @@ impl Engine {
                     )));
                 }
                 for (i, (nm, ns)) in names.iter().enumerate() {
+                    self.check_not_constant(nm, ns, env)?;
                     env.assign(nm, ns, elems[i].clone());
                 }
                 Ok(v)
@@ -5555,14 +5590,19 @@ impl Engine {
     ) -> Result<AplRef<APLValue>, AplError> {
         // Extract symbol names *structurally* from the AST — we must not evaluate
         // `target`, since it may be an unbound name (the whole point of the special
-        // form). Returns the list of bare names to mark exported.
-        let names: Vec<String> = match right {
+        // form). Returns (keyword, [names]): `:export` marks exports, `:const` marks
+        // read-only constants (B6 / code_analysis_03).
+        let (kw, names): (String, Vec<String>) = match right {
             Instr::Array { elements } => {
-                // elements[0] is the `:export` keyword symbol; elements[1] is the target.
+                // elements[0] is the directive keyword symbol; elements[1] is the target.
                 if elements.len() < 2 {
                     return Ok(Rc::new(APLValue::Null));
                 }
-                match &elements[1] {
+                let keyword = match &elements[0] {
+                    Instr::Symbol { name, .. } => name.clone(),
+                    _ => String::new(),
+                };
+                let extracted = match &elements[1] {
                     Instr::Symbol { name, .. } => vec![name.clone()],
                     Instr::Array { elements: inner } => inner
                         .iter()
@@ -5573,16 +5613,27 @@ impl Engine {
                         .collect(),
                     // Non-symbol operand (e.g. an operator glyph): no-op, like the oracle.
                     _ => vec![],
-                }
+                };
+                (keyword, extracted)
             }
             // Bare `declare(:foo)` with a single (non-paren) argument is unusual; treat
             // any lone Symbol as the target to export.
-            Instr::Symbol { name, .. } => vec![name.clone()],
-            _ => vec![],
+            Instr::Symbol { name, .. } => ("export".to_string(), vec![name.clone()]),
+            _ => (String::new(), vec![]),
         };
         let cur = env.ns_registry.current_ns();
-        for name in names {
-            env.ns_registry.declare_export(&cur, &name);
+        match kw.as_str() {
+            "const" => {
+                for name in names {
+                    env.ns_registry.declare_const(&cur, &name);
+                }
+            }
+            // Default (and `export`) keeps the historical export behaviour.
+            _ => {
+                for name in names {
+                    env.ns_registry.declare_export(&cur, &name);
+                }
+            }
         }
         Ok(Rc::new(APLValue::Null))
     }

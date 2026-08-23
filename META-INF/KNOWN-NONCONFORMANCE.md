@@ -284,6 +284,29 @@ Features the engine does not build yet. Most are tracked in `ROADMAP.md`.
 
 ---
 
+## Deliberate extension: `use()` tolerates per-statement errors (03-B4 decision, 2026-08-23)
+
+**Decision: KEEP the tolerant behaviour as an intentional, documented extension** (option b of
+analysis 03 §2-B4 / ROADMAP P0.2). The oracle ABORTS a `use()`d file at the first failing
+statement (earlier definitions persist); the port logs `warning: use(): statement failed: …`
+and continues. Rationale: the vendored stdlib chain (`standard-lib.kap` pulls 13 files, several
+with known port gaps) only delivers a usable kernel if one bad file doesn't kill the load; with
+abort semantics the whole stdlib startup dies on the first gap. Revisit (flip to abort) after
+ROADMAP P1 (parser migration) closes the bulk parse gaps — at that point tolerance hides nothing.
+
+Known residual deltas in this family:
+- **B7**: unparenthesized derivation `keys ≠⌸ values` errors ("≠ requires numbers") where the
+  oracle groups correctly; the parenthesized form `(≠⌸)` works identically. Parser strand-loop
+  item, tracked with ROADMAP P1.
+- **`typeof ⌸` error text**: oracle emits `No arguments specified for function`
+  (`IllegalContextForFunction`), the port emits `Operator without left function` uniformly for
+  incomplete operator applications. Error-class parity holds; exact text is an ERRORS.md item
+  (ROADMAP §0.3).
+- **Quad-constant class name**: `typeof ⎕A` → oracle `kap:array`, port `kap:string`. The
+  port models char vectors as `APLValue::Str`; value content is identical.
+
+---
+
 ## Re-baseline protocol
 
 To refresh the numbers and the mismatch/unsupported sample:

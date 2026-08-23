@@ -34,7 +34,7 @@ impl Session {
     pub fn new() -> Self {
         Session {
             engine: Engine::new(),
-            env: Rc::new(Environment::default()),
+            env: Environment::new_root(),
         }
     }
 

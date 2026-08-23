@@ -376,6 +376,12 @@ pub struct NamespaceRegistry {
     pub exports: RefCell<HashMap<String, HashSet<String>>>,
     /// `name -> list of imported namespace names` (populated by `import(…)`).
     pub imports: RefCell<HashMap<String, Vec<String>>>,
+    /// `(ns, name)` pairs that are READ-ONLY. Populated two ways:
+    /// - natively at Engine construction for the quad constants `⎕A ⎕a ⎕d` (Kotlin
+    ///   registers these as engine constants; oracle: fresh-session `⎕A` works and
+    ///   `⎕A ← 5` → "Assignment to constant variable: kap:⎕A");
+    /// - by `declare(:const …)` at eval time (B6 / code_analysis_03).
+    pub constants: RefCell<HashSet<(String, String)>>,
 }
 
 impl NamespaceRegistry {
@@ -401,6 +407,18 @@ impl NamespaceRegistry {
             .entry(ns.to_string())
             .or_default()
             .insert(name.to_string(), val);
+    }
+    /// Mark `(ns, name)` as read-only (Kotlin `Namespace.addConstant`).
+    pub fn declare_const(&self, ns: &str, name: &str) {
+        self.constants
+            .borrow_mut()
+            .insert((ns.to_string(), name.to_string()));
+    }
+    /// Whether `(ns, name)` is a read-only constant.
+    pub fn is_constant(&self, ns: &str, name: &str) -> bool {
+        self.constants
+            .borrow()
+            .contains(&(ns.to_string(), name.to_string()))
     }
     pub fn ns_lookup(&self, ns: &str, name: &str) -> Option<AplRef<APLValue>> {
         self.symbols
@@ -511,6 +529,27 @@ impl Environment {
             parent: Some(parent.clone()),
             ns_registry: parent.ns_registry.clone(),
         })
+    }
+
+    /// Build a fresh ROOT environment whose namespace registry is pre-seeded with the
+    /// native quad constants (`⎕A`/`⎕a`/`⎕d`). B5 / code_analysis_03 / ROADMAP P6:
+    /// Real Kap registers these as engine-level read-only constants — a FRESH session
+    /// (no stdlib) already has `⎕A → "ABCDEFGHIJKLMNOPQRSTUVWXYZ"` and
+    /// `⎕A ← 5` errors "Assignment to constant variable: kap:⎕A" (oracle-verified).
+    pub fn new_root() -> Rc<Environment> {
+        let env = Rc::new(Environment::default());
+        {
+            let reg = &env.ns_registry;
+            for (name, val) in [
+                ("⎕A", "ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
+                ("⎕a", "abcdefghijklmnopqrstuvwxyz"),
+                ("⎕d", "0123456789"),
+            ] {
+                reg.declare_const("kap", name);
+                reg.ns_define("kap", name, Rc::new(APLValue::Str(val.to_string())));
+            }
+        }
+        env
     }
 
     /// Is this the root (module-level) scope? Root scopes hold module bindings; child scopes

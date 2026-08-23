@@ -1,5 +1,5 @@
 namespace("kap")
- 	
+
 ∇ (keys) (fn ⌸) (values) {
         keyindex ← =keys
         ((≠keyindex)/keys) ,[0.5] ⍞fn¨ keyindex⫇values
@@ -10,9 +10,4 @@ declare(:export ⌸)
 ⎕p ⇐ (⊣ io:print)
 ⎕pl ⇐ (⊣ io:println)
 
-⎕A ← @A…@Z
-⎕a ← @a…@z
-⎕d ← @0…@9
-
 declare(:export (⎕p ⎕pl ⎕A ⎕a ⎕d))
-declare(:const (⎕A ⎕a ⎕d))
