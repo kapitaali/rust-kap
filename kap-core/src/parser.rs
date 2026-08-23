@@ -212,17 +212,15 @@ impl<'a> Parser<'a> {
         Ok(Some(instr))
     }
 
-    /// P1 (ROADMAP §4 / `references/parser_migration.md` M1–M2): a direct translation of
-    /// Kotlin `parser.kt::parseValueInner` (:875–1030). Operands accumulate left-to-right
-    /// in `leftArgs`; function-shaped tokens consume the accumulated list at once.
+    /// P1-M3 (ROADMAP §4 / `references/parser_migration.md`): direct translation of
+    /// Kotlin `parseValueInner` (:875–1030) + `processFn` (:432–497). Operands accumulate
+    /// left-to-right in `left_args`; a FUNCTION-SHAPED token (user fn symbol, `{…}` dfn,
+    /// function-valued paren group) consumes the whole accumulated list at once via
+    /// `finish_fn_call`. Constructs still outside this slice fall back to the legacy
+    /// parser FROM STATEMENT START (primitives/operators/trains/forks/λ/∇).
     ///
-    /// Scope of this first slice (M1/M2): literals, symbols (variable refs + known-fn
-    /// monadic/dyadic calls), parenthesised groups, `←` assignment, statement end tokens.
-    /// Operator binding (`parseOperator`), trains, forks and fn-values are M3/M4 and still
-    /// fall through to the legacy `parse_expr` for those constructs (detected by token).
+    /// Active only under KAP_KOTLIN_PARSER=1; default path byte-identical to pre-M1.
     fn parse_value_kotlin(&mut self) -> Result<Instr, AplError> {
-        // Statement start: ANY construct this slice does not yet handle falls back to
-        // the legacy parser from HERE, discarding partial accumulation.
         let start = self.pos;
         let mut left_args: Vec<Instr> = Vec::new();
         loop {
@@ -231,9 +229,7 @@ impl<'a> Parser<'a> {
                 Some(t) => t.clone(),
                 None => break,
             };
-            // END_EXPR_TOKEN_LIST (parser.kt:1342) minus Newline (skipped above) and
-            // CloseParen/CloseBracket/CloseFnDef/RightFork which only occur nested —
-            // this entry point is statement-level, so an unexpected closer is an error.
+            // END_EXPR_TOKEN_LIST (parser.kt:1342), statement-level subset.
             match &tok.token {
                 Token::EndOfFile | Token::StatementSeparator => break,
                 _ => {}
@@ -244,23 +240,6 @@ impl<'a> Parser<'a> {
                     left_args.push(Instr::Literal(LiteralValue::Number(n.clone())));
                 }
                 Token::Literal(LiteralValue::Str(s)) => {
-                    // A string FIRST in a statement (`"UTF16" unicode:enc "A"`) is the
-                    // LEFT ARGUMENT of a namespaced function call — processFn territory
-                    // (M3). Fall back to legacy from statement start.
-                    if !left_args.is_empty() || self.peek().map(|t| &t.token) != Some(&Token::Literal(LiteralValue::Str(s.clone()))) {
-                        // unreachable guard; fall through
-                    }
-                    let save = self.pos;
-                    self.advance();
-                    let more_fn = matches!(
-                        self.peek().map(|t| &t.token),
-                        Some(Token::Literal(LiteralValue::Symbol { namespace: Some(_), .. }))
-                    );
-                    self.pos = save;
-                    if more_fn {
-                        self.pos = start;
-                        return self.parse_expr();
-                    }
                     self.advance();
                     left_args.push(Instr::Literal(LiteralValue::Str(s.clone())));
                 }
@@ -273,32 +252,43 @@ impl<'a> Parser<'a> {
                     left_args.push(Instr::Empty);
                 }
                 Token::OpenBrace => {
-                    // A `{…}` dfn is FUNCTION-SHAPED (Kotlin routes LambdaToken through
-                    // processFn). `3 {⍺+⍵} 4` = dyadic call with ⍺=3, ⍵=4; a bare `{…}`
-                    // evaluates to the function value itself. This slice's valence logic
-                    // lives in the symbol arm; the cleanest M1-slice move is to hand the
-                    // statement back to the legacy parser, which already implements the
-                    // Kotlin lambda semantics.
-                    self.pos = start;
-                    return self.parse_expr();
-                }
-                Token::OpenParen => {
-                    // A function-shaped group (derived operator / train / fork / left-bind
-                    // / nested compose) needs processFn semantics — M3. Fall back to the
-                    // legacy parser from statement start. `next_is_paren_operator` covers
-                    // ALL of these shapes (including nested `(1+)⍛-` groups).
-                    if self.next_is_paren_operator() || self.next_is_function_token() {
-                        self.pos = start;
-                        return self.parse_expr();
-                    }
-                    let save = self.pos;
-                    match self.parse_primary() {
-                        Ok(instr) => left_args.push(instr),
+                    // `{…}` is FUNCTION-SHAPED (Kotlin routes the lambda through
+                    // processFn): `3 {⍺+⍵} 4` is dyadic; bare `{⍵×2}` is an ambivalent
+                    // fn VALUE (:460).
+                    let lam = match self.parse_primary() {
+                        Ok(f) => f,
                         Err(_) => {
                             self.pos = start;
                             return self.parse_expr();
                         }
+                    };
+                    if !Self::is_function_expr(&lam) {
+                        self.pos = start;
+                        return self.parse_expr();
                     }
+                    return self.finish_fn_call(lam, &mut left_args);
+                }
+                Token::OpenParen => {
+                    // parser.kt:984: parse the group toplevel; a FUNCTION result feeds
+                    // processFn with the accumulated left args (`(10+) 1`, `(≠⌸) v`).
+                    let save = self.pos;
+                    let group = match self.parse_primary() {
+                        Ok(g) => g,
+                        Err(_) => {
+                            self.pos = start;
+                            return self.parse_expr();
+                        }
+                    };
+                    if Self::is_function_expr(&group) && !self.at_statement_boundary() {
+                        return self.finish_fn_call(group, &mut left_args);
+                    }
+                    // Value group: restore nothing (parse_primary consumed it correctly)
+                    // unless it failed to move; guard by re-checking position.
+                    if self.pos == save {
+                        self.pos = start;
+                        return self.parse_expr();
+                    }
+                    left_args.push(group);
                 }
                 Token::LeftArrow => {
                     // `x ← v` (parser.kt:997 → processAssignment): target = last leftArg.
@@ -329,10 +319,9 @@ impl<'a> Parser<'a> {
                         .clone()
                         .map(|ns| format!("{}:{}", ns, name))
                         .unwrap_or_else(|| name.clone());
-                    // A PRIMITIVE function glyph (`+`, `⍳`, …) still needs the legacy
-                    // dyadic-loop machinery — fall back from statement start until M3
-                    // ports processFn fully.
-                    if Self::is_primitive_op(&qual) {
+                    // Primitives/operators still need the legacy dyadic-loop machinery —
+                    // fall back from statement start until M4 ports parseOperator.
+                    if Self::is_primitive_op(&qual) || Self::is_adverb(&name) {
                         self.pos = start;
                         return self.parse_expr();
                     }
@@ -345,59 +334,21 @@ impl<'a> Parser<'a> {
                         left_args.push(Instr::Symbol { name, namespace });
                         continue;
                     }
-                    // Function-shaped USER symbol: resolve valence against left_args
-                    // exactly as processFn does (:455–495). The function is one symbol;
-                    // do NOT consume further tokens into it here (that was the bug that
-                    // turned `2 + 3` into a strand).
+                    // Function-shaped USER/namespaced symbol → processFn (:969).
                     self.advance();
                     let fn_instr = Instr::Symbol { name, namespace };
-                    self.skip_newlines();
-                    let has_right = !self.at_statement_boundary()
-                        && !matches!(
-                            self.peek().map(|t| &t.token),
-                            Some(Token::StatementSeparator) | Some(Token::EndOfFile)
-                        );
-                    if has_right {
-                        let right = self.parse_apply()?;
-                        if left_args.is_empty() {
-                            // FunctionCall1Arg (parser.kt:468): monadic, ⍵ = right.
-                            return Ok(Instr::Apply {
-                                fn_expr: Box::new(fn_instr),
-                                left: None,
-                                right: Box::new(right),
-                            });
-                        } else {
-                            // FunctionCall2Arg (parser.kt:474): ⍺ = strand(leftArgs).
-                            let strand = Instr::Array {
-                                elements: std::mem::take(&mut left_args),
-                            };
-                            return Ok(Instr::Apply {
-                                fn_expr: Box::new(fn_instr),
-                                left: Some(Box::new(strand)),
-                                right: Box::new(right),
-                            });
-                        }
-                    } else {
-                        // No right argument: the accumulated operands stand alone
-                        // (strand) and the bare function evaluates to itself — but a
-                        // bare primitive with nothing else is just a value error later,
-                        // matching Kotlin's ambivalent-fn-result only inside fn context.
-                        if left_args.is_empty() {
-                            return Ok(fn_instr);
-                        }
-                        let mut elems = std::mem::take(&mut left_args);
-                        elems.push(fn_instr);
-                        return Ok(Instr::Array { elements: elems });
-                    }
+                    return self.finish_fn_call(fn_instr, &mut left_args);
                 }
                 _ => {
-                    // Unhandled token class in this slice: fall back to the legacy
-                    // expression parser from the statement START.
+                    // Unhandled token class: fall back to the legacy expression parser
+                    // from the statement START (no partial consumption).
                     self.pos = start;
                     return self.parse_expr();
                 }
             }
         }
+        // makeResultList (parser.kt:206): a single accumulated operand IS the result,
+        // unwrapped; several operands strand.
         match left_args.len() {
             0 => Err(self.err("empty expression")),
             1 => Ok(left_args.pop().unwrap()),
@@ -405,6 +356,59 @@ impl<'a> Parser<'a> {
                 elements: left_args,
             }),
         }
+    }
+
+    /// P1-M3 port of Kotlin `processFn` (:432–495) valence resolution. Called with the
+    /// just-parsed function-shaped instr and the CURRENT accumulated left args:
+    /// - right empty & left empty  → the fn itself (ambivalent fn value, :460)
+    /// - right empty & left nonempty → strand of lefts (left-bind territory, M4)
+    /// - right value & left empty  → FunctionCall1Arg monadic (:468)
+    /// - right value & left n      → FunctionCall2Arg, ⍺ = the SINGLE left arg or a
+    ///   strand of several (makeResultList semantics, :474)
+    fn finish_fn_call(&mut self, fn_instr: Instr, left_args: &mut Vec<Instr>) -> Result<Instr, AplError> {
+        self.skip_newlines();
+        let has_right = !self.at_statement_boundary()
+            && !matches!(
+                self.peek().map(|t| &t.token),
+                Some(Token::StatementSeparator) | Some(Token::EndOfFile)
+            );
+        if !has_right {
+            // No data follows: bare fn evaluates to itself (parser.kt:460); any
+            // accumulated left operands strand after it (value-position fn ref).
+            if left_args.is_empty() {
+                return Ok(fn_instr);
+            }
+            let mut elems = std::mem::take(left_args);
+            elems.push(fn_instr);
+            return Ok(Instr::Array { elements: elems });
+        }
+        let right = self.parse_apply()?;
+        if left_args.is_empty() {
+            // FunctionCall1Arg (parser.kt:468): monadic, ⍵ = right.
+            return Ok(Instr::Apply {
+                fn_expr: Box::new(fn_instr),
+                left: None,
+                right: Box::new(right),
+            });
+        }
+        // FunctionCall2Arg (parser.kt:474): ⍺ = makeResultList(leftArgs) — ONE operand
+        // passes through UNWRAPPED (`3 g 4` binds ⍺=3, NOT ⍺=(3)).
+        if left_args.len() == 1 {
+            let left = left_args.pop().unwrap();
+            return Ok(Instr::Apply {
+                fn_expr: Box::new(fn_instr),
+                left: Some(Box::new(left)),
+                right: Box::new(right),
+            });
+        }
+        let strand = Instr::Array {
+            elements: std::mem::take(left_args),
+        };
+        Ok(Instr::Apply {
+            fn_expr: Box::new(fn_instr),
+            left: Some(Box::new(strand)),
+            right: Box::new(right),
+        })
     }
 
     /// Expect the next token to be `tok`; consume it or return a parse error.
