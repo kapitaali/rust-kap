@@ -195,11 +195,28 @@ impl<'a> Parser<'a> {
         {
             return Ok(None);
         }
-        // P1-M1 (ROADMAP): the Kotlin-accumulator parser can be selected per process via
-        // KAP_KOTLIN_PARSER=1. It is a SEPARATE code path — when unset, behaviour is
-        // byte-identical to before this commit.
-        if std::env::var("KAP_KOTLIN_PARSER").as_deref() == Ok("1") {
-            let instr = self.parse_value_kotlin()?;
+        // P1-M6 (ROADMAP §16.4): the Kotlin-accumulator parser is now the DEFAULT.
+        // KAP_KOTLIN_PARSER=0 opts out to the legacy heuristic parser; block bodies
+        // ({…} interiors) remain on legacy parse_block as a documented divergence.
+        if std::env::var("KAP_KOTLIN_PARSER").as_deref() != Ok("0") {
+            let instr = match self.parse_value_kotlin() {
+                Ok(i) => i,
+                // Sentinel from bind_operators_kotlin: an operator binding on a
+                // VALUE (e.g. the `1/2` rational inside ⍎) — legacy handles it.
+                Err(crate::AplError::Runtime(m))
+                    if m.contains("__KOTLIN_FALLBACK__") =>
+                {
+                    let instr = self.parse_expr()?;
+                    self.skip_newlines();
+                    if let Some(t) = self.peek() {
+                        if matches!(t.token, Token::StatementSeparator) {
+                            self.advance();
+                        }
+                    }
+                    return Ok(Some(instr));
+                }
+                Err(e) => return Err(e),
+            };
             self.skip_newlines();
             if let Some(t) = self.peek() {
                 if matches!(t.token, Token::StatementSeparator) {
@@ -450,11 +467,14 @@ impl<'a> Parser<'a> {
                         let fn_instr = Instr::Symbol { name, namespace };
                         return self.finish_fn_call(fn_instr, &mut left_args);
                     }
-                    let is_fn = namespace.is_some()
+                    // Keyword-namespace symbols (`:name`) are ALWAYS values —
+                    // never function-shaped (parser.kt makeVariableRef).
+                    let is_fn = (namespace.is_some() && namespace.as_deref() != Some("keyword"))
                         || self.is_known_fn(&name, &namespace)
                         || self.known_functions.iter().any(|f| f == &name);
                     if !is_fn {
-                        // Variable reference (parser.kt:971 makeVariableRef).
+                        // Keyword-namespace symbols (`:name`) are VALUES (parser.kt
+                        // makeVariableRef); they must strand, never resolve as fns.
                         self.advance();
                         left_args.push(Instr::Symbol { name, namespace });
                         continue;
@@ -490,6 +510,21 @@ impl<'a> Parser<'a> {
     fn bind_operators_kotlin(&mut self, mut cur: Instr) -> Result<Instr, AplError> {
         loop {
             self.skip_newlines();
+            // An operator binding on a VALUE (`1 / 2`, the `1/2` rational literal
+            // inside ⍎) is not operator application — Kotlin's processFn only
+            // calls parseOperator after a FUNCTION. Legacy handles these shapes;
+            // signal the caller to retry from statement start.
+            if !Self::is_function_expr(&cur) {
+                if let Some(t) = self.peek().map(|t| t.token.clone()) {
+                    if let Token::Literal(LiteralValue::Symbol { ref name, .. }) = t {
+                        if Self::is_adverb(name)
+                            || self.known_ops.iter().any(|n| n == name)
+                        {
+                            return Err(self.err("__KOTLIN_FALLBACK__"));
+                        }
+                    }
+                }
+            }
             // parseAxis (:1321): `f[axis]` wraps into AxisApplied.
             if let Some(t) = self.peek() {
                 if matches!(t.token, Token::OpenBracket) {
