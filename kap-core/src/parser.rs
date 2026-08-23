@@ -2413,7 +2413,6 @@ impl<'a> Parser<'a> {
     /// form puts the keyword FIRST: `defsyntax triggerName (rules) { body }`. Returns `None`
     /// if the current position is not a defsyntax directive.
     fn parse_defsyntax_directive(&mut self) -> Result<Option<Instr>, AplError> {
-        // Must begin with the `defsyntax` / `defsyntaxsub` keyword symbol.
         self.skip_newlines();
         let kw = match self.peek() {
             Some(t) => t.clone(),
@@ -2451,6 +2450,7 @@ impl<'a> Parser<'a> {
         if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenBrace)) {
             return Err(self.err("expected '{' before defsyntax body"));
         }
+        self.advance(); // consume the opening `{` (parse_block assumes it is gone)
         let body = self.parse_block()?;
         if is_sub {
             Ok(Some(Instr::DefSyntaxSub {
@@ -2592,6 +2592,7 @@ impl<'a> Parser<'a> {
                     if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenBrace)) {
                         return Err(self.err(&format!("expected '{{' for :function rule '{}'", var)));
                     }
+                    self.advance(); // consume the opening `{` (parse_block assumes it is gone)
                     let body = self.parse_block()?;
                     bindings.push((
                         var.clone(),
@@ -2719,6 +2720,9 @@ impl<'a> Parser<'a> {
         match rule {
             SyntaxRule::Function { var } | SyntaxRule::NFunction { var } => {
                 self.skip_newlines();
+                if matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenBrace)) {
+                    self.advance(); // consume the opening `{` (parse_block assumes it is gone)
+                }
                 let _ = self.parse_block()?;
                 let _ = var;
                 Ok(())
@@ -2782,10 +2786,20 @@ impl<'a> Parser<'a> {
             match rule {
                 SyntaxRule::Function { var } | SyntaxRule::NFunction { var } => {
                     self.skip_newlines();
+                    if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenBrace)) {
+                        return Err(self.err(&format!(
+                            "expected '{{' for :function rule '{}'",
+                            var
+                        )));
+                    }
+                    self.advance(); // consume the opening `{` (parse_block assumes it is gone)
                     let body = self.parse_block()?;
                     bindings.push((
                         var.clone(),
-                        Box::new(Instr::Lambda { params: vec![], body: Box::new(body) }),
+                        Box::new(Instr::Lambda {
+                            params: vec![],
+                            body: Box::new(body),
+                        }),
                     ));
                 }
                 SyntaxRule::Value { var } | SyntaxRule::ExprFunction { var } | SyntaxRule::NExprFunction { var } => {

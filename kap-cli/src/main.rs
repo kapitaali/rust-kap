@@ -49,6 +49,11 @@ fn main() {
             lib_paths.push(a[2..].to_string());
             i += 1;
             continue;
+        } else if a == "--no-standard-lib" {
+            // Startup stdlib-suppression flag (handled again below at load time); it
+            // is NOT a file argument, so skip it here and do not switch to file mode.
+            i += 1;
+            continue;
         } else if a.starts_with('-') && a.len() > 1 && a != "-n" && !a.starts_with("--no-") {
             // Unknown flag; ignore (could be a REPL flag passed through) but don't
             // treat as the file. We only switch to file mode on a non-flag arg.

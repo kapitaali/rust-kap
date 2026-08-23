@@ -1,0 +1,19 @@
+defsyntax when (:special :openBrace :optional (:special :newline) :repeat (entryList whenInner) :special :closeBrace) {
+  res ← ⍬
+  for i in entryList do {
+    cond ← whenInner_cond i
+    body ← whenInner_body i
+    if cond do {
+      res ← body
+    }
+  }
+  res
+}
+defsyntaxsub whenInner (:openParen :value cond :closeParen :openBrace :value body :closeBrace) {
+  res ← ⍬
+  res_cond ← cond
+  res_body ← body
+  res
+}
+declare(:export when)
+when { (2>1){ result ← "x" } }

@@ -962,6 +962,19 @@ impl Engine {
             ),
             _ => (None, None),
         };
+        // `declare` is a *special form* (Kotlin `DeclareToken` → `processExport`): its
+        // argument is read *syntactically*, never evaluated. `declare(:export zork)`
+        // must not force-evaluate `zork` — the oracle returns `null` and tolerates a
+        // not-yet-bound name. We intercept the bare symbol `declare` here, *before*
+        // `right_val` is forced below, and read the (unevaluated) `right` AST instead.
+        // The argument is `[Symbol{export,keyword}, target]` where `target` is a
+        // `Symbol` (export one name) or an `Array` of `Symbol`s (export several), or a
+        // non-symbol operand (no-op, matching the oracle's tolerance).
+        if let (Some(name), Some(ns)) = (&fn_name, &fn_namespace) {
+            if name == "declare" && ns.is_none() {
+                return self.eval_declare(right, env);
+            }
+        }
         let lambda = match fn_expr {
             Instr::Lambda { params, body } => Some((
                 params.clone(),
@@ -1563,47 +1576,13 @@ impl Engine {
                 Ok(right_val)
             }
             "declare" => {
-                // Argument is an array `[Symbol{export,keyword}, Symbol{name,ns}]`,
-                // i.e. `declare(:export a)`. Mark the second symbol's name exported in
-                // the current namespace.
-                let arr = match right_val.as_ref() {
-                    APLValue::Array(a) => a.clone(),
-                    other => {
-                        return Err(AplError::runtime(format!(
-                            "declare requires a [keyword symbol, symbol] pair, got: {}",
-                            other.format_value()
-                        )))
-                    }
-                };
-                let elems = arr.elements();
-                if elems.len() != 2 {
-                    return Err(AplError::runtime(format!(
-                        "declare requires exactly 2 elements, got: {}",
-                        elems.len()
-                    )));
-                }
-                // The second element may be:
-                //  - a single Symbol  (declare(:export a))
-                //  - an array of Symbols (declare(:export (a b c))) — export each
-                //  - an operator operand (declare(:export ⌸)) — not exportable here,
-                //    so skip gracefully rather than erroring.
-                let cur = env.ns_registry.current_ns();
-                match elems[1].as_ref() {
-                    APLValue::Symbol { name, .. } => {
-                        env.ns_registry.declare_export(&cur, name);
-                    }
-                    APLValue::Array(g) => {
-                        for sub in g.elements() {
-                            if let APLValue::Symbol { name, .. } = sub.as_ref() {
-                                env.ns_registry.declare_export(&cur, name);
-                            }
-                        }
-                    }
-                    // Operator operand or other non-symbol: ignore (export is a no-op
-                    // for these, and `⌸` is a deferred operator).
-                    _ => {}
-                }
-                Ok(right_val)
+                // Handled as a *special form* (see the `declare` interception at the top
+                // of `eval_apply`, which passes the *unevaluated* argument AST). This arm
+                // is only reached if `declare` is somehow applied through the normal
+                // path; route it the same way for safety. `right_val` may already be
+                // forced here, so prefer re-structuring from the AST is not possible —
+                // just re-run via the structural method using the evaluated array.
+                self.eval_declare_struct(right_val.clone(), env)
             }
             // `use("file.kap")` — load and evaluate a library file in the *current*
             // namespace (so its top-level `∇`/`⇐` definitions land where the call
@@ -5473,6 +5452,87 @@ impl Engine {
         }
     }
 
+    /// `declare` special-form handler. Reads the *unevaluated* argument AST
+    /// structurally (Kotlin `DeclareToken` → `processExport` — never evaluates its
+    /// argument), so `declare(:export zork)` tolerates an unbound name and returns
+    /// `null` exactly like the oracle. The argument AST is `[Symbol{export,keyword},
+    /// target]` where `target` is a `Symbol` (export one), an `Array` of `Symbol`s
+    /// (export several), or anything else (no-op, matching oracle tolerance).
+    fn eval_declare(
+        &self,
+        right: &Instr,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        // Extract symbol names *structurally* from the AST — we must not evaluate
+        // `target`, since it may be an unbound name (the whole point of the special
+        // form). Returns the list of bare names to mark exported.
+        let names: Vec<String> = match right {
+            Instr::Array { elements } => {
+                // elements[0] is the `:export` keyword symbol; elements[1] is the target.
+                if elements.len() < 2 {
+                    return Ok(Rc::new(APLValue::Null));
+                }
+                match &elements[1] {
+                    Instr::Symbol { name, .. } => vec![name.clone()],
+                    Instr::Array { elements: inner } => inner
+                        .iter()
+                        .filter_map(|e| match e {
+                            Instr::Symbol { name, .. } => Some(name.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                    // Non-symbol operand (e.g. an operator glyph): no-op, like the oracle.
+                    _ => vec![],
+                }
+            }
+            // Bare `declare(:foo)` with a single (non-paren) argument is unusual; treat
+            // any lone Symbol as the target to export.
+            Instr::Symbol { name, .. } => vec![name.clone()],
+            _ => vec![],
+        };
+        let cur = env.ns_registry.current_ns();
+        for name in names {
+            env.ns_registry.declare_export(&cur, &name);
+        }
+        Ok(Rc::new(APLValue::Null))
+    }
+
+    /// Fallback `declare` path for the rare case where it reaches the normal Apply
+    /// arm (the argument has already been force-evaluated into an `APLValue`). Kept
+    /// for symmetry with the special form; not the primary path.
+    fn eval_declare_struct(
+        &self,
+        right_val: AplRef<APLValue>,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let names: Vec<String> = match right_val.as_ref() {
+            APLValue::Array(a) => {
+                let elems = a.elements();
+                if elems.len() < 2 {
+                    return Ok(Rc::new(APLValue::Null));
+                }
+                match elems[1].as_ref() {
+                    APLValue::Symbol { name, .. } => vec![name.clone()],
+                    APLValue::Array(g) => g
+                        .elements()
+                        .iter()
+                        .filter_map(|s| match s.as_ref() {
+                            APLValue::Symbol { name, .. } => Some(name.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => vec![],
+                }
+            }
+            _ => vec![],
+        };
+        let cur = env.ns_registry.current_ns();
+        for name in names {
+            env.ns_registry.declare_export(&cur, &name);
+        }
+        Ok(Rc::new(APLValue::Null))
+    }
+
     /// Convert an evaluated `APLValue` back into an `Instr` so we can re-dispatch a
     /// function application via `eval_apply` (used by adverbs). Handles scalars and
     /// nested arrays; user functions are not inlineable (error if hit).
@@ -7653,10 +7713,10 @@ impl Engine {
             AplError::runtime(format!("use: cannot read {}: {}", path.display(), e))
         })?;
 
-        self.include_stack.borrow_mut().insert(basename);
+        self.include_stack.borrow_mut().insert(basename.clone());
         let _guard = IncludeGuard {
             stack: self.include_stack.clone(),
-            name: path.to_string_lossy().into_owned(),
+            name: basename,
         };
         // Evaluate the file in the *current* namespace so its top-level
         // `∇`/`⇐` definitions land where the `use` call appears.
