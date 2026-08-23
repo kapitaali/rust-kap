@@ -280,8 +280,11 @@ impl<'a> Parser<'a> {
                         }
                     };
                     if Self::is_function_expr(&group) {
-                        // parser.kt:984 feeds a function-valued group to processFn
-                        // unconditionally; with no data following, :460 yields fn VALUE.
+                        // parser.kt:984 feeds a function-valued group to processFn.
+                        // CRITICAL: when the group's own parse ended as an FnParseResult
+                        // (no right arg inside the parens), processFn CONTINUES with the
+                        // tokens after `)` — so `(1↑⍴) 3 4` chains (1↑) then ⍴ via
+                        // Chain2, and `(≠⌸) v` derives the operator then applies to v.
                         return self.finish_fn_call(group, &mut left_args);
                     }
                     // Value group: restore nothing (parse_primary consumed it correctly)
