@@ -602,6 +602,14 @@ impl<'a> Parser<'a> {
         ) {
             return Err(self.err(&format!("'{} ⇐' requires a function on the right", name)));
         }
+        // B2 (code_analysis_03): a bare known-operator symbol as the `⇐` RHS is a parse error
+        // in Real Kap (`foo ⇐ ⌸` → "Operator without left function: ⌸", Kotlin
+        // parser.kt:967–971 InvalidOperatorArgument). Operators are never values.
+        if let Instr::Symbol { name: rhs, namespace: None } = &value {
+            if self.known_ops.iter().any(|n| n == rhs) {
+                return Err(self.err(&format!("Operator without left function: {}", rhs)));
+            }
+        }
         Ok(Instr::FnAssign {
             name,
             namespace,
@@ -972,6 +980,14 @@ impl<'a> Parser<'a> {
                     } else {
                         None
                     };
+                    // B1 (code_analysis_03): an operator application must carry a function
+                    // operand OR a trailing data argument. `⟨known_fn⟩ ⟨known_op⟩` with
+                    // neither (e.g. `typeof ⌸`) is incomplete and would otherwise reach eval
+                    // and run the operator body / panic. Kotlin's `InvalidOperatorArgument`
+                    // rejects this at parse time with the text below; mirror it.
+                    if right_fn.is_none() && self.at_statement_boundary() {
+                        return Err(self.err(&format!("Operator without left function: {}", opname)));
+                    }
                     // Adopt the combined operator as `first` and fall through to the normal
                     // application logic below, which will consume any trailing data argument
                     // (e.g. the `3` in `-foo+ 3`). Returning here would leave it unconsumed.

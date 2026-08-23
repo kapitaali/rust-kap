@@ -1,275 +1,328 @@
-# ROADMAP — Rust Kap rewrite
+# ROADMAP — Rust Kap rewrite (v2)
 
-Consolidated from the dated `PROGRESS-2026*.md` session logs. Tracks the
-open Phase 6 breadth work and deferred items. Branch invariant (enforced
-after every commit): `main == strings == origin/*`.
+*Reworked 2026-08-23 from the code-analysis sessions (`code_analysis.md`,
+`code_analysis_02.md`, `code_analysis_03.md`) and a fresh audit of the Kotlin
+tree. Supersedes v1; completed-phase history lives in `PROGRESS-2026*.md`.*
 
-## ⚠️ Ground truth for Kap behaviour (non-negotiable)
+**Design principle of this roadmap:** the Rust port mirrors the Kotlin source
+module-for-module, function-for-function, error-text-for-error-text. When in
+doubt about *how* to build something, the answer is "open the Kotlin file this
+row points at and translate its structure", never "invent a Rust-y approach".
+Every phase below names its Kotlin anchor files up front.
 
-Kap semantics come from exactly **two** sources, never memory/intuition/APL familiarity:
-1. The **Kotlin source** at `~/Apps/array/array` — READ it, never run it (Gradle/JVM broken here).
-2. The **Real Kap binary** — `~/Apps/array/kap-jvm-text/bin/kap-jvm-text`. Evaluate any
-   expression with `printf 'expr\n' | …/kap-jvm-text 2>&1` (result line `⊢ <value>`;
-   extract with `grep -aE '⊢ '`).
+---
 
-**Never answer "what does Kap do for X?" without evaluating X against the oracle first.**
-If the oracle disagrees, the oracle wins. (Case in point: `2 +[0] 3` → `5`, not the port's
-"rank 1" error — Kotlin `eval2Arg` short-circuits scalar+scalar before axis handling.)
+## 0. Ground truth (non-negotiable, unchanged)
 
-## Current phase: stdlib-kernel (Phase 4) + Phase 6 breadth
+Kap behaviour comes from exactly two sources, never memory/intuition/APL habit:
 
-Phase 6 breadth is now **effectively complete** — all listed structural/array builtins
-(`⊆`/`⊇`, `∘`/`⍛`, `≬`, `→`, bracket-index, `⌷`, `≡`/`≢`, `⊃`, the `⍕` format family)
-are DONE and match the Kotlin oracle. The remaining genuinely-open work is the **stdlib
-kernel** (`use()` file-loading + the Kap-source stdlib), which unblocks `⌸`/`⌺`/`⎕*` and
-the `s:`/`io:` helpers. This is the next planned stage; strategy below.
+1. **Kotlin source** at `~/Apps/array/array/src/commonMain/kotlin/com/dhsdevelopments/kap/`
+   — READ it, never run the Gradle build.
+2. **Real Kap binary** — `~/Apps/array/kap-jvm-text/bin/kap-jvm-text`
+   (`--lib-path=$HOME/Apps/array/kap-jvm-text/standard-lib`). Probe with
+   `printf 'expr\n' | …/kap-jvm-text …`; result line `⊢ <value>`.
 
-## Stdlib-kernel strategy (Phase 4 of `RUST_REWRITE_STRATEGY.md` §5–§6)
+**Never claim "Kap does X" without a captured oracle transcript.** This now
+applies to problem write-ups too (lesson 03-T2): an "Oracle (ground truth)"
+section must contain *pasted output*, never predicted output. Three sessions in
+a row were derailed by unverified premises (stale `int:unwindProtect` belief,
+inverted `use()` abort semantics, phantom operator-as-value rule).
 
-`use("file.kap")` is a **lexical `IncludeToken`** in Kotlin (`parser.kt::processInclude` →
-`includeFileContent`): it resolves the path (`engine.resolveLibraryFile` / `resolvePathName`),
-builds a fresh `APLParser` over the file, and runs `engine.withSavedNamespace { innerParser
-.parseValueToplevel() }` — a **parse-time file include evaluated into the current namespace**.
-The port already has the in-memory `namespace` / `import` / `declare` directives wired in
-`evaluator.rs`; it is **missing only `use` itself** (plus two glyphs the stdlib exercises).
+## 0.1 Process law (distilled from three analysis sessions — obey all of it)
 
-### Tier A — minimal kernel: load `base-functions.kap` (unblocks `⌸`, `⎕p`, `⎕pl`, `⎕A`, `⎕a`, `⎕d`)
+1. **Stale binary first.** After ANY parser/evaluator edit:
+   `cargo build -p kap-cli` (not `-p kap-core` alone). If a symptom looks
+   impossible: `git stash && cargo build -p kap-cli && probe && git stash pop`
+   — ONE discriminator pass, trust its verdict, move on.
+2. **Two-gate registration.** Every new builtin goes into BOTH
+   `evaluator.rs::is_primitive_name` AND `parser.rs::is_primitive_op`
+   (namespaced builtins: full `ns:name` in every gate list).
+3. **Gates before commit, every time.** `cargo test -p kap-core --lib`
+   and `cargo test -p kap-core --test conformance curated_kap_parity`.
+   A red or untested gate invalidates the commit.
+4. **No leniency creep.** Where Real Kap errors, the port errors with the same
+   message. Silent extra tolerance is a bug, not a feature (03-B2/B4).
+5. **Fix harness expectations only when the ORACLE says so** — a curated row
+   that disagrees with the port is checked against the oracle before either is
+   touched (01-F3: both failing rows were stale, code was right).
+6. **Never paper over semantics with allocation guards.** Result shape bounds;
+   element values don't (`⍸` lesson).
+7. **Don't trust bucket lists — read the Kotlin file.** `≬` was mislabelled a
+   compose operator for weeks because a roadmap lumped it wrong.
+8. **PROGRESS before continuing**: `META-INF/PROGRESS-YYYYMMDD.md` (check
+   `date --rfc-3339=date`), every changed file:line, oracle-vs-port outputs,
+   gate numbers — written BEFORE the next coding step.
+9. **Small tool calls.** Oversized patches/reads time out mid-stream; split
+   edits (<8K tokens) and reads (limit+offset).
+10. **Branch invariant** after every sync point: `main == strings == origin/*`.
 
-`standard-lib/base-functions.kap` is only **18 lines** and defines `⌸` as a pure-Kap user
-function (`∇ (keys) (fn ⌸) (values) { … ⍞fn¨ keyindex⫇values }`) plus the `⎕` quad symbols.
-Its *entire* missing-port dependency surface (everything else it uses — `⍋`/`≠`/`/`/`¨`,
-`io:print`/`io:println` — is **already present** in the port):
+---
 
-| Missing port feature | Kotlin source | Notes |
+## 1. Architecture north star — the module mirror
+
+The Kotlin tree is ~26k lines across clearly separated modules. The port's
+target layout mirrors it. Where the port currently differs structurally, the
+migration IS the roadmap item (see P1, P2).
+
+| Kotlin (source of truth) | Port target | Status |
 |---|---|---|
-| `use(...)` file-include directive | `parser.kt::processInclude` / `includeFileContent` | New lexer `IncludeToken` + parser arm + `engine.resolveLibraryFile`/`resolvePathName` (map a lib path to `standard-lib/` on disk). Evaluate the file as a top-level `Instr` in the current namespace. |
-| `⍞` apply-reference operator | `tokeniser.kt::ApplyToken` | **Unary** operator over a *function-valued symbol* (oracle: `⍞+` → "Variable not assigned: kap:+" because `+` was never bound to a var). `⍞fn` applies the function named by `fn`. Port has none. |
-| `⫇` GroupFunction | `engine.kt:351` `registerNativeFunction("⫇", GroupFunction())` (disclose.kt) | Native pick-with-axis (`A⫇B` selects cells of `B` by index vector `A` along the major axis). Port has none. |
-| `,[axis]` catenate-with-axis | `catenate` in `evaluator.rs` (currently axis-less) | `base-functions.kap` uses `,[0.5]`. Needs axis support added to the existing `,`. |
+| `tokeniser.kt` | `lexer.rs` | exists, mostly aligned |
+| `parser.kt` (parseExpr accumulator, processFn, makeResultList) | `parser.rs` | **diverged** — heuristic valence; migrate per P1 |
+| `syntax/syntax.kt` (defsyntax machinery) | macro section of parser/evaluator | landed 2026-08-23; keep aligned with `processCustomSyntax` |
+| `engine.kt` (197 `registerNative*` calls = master builtin inventory) | `evaluator.rs` dispatch + both gate lists | partial; build ledger per §3 |
+| `types.kt`, `number.kt` (APLValue kinds, Long/Double/rational/complex) | `number.rs`, `lib.rs` | partial (Long/Double/rational); complex deferred |
+| `builtins/math_functions.kt` (scalar layer, 2284 ln) | `num2`/`num2_axis` region | **restructure per P2** |
+| `builtins/{reduce,scan}` (`reduce.kt` 462 ln) | reduce/scan region | partial (axis gaps) |
+| `builtins/reshape.kt` | reshape fn | partial (MATCH/FILL/TRUNCATE/RECYCLE incomplete) |
+| `builtins/concatenate-array.kt` (625 ln) | catenate region | partial (`,[axis]` laminate incomplete) |
+| `builtins/transpose.kt` (617 ln) | transpose region | partial-axis done |
+| `builtins/disclose.kt` (⊃ ⊆ pick group, 597 ln) | disclose/pick region | mostly done |
+| `builtins/lookup.kt` (pick/index-of/access, 437 ln) | bracket-index/⌷/⍳ region | done |
+| `builtins/operator.kt` (rank ⍤, power ⍣, 418 ln) | `apply_rank_op` etc. | rank done; ⍣ missing |
+| `builtins/bitwise_ops.kt` (∨∵ ∧∵ ⌽∵ BitwiseOp) | missing | P4 (io.kap blocker) |
+| `builtins/gamma.kt` (! factorial/binomial, 980 ln) | partial | P5 |
+| `builtins/format.kt` ($ directives) | done | keep aligned |
+| `rendertext.kt` (box renderer) | `format_value/display` | decision required (P8) |
+| `standard-lib/*.kap` | `kap-stdlib/std/*.kap` | per-file milestones (P7) |
 
-**Acceptance for Tier A:** `use("standard-lib/base-functions.kap")` (or a vendored copy) loads
-with no errors, and afterwards `⌸` / `⎕A` / `⎕p` behave like the oracle (probe each vs
-`kap-jvm-text`). Add curated rows for `⌸` / `⎕A←@A…@Z`.
+---
 
-### Tier B — `standard-lib.kap` chain (the full `use` web)
+## 2. Master instrument: the engine.kt coverage ledger
 
-`standard-lib.kap` does `use("structure.kap") … use("fhelp.kap")` — 13 includes pulling in
-`math`/`io`/`regex`/`util`/`map`/`time`/`stat`/`http`/`thread`/`output3`/`graph`/`fhelp`.
-Many of those `.kap` files call builtins the port may still lack (e.g. `math:` namespace,
-`chart:`, `http:`, `thread:`). **Strategy: load the chain incrementally, one file at a time,
-and implement/repair only the builtins each file actually exercises** — not the whole Kotlin
-surface at once. The `math.kap`/`io.kap`/`util.kap`/`structure.kap` subset is the highest-value
-first slice; `http.kap`/`thread.kap`/`graph.kap`/`fhelp.kap` can stay deferred (they need
-networking/threading/charting builtins that are explicit out-of-scope per `RUST_REWRITE_STRATEGY.md` §1.2).
+Before adding builtins ad hoc, generate the authoritative checklist:
 
-### Tier C — wire `kap-cli` to load the vendored stdlib at startup
+```bash
+grep -oE 'registerNative(Function|Operator)\("[^"]+"' \
+  ~/Apps/array/array/src/commonMain/kotlin/com/dhsdevelopments/kap/engine.kt \
+  | sed 's/.*("//' | sort > /tmp/kotlin_builtins.txt
+grep -oE '"[^"]*"' kap-core/src/evaluator.rs \  # from is_primitive_name + dispatch arms
+  | sort -u > /tmp/port_builtins.txt
+comm -23 /tmp/kotlin_builtins.txt /tmp/port_builtins.txt   # what the port lacks
+```
 
-The `kap-stdlib` crate **already exists** (workspace member) and already vendors the Kap
-source: `kap-stdlib/std/{standard-lib,base-functions,structure,math,io,util,regex,time,
-stat,map,http,thread,output3,graph,fhelp}.kap` (+ `kap-stdlib/test/test.kap` and hundreds of
-extracted `*.kap` conformance cases). So Tier C is **not** "vendor the files" — it is: (a) make
-`use()` resolve paths against `kap-stdlib/std/` (or a configured lib dir), and (b) have `kap-cli`
-call `use("standard-lib.kap")` at startup (mirroring `LinuxReplBuilder.loadStartupFiles`). Each
-loaded file is a regression test: if it parses and its functions run, that surface is compatible.
-The `test/` dir doubles as the D5 Kap-native harness (run `test.kap` + `test/*Test.kap`, parse the
-`TESTS total=N pass=M fail=K` summary).
+Work P3–P5 **in engine.kt registration order**, ticking off the ledger. This
+guarantees nothing is missed and prevents roadmap-bucket mislabelling (law 7).
+Commit the regenerated ledger with each phase so progress is diffable.
 
-#### Tier C status + the `defsyntax` blocker (2026-08-22)
+---
 
-The CLI wiring is DONE in the working tree (uncommitted): `Session::load_standard_lib()`,
-startup `use("standard-lib.kap")`, `--no-standard-lib` opt-out. **Blocker:** the load dies
-inside `structure.kap` line 4 — the port has no `defsyntax`. The chain is
-`standard-lib.kap → structure.kap → defsyntax unwindProtect → parse failure → whole stdlib
-load aborts → ⎕A undefined`. Also fixed en route: an empty-paren panic in
-`try_parse_train` (`!funcs.is_empty()` guard) and native `int:unwindProtect`
-(`[fn;handler]` 2-vector, handler always runs, error rethrown after).
+## 3. Phase P0 — conformance infrastructure repairs (small, do first)
 
-## defsyntax strategy (unblocks structure.kap → full stdlib chain)
+*Why first:* every later phase depends on honest gates and honest `use()`.
 
-Kotlin ground truth: `syntax/syntax.kt` (326 lines — `CustomSyntax`,
-`SyntaxRule` subclasses), `parser.kt` (`processSyntaxDef` / macro-expansion hook),
-`functions.kt` (syntax registration). A `defsyntax name (rule…) { body }` defines a
-**parse-time macro**: when the parser meets `name`, it runs the rule list against
-upcoming tokens, binds rule variables to parsed pieces, and splices the *body* as a
-new statement. `defsyntaxsub` is the same but for a sub-rule used inside another
-definition's `(entryList …)` repeats.
+| # | Task | Kotlin anchor | Notes |
+|---|------|---------------|-------|
+| 0.1 | Fix the 2 stale curated rows: `"3 | 2"` expected `"1"` → `"2"`; `"5 ∊ 1 2 3 4"` expected `"(0)"` → `"0"` (oracle-verified) | — | lesson 01-F3 |
+| 0.2 | Decide `use()` error policy: Kotlin aborts the file at the FIRST failing statement (earlier definitions persist). Port currently warns-and-continues (commit `3a54593`). Either restore abort-at-first-error or document tolerance in KNOWN-NONCONFORMANCE as deliberate. Do NOT leave accidental | `includeFileContent` / repl-builder load path | controlled test: assign→error→assign via use; oracle leaves name 2 unassigned |
+| 0.3 | Error-text table: start `ERRORS.md` mapping every Kotlin exception class (common.kt) to its exact text; port arms must emit these verbatim | `common.kt:150–200+` | e.g. `InvalidOperatorArgument` → "Operator without left function: X"; `IllegalContextForFunction` → "No arguments specified for function" |
+| 0.4 | Kill the `group_indices` panic: guard `b_dims.len() != 1` → existing size-mismatch error (evaluator.rs ~4518) | `builtins/group-index.kt` | crash found in 03-B3 |
 
-The port does NOT need the general system — only what the stdlib actually uses.
-Scope per file, in this order:
+Acceptance: gates green; `typeof ⌸` (after a `∇` op def) no longer panics.
 
-1. **Inventory first.** `grep -h '^defsyntax' kap-stdlib/std/*.kap` and read each
-   definition. Known set today:
-   - `structure.kap`: `unwindProtect (:function statement :function handler)` and
-     `when` / `whenInner` (`:special`, `:optional`, `:repeat`, `:openBrace`,
-     `:closeBrace`, `:newline` rules).
-   - also check `thread.kap`, `time.kap`, `util.kap` before designing the rule set.
-   Decide the minimal `SyntaxRule` subset from this inventory, not from Kotlin's class tree.
-2. **Parse-time representation.** Add `Instr::SyntaxDef { name, rules, body }` +
-   `defsyntax`/`defsyntaxsub` keyword handling in `parse_expr` (like the existing
-   `namespace`/`declare` directive arms). Parse the rule list into a small enum:
-   - `Rule::Function(name)` — `:function` (a function atom follows)
-   - `Rule::Value(name)` — a value expression follows
-   - `Rule::Special(token)` — `:special` + literal token (`{`, `}`, newline, …)
-   - `Rule::Optional(inner)` — `:optional (…)`
-   - `Rule::Repeat(name, inner)` — `:repeat (x y)`
-   - `Rule::OpenBrace/CloseBrace/Newline` sugar if it keeps the inventory clean.
-3. **Registration at eval time.** Evaluating `SyntaxDef` stores the compiled rule
-   list + body in the engine (analog of Kotlin's syntax registry): a
-   `RefCell<HashMap<String, SyntaxMacro>>` on `Engine`. Namespaced like everything else.
-4. **Expansion hook in the parser.** At every point where a bare symbol is consumed
-   (`parse_primary` symbol arm / dyadic-operator gate), check the registry FIRST:
-   if the name is a registered macro, run rule matching against the token stream
-   (this is the one place the parser needs lookahead/backtracking — mirror Kotlin's
-   `isValid` → `processRule` two-phase so a failed match restores `self.pos`).
-   Successful match yields bindings (name → already-parsed `Instr`) plus the
-   remaining tokens; the expansion then parses the *body source* with those bindings
-   substituted (simplest faithful approach: keep the macro body as raw tokens and
-   re-lex/re-parse per call — no hygiene needed for these stdlib macros).
-5. **Bootstrap order.** Implement just enough for `unwindProtect` + `whenInner`
-   + `when` first (they are pure parse-to-parse splices over existing features:
-   `⍞cond ⍬`, `while`, `and`). Probe `use("structure.kap")` loads clean, then
-   `use("standard-lib.kap")` end-to-end, then extend the rule set for whatever
-   thread/time/util still need.
-6. **Tests.** Curated rows: a hand-written `defsyntax` defining a trivial macro,
-   then `when` usage (`when { cond stmt } else-shape` vs oracle), and
-   `int:unwindProtect` success/error paths (handler runs, error propagates).
+## 4. Phase P1 — parser architecture migration (highest-value structural work)
 
-Pitfall: Kotlin expands macros during parsing but evaluates rule *bodies* lazily per
-use site with that site's environment — do NOT pre-evaluate the body at definition
-time. And keep `defsyntax` names out of the ordinary variable namespace (separate map),
-so `declare(:export …)` doesn't try to export them as values.
+**Goal:** replace the heuristic valence parser with a faithful translation of
+Kotlin's single-pass expression loop. Every recurring parser burn of the last
+weeks (unary-minus arm swallowing `L - R`, invented `f L R` dyadic form, eager
+OpCall executing operator bodies, paren-operator misclassification) traces to
+the same root: the port guesses where Kotlin *accumulates*.
 
-### Mechanics notes (faithful port)
+**Kotlin anchor:** `parser.kt::parseExpr` (:939–1100): one `while(true)` loop
+over tokens; `leftArgs` accumulates operands; hitting a function calls
+`processFn(fn, leftArgs, pos)` — non-empty `leftArgs` ⇒ dyadic; end-tokens via
+`END_EXPR_TOKEN_LIST` produce `makeResultList(leftArgs)`.
 
-- `use` must resolve relative to a registered library directory (the Kotlin `resolveLibraryFile`
-  maps `"base-functions.kap"` → the stdlib dir; `secureMode` restricts to registered paths — the
-  port can skip secure-mode for now). Absolute paths pass through.
-- `use` evaluates in the **current namespace** (`withSavedNamespace` save/restore), so a file's
-  `namespace("kap")` switches in, defines symbols, and the outer namespace is restored.
-- `⍞` needs a parser distinction: a *symbol* operand (function reference) vs an *apply* — the
-  port's `is_primitive_op`/`is_primitive_name` gates must let `⍞` take a bare symbol as its operand.
+**Breakdown (each step independently gated):**
 
-### Rollout order (recommended)
+1. **Read & annotate.** Map the Kotlin loop: every token class → its handler
+   (Name/OpenParen/OpenBrace/fn-def/custom-syntax/adverb/end-token). Write the
+   map into `references/parser_migration.md` before touching Rust.
+2. **Port `processFn` semantics exactly**: function-first ⇒ monadic (`⍵=R`,
+   even if R is a strand); operand-before-function ⇒ dyadic (`⍺=L, ⍵=R`);
+   NO function-first-two-operands form exists. Remove any port branch that
+   contradicts this.
+3. **Valence at eval, not parse.** Delete special-case arms that peek at
+   specific glyphs (`-`, adverb suppression, paren-operator lookahead chains).
+   A bare `-` with no left arg is simply monadic minus at eval time.
+4. **Operator references are parse errors**: after `lookupFunction` fails,
+   `getOperator(symbol) != null` ⇒ throw `InvalidOperatorArgument`
+   (parser.kt:967–971). Port equivalent: known-op symbol with no function
+   operand context ⇒ `"Operator without left function: X"` — kills 03-B1/B2.
+5. **Strand collection** mirrors `makeResultList`: consecutive value operands
+   strand; a trailing lone value is just that value.
+6. **Feature-flag the migration**: `Parser::new_kotlin_loop()` behind an env
+   var; run BOTH parsers over the full conformance corpus; flip when the new
+   parser is ≥ old on ok-count AND matches oracle on every hand-probe in
+   `references/parser_migration.md`.
 
-1. **Tier A** (4 features) → `⌸`/`⎕*` work. Highest leverage, smallest surface. **Do this first.**
-2. **Tier B** structure/math/io/util subset, one file per commit, gated by side-by-side probe.
-3. **Tier C** vendoring + startup load.
+**Non-regression probes (both engines side-by-side):** `3 - 4`, `3-4`, `-x`,
+`(-padding)↓…`, `ch-@\0`, `2 (+) 3`, `(1+2)(3+4)`, `f ⇐ ×-`, `⊢«⊣»,`,
+`10 (-,) 20`, `-⍛+`, `2 ×¨ 3 4 5`, `+/ 1 2 3`, `1 2 3 +[0] 4 5 6`,
+`(≠⌸)` derivation, `data ⌸ fn` → must ERROR like oracle, `typeof ⌸` → must
+error, `foo ⇐ ⌸` → must error.
 
-## Open scope targets (Phase 6 breadth gaps)
+## 5. Phase P2 — scalar function layer (math_functions.kt, 2284 lines)
 
-Pick one to scope per session:
+**Goal:** one faithful `MathCombineAPLFunction` equivalent instead of
+per-glyph ad-hoc `num2` arms.
 
-- `⊆` / `⊇` — partition / shape  **(DONE)**
-- `∘` / `⍛` (compose / reverse-compose trains)  **(DONE)** — `≬` is NOT compose; it is
-  `toList` (see below). `∘`/`⍛` already wired (lexer→parser→ast→evaluator trains).
-- `≬` / `toList` (+ inverse `fromList`)  **(DONE, 2026-08-21)** — see `KNOWN-NONCONFORMANCE.md`.
-- `→` — branch / guard  **(DONE)** — see `KNOWN-NONCONFORMANCE.md` (`→` committed earlier this branch)
-- bracket indexing `x[sel]` (`Instr::Index` → `index_select`)  **(DONE)** — see `KNOWN-NONCONFORMANCE.md`
-- key / major-cell operators: `⌺` / `⌸`, `⍋⍒`-with-axis
-  - `⍋⍒`-with-axis is **N/A**: Kotlin `GradeFunction` extends `NoAxisAPLFunction`,
-    so axis specifiers are explicitly unsupported (oracle errors "Function does not
-    support axis specifier"). Nothing to implement — the port correctly rejects it.
-  - `⌺`/`⌸` are **NOT native** (stdlib `use()`-loaded `kap:keys`/`kap:stencil`); they are
-    reachable once the **stdlib-kernel (Tier A)** is built — see the "Stdlib-kernel strategy"
-    section below. `base-functions.kap` (18 lines) defines `⌸` as a pure-Kap user fn; the
-    only port gaps are `use`, `⍞`, `⫇`, `,[axis]`.
-- format family  **(DONE, 2026-08-21)** — see `KNOWN-NONCONFORMANCE.md` (`⍕` monadic
-  flatten + dyadic `$s`/`$h`/`$$` directives all match the oracle).
-- **Axis specifiers `[axis]`** — partial work done (2026-08-21):
-  - **`⍉` partial-axis: DONE.** The port already supported full axis permutations;
-    the strict length check was relaxed to Kotlin's *prefix-fill* rule (left arg shorter
-    than rank → remaining axes auto-appended in ascending order). `0 1 ⍉ 3 4 5⍴⍳60`
-    → `⟨3 4 5⟩` (identity perm [0,1,2]), matching the oracle. Covers Elias's new
-    `TransposeTest__mismatchingAxisCount*` / `__multiDimensionTransposeWith*LeftArg*` cases.
-    4 curated rows added.
-  - **Dyadic scalar `+[axis]` (and general `f[axis]` for scalar ops): DONE (2026-08-21).**
-    `f[axis]` for `+ - × ÷ *` now parses in BOTH the single-value `L f R` path AND the
-    dyadic strand loop, and `eval_apply` broadcasts along `axis` (`num2_axis`). The
-    scalar+scalar case ignores the axis (Kotlin `eval2Arg` short-circuit): `2 +[0] 3 → 5`.
-    Verified: `1 2 3 +[0] 4 5 6 → (5 7 9)`, `10 20 30 40 +[0] 4 3 2⍴… → (110…163)`
-    (shape `(4 3 2)`). 4 curated rows added. Non-scalar-arithmetic `f[axis]` (e.g. `,`,
-    `⌷`, `⊆`, `⍋`/`⍒`) remains out of scope — the parser deliberately does NOT attach an
-    axis to those.
-- **`⌷` (squad / index selection) — CRITICAL, currently mis-dispatched to
-  `disclose`** (see `KNOWN-NONCONFORMANCE.md`). `2 ⌷ 1 2 3 4` returns the whole
-  array instead of `3`. Largest mismatch/unsupported driver. Needs a real
-  index-select distinct from `⊃`.
-- **`≡` / `≢` (match) — CRITICAL, wrong semantics** (see
-  `KNOWN-NONCONFORMANCE.md`). Implemented as `deep_equal→1/0` with no type
-  strictness; `10≡10.0`→`1` (oracle `0`). Needs Kap's match (type/depth → depth
-  or 0).
-- **`⊃` (reveal / disclose + nested pick) — FIXED** (2026-08-21). Monadic discloses
-  (identity for simple arrays, drops outer axis for `⊂`-nested); dyadic is pick-with-
-  dimension-checks with Kap's exact error text. Verified vs Kotlin oracle + source.
+**Breakdown:**
 
-## Worst-covered corpus files (where coverage gains live)
+1. Translate the dispatch ladder of `eval2Arg` (:497): (a) scalar+scalar
+   short-circuits BEFORE any axis handling (`2 +[0] 3 → 5`); (b) long×long
+   fast path; (c) double promotion; (d) array×array cell-wise; (e) ONLY THEN
+   axis broadcast (`num2_axis` already exists — fold it under (e)).
+2. One generic `combine(a, b, op)` core parameterised by a small op table
+   (add/sub/mul/div/pow/min/max/residue/…). Each Kotlin descriptor class
+   (AddAPLFunction etc., :598+) becomes ONE table row: monadic fn + dyadic fn +
+   identity element + axis support flag.
+3. Ambivalence audit: every row declares its monadic form explicitly
+   (`×`=signum, `÷`=reciprocal, `*`=exp, `!`=gamma, `⌈⌋`=ceil/floor,
+   `⊢⊣`, `≡`=depth, `= ≠` self-classify/unique-mask). Any glyph without a
+   declared monadic arm must ERROR monadically like Kotlin, not fall through.
+4. Type-promotion rules from `number.kt` (long→double→rational) centralised in
+   the combiner, not scattered in match arms.
 
-| File | ok / total |
-|------|------------|
-| `CompareTest.kt` | 62 / 81 |
-| `LabelsTest.kt` | 62 / 63 |
-| `ReshapeTest.kt` | 58 / 100 |
-| `NumbersTest.kt` | 44 / 85 |
-| `InverseFnTest.kt` | 41 / 47 |
-| `ReduceTest.kt` | 38 / 62 |
+Acceptance: the full scalar block of the broad sweep improves; no behavior
+change on the curated suite.
 
-## Deferred (explicitly out of scope for now)
+## 6. Phase P3 — structural builtins, file by file
 
-- **`regex:replace` with a lambda replacement function** — e.g.
-  `"x([A-Z])" regex:replace (…;λ{…})`. Only the `(subject; replacement)`
-  *string* form is supported.
-- **Dyadic interval `⍸`** (`a ⍸ b`) and inverse `⍸˝` (needs `˝` adverb) —
-  returns a clean "not implemented" error so the harness counts it Unsupported.
-- **`use()` file-loading / `.kap` stdlib kernel** — now scoped as a planned stage, not
-  open-ended deferral. See the **"Stdlib-kernel strategy"** section above: Tier A (load
-  `base-functions.kap`) needs only `use` + `⍞` + `⫇` + `,[axis]`; Tiers B/C follow.
+Work in engine.kt ledger order within this phase. Per file: read the Kotlin
+file top-to-bottom, enumerate its public behaviours, probe each against the
+oracle, implement the deltas, add curated rows.
 
-## Suggested hardening
+| Kotlin file | Known port deltas to close |
+|---|---|
+| `reshape.kt` (442) | dimension-spec ladder: literal `¯1` only ⇒ MATCH (divisibility-checked); keyword specs `:match :fill :truncate :recycle` (findSizeCalculationMethod :375); other negatives error "Attempt to reshape to dimension with negative size". Current port accepts ANY negative dim — tighten (02-F4/03) |
+| `concatenate-array.kt` (625) | `,[axis]` general + `,[0.5]` laminate used by base-functions.kap line 5; prototype/cell alignment rules |
+| `reduce.kt` (462) | reduce/scan with explicit axis; lazy interval right args (size = ⍴b, never materialise values as counts); the known OOB panic path in user-`⊥` bodies |
+| `transpose.kt` (617) | verify prefix-fill perm rule against ALL TransposeTest cases (partial-axis done 2026-08-21) |
+| `disclose.kt` (597) | ⊃/⊆/pick corner matrix (already largely done; sweep the remaining CompareTest/ReshapeTest misses) |
+| `lookup.kt` (437) | done; regression-watch only |
+| `drop.kt`/take-first | monadic ↑ First semantics locked; keep |
+| `outer_join.kt` | `∘.f` table builder — likely missing entirely (check ledger) |
+| `format.kt` | done; keep aligned |
 
-- Add a curated conformance row exercising a large-vector reduce
-  (e.g. `+⌿ 100000 ⍴⍳2 → 50000`) to lock in the O(n) hang-fix behavior.
+## 7. Phase P4 — operators (operator.kt + bitwise_ops.kt)
 
-## Already closed (current branch)
+1. **Rank `⍤`** — done (ValueOp); verify spec rules vs `operator.kt:82`
+   RankOpFunctionImpl once more after P1 lands (it changes parse adjacency).
+2. **Power `⍣`** — Kotlin anchor `operator.kt` PowerOperator: `f⍣n` iterate n,
+   `f⍣g` inverse-do-while. Not started. Breakdown: integer-iterate first,
+   then the inverse-detect form with its termination semantics.
+3. **Bitwise `∵` family** (`bitwise_ops.kt` — `∨∵ ∧∵ ⌽∵ ±∵`): registered at
+   engine.kt:495. REQUIRED by io.kap `encodeUtf8Char` (lines 6–9). Two-gate
+   registration + evaluator arms; oracle probes: `192 ∨∵ 31 → 223`,
+   `¯6 ⌽∵ 5 → 0`.
+4. Commute `⍨` (done), compose trains (done) — regression-watch after P1.
 
-- **`⊆` (partitioned enclose) implemented** — `evaluator.rs::partitioned_enclose`
-  mirrors Kotlin `PartitionedEncloseFunction` (disclose.kt). Monadic = "nest"
-  (scalar passes through; else the array is enclosed whole). Dyadic `A ⊆ B`
-  partitions `B` along the last axis using `A`'s integer indicators (a `>0`
-  at `i>0` opens a new partition; an indicator `>1` repeats). Verified against
-  the `kap-jvm-text` oracle: `1 0 1 ⊆ 1 2 3 → ((1 2) (3))`,
-  `1 0 1 0 1 ⊆ 10 20 30 40 50 → ((10 20) (30 40) (50))`, etc. Display uses the
-  port's `()` convention (not the oracle's `⟨⟩`). Registered in BOTH
-  `evaluator.rs::is_primitive_name` and `parser.rs::is_primitive_op`. Added 6
-  curated parity rows to `conformance.rs`. `⊇` (PickAPLFunction) — see below.
-- **`⊇` (pick) implemented** — `evaluator.rs::pick_apl` mirrors Kotlin
-  `PickAPLFunction` / `PickResultValue` (lookup.kt). Result shape = shape of
-  `A` (left); each element of `A` is an *index coordinate* into `B` (right): a
-  scalar index for rank-1 `B` (with `¯n` negative support), a coordinate vector
-  for higher-rank `B`. Errors match the oracle ("Index out of bounds",
-  "rank mismatch"). Scalar results render as `(x)` (the port's cell convention,
-  consistent with `⊂`/`⊆`), not the oracle's bare scalar. Verified:
-  `0⊇1 2 3 4 5 → (1)`, `2⊇… → (3)`, `¯1⊇… → (5)`, `1 0 2⊇10 20 30 40 → (20 10 30)`.
-  Registered in BOTH lists. Added 4 curated parity rows.
-- **`⍕` format (monadic flatten + dyadic directives) — FIXED (2026-08-21)** —
-  monadic `⍕` now uses `formatted(PLAIN)` (recursive flatten, no separators/parens;
-  `⍕ 1 2 3 → "123"`), via new `lib.rs::format_plain`. The dyadic `$s`/`$h`/`$$`
-  directive compiler (Kotlin `format.kt`) was already implemented and matches the
-  oracle. 8 new monadic curated parity rows added.
-- **Adverbs `¨` / `/` / `\\` now bind to named user functions** — `dbl¨ 1 2 3`,
-  `dbl/ 1 2 3`, `dbl\ …` work (commit `828913a`). Previously `unknown function: ¨`.
-- Dyadic `⍳` index-of + string `cmp` (commit `ee7df32`-era).
-- `regex:*` namespace (match/find/findall/replace/split/compile).
-- `⍸` (where) empty/Null cases + dyadic-out-of-scope error.
-- O(total²) hang-fix in reduce/scan (per-case timeout so the broad sweep
-  runs green by default).
+## 8. Phase P5 — numeric tower & specials
 
-## Kap syntax ground rules (must hold for all future work)
+1. Rational literals `¯1r2` (stat.kap uses them) — check lexer; Kotlin
+   `number.kt` rational via num-rational (D2 says num-bigint/num-rational —
+   confirm what exists, fill gaps).
+2. `!` gamma/binomial via `libm::lgamma` (skill documents the recipe; land the
+   libm dep).
+3. Complex: DEFERRED until everything else is green (Kotlin supports it; port
+   has zero surface; big win-per-effort is low).
+4. Char arithmetic edge rules: `a - b` char−char ⇒ int; int−char ⇒ error
+   "Incompatible argument types"; negative codepoint ⇒ "Codepoints cannot be
+   negative" — mirror texts exactly (oracle transcripts in 01 appendix).
+
+## 9. Phase P6 — native quad constants + const enforcement
+
+Current Kap ships `⎕A ⎕a ⎕d` as NATIVE read-only constants (fresh-session
+oracle probes: `⎕A` works with NO stdlib loaded; `typeof ⎕A → kap:array`).
+The vendored `base-functions.kap` still assigns them and therefore explodes on
+the real engine (line 13) — our copy is byte-identical to upstream's, i.e.
+upstream's own stdlib is stale relative to its engine.
+
+1. Implement `⎕A ⎕a ⎕d` natively (char vectors; read-only slot in ns registry).
+2. Implement `declare(:const …)` enforcement: assignment-time check, error
+   `Assignment to constant variable: <ns>:<name>` (oracle OM probe).
+3. Only AFTER 1–2: refresh vendored `base-functions.kap` (or drop the redundant
+   assignments) so the file loads clean under the stricter engine. Sequence
+   matters: enforcing consts first would faithfully reproduce the oracle's
+   self-destructing load.
+
+## 10. Phase P7 — stdlib chain milestones (status measured 2026-08-23)
+
+Per-file acceptance = the file loads via `use()` AND its exported symbols
+behave identically to the oracle in a scripted side-by-side. Current state:
+
+| file | status | blocking features (probe-first, don't assume) |
+|---|---|---|
+| structure.kap | ✅ loads; `when`/`unwindProtect` work | — (defsyntax keystone closed) |
+| base-functions.kap | ✅ loads clean (port ahead: no const enforcement yet) | becomes strict-clean after P6 sequencing |
+| math.kap / math-kap.kap | ✅ loads | residual: user-`⊥` body hits reduce OOB panic (P3-reduce) |
+| io.kap | ✅ loads; toHex/fromHex match | needs P4-`∵` for encodeUtf8Char; then full-file oracle diff |
+| regex.kap | ✅ loads | lambda-replacement form remains documented-deferred |
+| time.kap | ✅ loads | verify exported fns vs oracle (clock/date formats) |
+| util.kap | ❌ parse error 6:27 | `labels`, `⊂⍛cols` derived-compose chains, `defsyntax filter` w/ `declare(:local …)` inside — probe each construct standalone first |
+| stat.kap | ❌ parse error 3:9 | `+/«÷»≢` fork-in-strand shapes, `¯1r2` rationals (P5), `∧` monadic sort, `⍛⊇` chain |
+| map.kap | ❌ parse error 13:6 | `'kap:map ≡ typeof m` symbol compare, `⍺.(⍵)` dynamic member access, `(@.≠)⍛⊂` — map-type surface may be its own mini-phase; consult Kotlin map module before scoping |
+| output.kap / output3.kap | ❌ train-parse errors | diagnose against P1's new parser — likely fixed FOR FREE by the accumulator migration; re-test before hand-porting anything |
+| http.kap / thread.kap / graph.kap / fhelp*.kap | ❌ | **out of scope** (networking/threads/charting per strategy doc); keep erroring cleanly |
+
+Rule: one file per commit, side-by-side probe table in the commit message,
+file marked ✅ in this table only when its exports match the oracle.
+
+## 11. Phase P8 — renderer decision (one-time, then frozen)
+
+The port renders vectors `(1 2)` where the oracle renders `⟨1 2⟩` /
+box frames. Today this is a documented DISPLAY-class divergence that inflates
+broad-sweep mismatch numbers (~299 mismatches at last baseline, many cosmetic).
+Decide ONCE:
+
+- **Option A (recommended):** implement `rendertext.kt`-equivalent boxed
+  rendering for REPL/file output behind `--conform-display`, keeping `()` as
+  the default house style. Sweep comparisons run conform-mode; humans keep the
+  compact style.
+- **Option B:** formally accept and stop counting display-only mismatches in
+  the headline metric (adjust tally script to classify them).
+
+Either way: value-level comparisons in the harness must already be
+display-independent — audit that assumption while here.
+
+## 12. Explicitly out of scope (unchanged)
+
+Networking (`http:`), threads (`thread:`), charting (`chart:`/graph.kap),
+GUI, secure-mode library restrictions, `)`-commands (D4). Complex numbers
+until P5 completes.
+
+## 13. Completed (archive pointers — details in PROGRESS files)
+
+Tier A kernel (`use`+`⫇`+`,[axis]`+`⍞`), Tier B high-value slice
+(structure/math/io/regex/time loading), `⌸` native + stdlib, defsyntax/
+unwindProtect subsystem, `⊤⊥` base-value rewrite, rank operator, commute,
+bracket indexing, squad rewrite, format family, `≡≢` type-strict match,
+take-first, membership scalar shape, modulo arg-order, negative-dim inference,
+and/or short-circuit, `⍉` partial-axis. See `PROGRESS-20260815..23.md`.
+
+## 15. Kap syntax ground rules (carried from v1 — user-verified law)
 
 - Inline functions are dfns: `{ … }` with `⍺`/`⍵` as left/right args. No
   parameter names.
 - A local function is named with `⇐`: `minus ⇐ -`, `leftPlus5Times ⇐ {⍺ + ⍵×5}`.
+- **Functions are assigned with `⇐`, never `←`** (`x ← <fn-value>` errors
+  "Right side of the arrow must be a function" on the oracle).
 - `λ` is a unary operator over an *existing* function expression
   (`λ {⍺+⍵×5}`, `λ -`). It has **no `λ(x) λ(y) …` form** — that is LISP
-  currying and is NOT Kap. Never write, probe, or reason about it.
-- `f ⇐ (g 3)` is **not valid Kap** — Real Kap errors "Right side of the
-  arrow must be a function". A bare `Apply` is not a function value.
+  currying and is NOT Kap. (The port tolerates it as an extension; never write
+  or probe it as if it were Kap.)
+- The `{cond}{a}{b}` three-block guard form is NOT Kap. Real conditionals:
+  `when { (cond){body} … }` / `if(cond){a}else{b}`.
+- `f ⇐ (g 3)` is not valid Kap — a bare `Apply` is not a function value.
+
+## 16. Definition of Done (every task, no exceptions)
+
+1. Kotlin anchor file read; behavior enumerated BEFORE coding.
+2. Oracle transcript captured (pasted, not predicted) for every claimed case.
+3. Implementation follows the module-mirror layout; two-gate registration.
+4. Gates: lib tests + curated parity green; broad-sweep delta reported honestly
+   (known-vs-unknown accounting via `regression_diff.py` when ok-count moves).
+5. Curated rows added/updated FROM CAPTURED OUTPUT.
+6. PROGRESS entry (today's file) with file:line refs and gate numbers, written
+   before the next task starts.
+7. Branch invariant restored at sync: `main == strings == origin/*`.

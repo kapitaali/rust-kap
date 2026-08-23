@@ -537,6 +537,17 @@ impl Engine {
                 let found = env
                     .lookup(name, namespace)
                     .ok_or_else(|| AplError::runtime(format!("undefined symbol: {}", name)))?;
+                // B2 (code_analysis_03): an operator is never a first-class value in Real Kap.
+                // Kotlin resolves names function-first, then throws InvalidOperatorArgument for
+                // operator names in value position (parser.kt:967–971; text common.kt:186).
+                // Structural references (`declare(:export ⌸)`) read the AST name and never
+                // evaluate the symbol, so they are naturally unaffected by this check.
+                if let APLValue::UserOp { .. } = found.as_ref() {
+                    return Err(AplError::runtime(format!(
+                        "Operator without left function: {}",
+                        name
+                    )));
+                }
                 // clone the inner value out of the shared ref
                 Ok(Rc::new(found.as_ref().clone()))
             }
@@ -4501,6 +4512,19 @@ impl Engine {
     /// a group with no members is filled with `APLNull` (the Kotlin `APLNullValue` behaviour).
     /// For a rank-1 `R` the selected cells are scalars; for higher rank they are the
     /// per-`(rank-1)` sub-arrays along the major axis.
+    /// Kotlin `APLValue.arrayify()`: wrap a non-array in a 1-element rank-1 array; arrays
+    /// (and strings, which the port models rank-1) pass through unchanged.
+    fn arrayify_value(v: &AplRef<APLValue>) -> AplRef<APLValue> {
+        if matches!(v.as_ref(), APLValue::Array(_)) {
+            v.clone()
+        } else {
+            Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![1],
+                ArrayData::Nested(vec![v.clone()]),
+            ))))
+        }
+    }
+
     fn group_indices(
         &self,
         left_val: AplRef<APLValue>,
@@ -4508,6 +4532,12 @@ impl Engine {
     ) -> Result<AplRef<APLValue>, AplError> {
         let a = left_val.force(self)?;
         let b = right_val.force(self)?;
+        // Kotlin `GroupFunctionImpl.eval2Arg` calls `a.arrayify()` / `b.arrayify()` first: a
+        // scalar argument becomes a 1-element rank-1 array. That both protects the dims
+        // indexing below (B3 panic fix) and gives scalars the oracle semantics
+        // (`1 ⫇ 5` → ⟨⍬ ⟨5⟩⟩ — slot 0 empty, slot 1 holding the scalar).
+        let a = Self::arrayify_value(&a);
+        let b = Self::arrayify_value(&b);
         let a_dims = a.dimensions();
         if a_dims.len() != 1 {
             return Err(AplError::runtime(
