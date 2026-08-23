@@ -307,7 +307,14 @@ impl<'a> Parser<'a> {
                 match name.as_str() {
                     "if" => return Ok(Some(self.parse_if()?)),
                     "while" => return Ok(Some(self.parse_while()?)),
-                    "when" => return Ok(Some(self.parse_when()?)),
+                    // `when` is intercepted by the hardcoded builtin ONLY when no defsyntax
+                    // macro named `when` is registered. The stdlib's `structure.kap` defines
+                    // `when`/`whenInner` as defsyntax macros (same `when { … }` surface); in
+                    // that case the macro path in `parse_primary` must handle expansion. (Kotlin
+                    // registerCustomSyntax overrides the keyword form.)
+                    "when" if !self.macros.contains_key("when") => {
+                        return Ok(Some(self.parse_when()?))
+                    }
                     _ => {}
                 }
             }
