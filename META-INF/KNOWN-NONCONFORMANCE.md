@@ -297,8 +297,8 @@ Features the engine does not build yet. Most are tracked in `ROADMAP.md`.
 - **Axis specifiers** `[axis]` — not accepted for `⌷`, `⊆`, `⍋`/`⍒`, etc. (Scalar
   arithmetic `+ - × ÷ *` DOES now honor `f[axis]`, matching Kotlin — including the
   scalar+scalar short-circuit that ignores the axis. Fixed 2026-08-21.)
-- **Dyadic interval `⍸`** (`a ⍸ b`) and inverse `⍸˝` (needs `˝` adverb) —
-  returns a clean "not implemented" error.
+- **Dyadic interval `⍸`** (`a ⍸ b`) — IMPLEMENTED (2026-08-24, see where_interval
+  reference + PROGRESS). Remaining gap: inverse `⍸˝` (needs the `˝` adverb) — not built.
 - **`regex:replace` lambda form** — only the `(subject; replacement)` *string*
   pair is supported; a replacement *function* is unimplemented.
 - **`use()` file loading / `.kap` stdlib kernel** (`standard-lib.kap`,

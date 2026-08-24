@@ -7932,7 +7932,9 @@ impl Engine {
         if let APLValue::Number(n) = r.as_ref() {
             let v = n.as_long().map_err(|e| AplError::runtime(e))?;
             if v < 0 {
-                return Err(AplError::runtime("Negative value found in right argument".into()));
+                return Err(AplError::runtime(
+                    "⍸: Negative value found in right argument".into(),
+                ));
             }
             // `⍸ 0` → `⍬` (Null), not a length-0 vector.
             if v == 0 {
@@ -7973,7 +7975,9 @@ impl Engine {
                     ))),
                 };
                 if n < 0 {
-                    return Err(AplError::runtime("Negative value found in right argument".into()));
+                    return Err(AplError::runtime(
+                    "⍸: Negative value found in right argument".into(),
+                ));
                 }
                 // Guard against runaway output: a Double element saturates `as_long()`
                 // to i64::MAX and the inner `for _ in 0..n` would loop effectively
@@ -8014,7 +8018,9 @@ impl Engine {
                 ))),
             };
             if n < 0 {
-                return Err(AplError::runtime("Negative value found in right argument".into()));
+                return Err(AplError::runtime(
+                    "⍸: Negative value found in right argument".into(),
+                ));
             }
             if n > 0 {
                 let mut coords = Vec::with_capacity(rank);
@@ -8060,7 +8066,7 @@ impl Engine {
         let a_dims = a.dimensions();
         if a_dims.len() > 1 {
             return Err(AplError::runtime(
-                "Left argument must be a scalar or a 1-dimensional array".into(),
+                "⍸: Left argument must be a scalar or a 1-dimensional array".into(),
             ));
         }
         let mut boundaries: Vec<APLValue> = match a.as_ref() {
@@ -8074,7 +8080,7 @@ impl Engine {
                 Some(Ordering::Less) => {}
                 _ => {
                     return Err(AplError::runtime(
-                        "Left argument must be ordered".into(),
+                        "⍸: Left argument must be ordered".into(),
                     ))
                 }
             }
@@ -8121,6 +8127,12 @@ impl Engine {
                 Rc::new(APLValue::Number(KapNumber::Long(low)))
             })
             .collect();
+        // Kotlin IntervalValue.dimensions == source.dimensions, so a SCALAR right arg
+        // yields a RANK-0 result (discloses to the bare number), not a 1-element
+        // vector: oracle `(1 2) ⍸ 3` → 2 (not (2)), and `⊂(1 2) ⍸ 3` → 2.
+        if b_dims.is_empty() {
+            return Ok(vals.into_iter().next().unwrap());
+        }
         Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
             b_dims,
             ArrayData::Nested(vals),
