@@ -4732,6 +4732,35 @@ impl Engine {
                                         }
                                     }
                                 } else {
+                                    // Kotlin :216: rank of the specifier must be one
+                                    // less than the rank of the array (verbatim).
+                                    if va.dimensions.len() != rank - 1 {
+                                        return Err(AplError::runtime(
+                                            "⌽: The rank of the rotation specifier must be one less than the rank of the array to be rotated"
+                                                .into(),
+                                        ));
+                                    }
+                                    // Kotlin :222: each specifier dim must equal the
+                                    // source dim on the corresponding axis, skipping
+                                    // the rotated axis itself (verbatim "Invalid
+                                    // dimension" on mismatch).
+                                    let spec_dims = &va.dimensions;
+                                    for (i, &sd) in spec_dims.iter().enumerate() {
+                                        let src_axis = if i < axis { i } else { i + 1 };
+                                        if sd != dims[src_axis] {
+                                            return Err(AplError::runtime(
+                                                "⌽: Invalid dimension".into(),
+                                            ));
+                                        }
+                                    }
+                                    // Cell count must match the specifier's cells.
+                                    let spec_cells: usize =
+                                        spec_dims.iter().product::<usize>().max(1);
+                                    if spec_cells != cells {
+                                        return Err(AplError::runtime(
+                                            "⌽: Invalid dimension".into(),
+                                        ));
+                                    }
                                     for e in va.elements() {
                                         match e.as_ref() {
                                             APLValue::Number(KapNumber::Long(x)) => shifts.push(*x),
@@ -4835,11 +4864,21 @@ impl Engine {
                         let mut seen = vec![false; rank];
                         let mut perm = Vec::with_capacity(rank);
                         let mut has_dup = false;
-                        for &x in &axes {
+                        // Kotlin TransposeFunction.eval2Arg (:493): a left arg
+                        // LONGER than the rank errors before any axis checks.
+                        if axes.len() > rank {
+                            return Err(AplError::runtime(
+                                "⍉: Left must have a size less than or equal to the rank of the right argument"
+                                    .into(),
+                            ));
+                        }
+                        for (pos, &x) in axes.iter().enumerate() {
                             if x < 0 || x as usize >= rank {
-                                return Err(AplError::runtime(
-                                    "⍉ axis index out of range".into(),
-                                ));
+                                // Kotlin :501 verbatim, SIGNED value in the text.
+                                return Err(AplError::runtime(format!(
+                                    "⍉: Invalid axis index at position {} in left argument: {}",
+                                    pos, x
+                                )));
                             }
                             if seen[x as usize] {
                                 // Duplicate axis index ⇒ DIAGONAL (Kotlin
