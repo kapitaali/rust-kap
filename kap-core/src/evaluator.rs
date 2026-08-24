@@ -1077,6 +1077,24 @@ impl Engine {
                 "+" | "-" | "×" | "÷" | "*" => {
                     self.num2_axis(left_v, right_v, fn_name, axis_as_long)
                 }
+                // ⌽/⊖[k]: rotate/reverse along axis k (Kotlin RotateFunction.computeAxis:
+                // explicit axis replaces the default, validated by ensureValidAxis →
+                // IllegalAxisException "Axis $axis is not valid. Expected: ${dims.size}").
+                "⌽" | "⊖" => {
+                    // Kotlin ensureValidAxis compares a SIGNED int; a negative axis
+                    // must print as itself ("Axis -1 is not valid…"), not wrap.
+                    let rank = right_v.dimensions().len();
+                    let axis_i64 = axis_number.as_long().map_err(|e| AplError::runtime(e))?;
+                    if axis_i64 < 0 || axis_i64 as usize >= rank {
+                        return Err(AplError::runtime(format!(
+                            "{}: Axis {} is not valid. Expected: {}",
+                            fn_name, axis_i64, rank
+                        )));
+                    }
+                    let axis_as_long = axis_i64 as usize;
+                    // An EXPLICIT axis replaces the default (last for ⌽, first for ⊖).
+                    self.reverse_axis(left_v, right_v, Some(axis_as_long), true)
+                }
                 other => Err(AplError::runtime(format!(
                     "axis specifier not supported for '{}'",
                     other

@@ -617,7 +617,7 @@ impl<'a> Parser<'a> {
                     let axis_ok = matches!(
                         &cur,
                         Instr::Symbol { name, .. }
-                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪")
+                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖")
                     );
                     if axis_ok {
                         self.advance();
@@ -1869,7 +1869,7 @@ impl<'a> Parser<'a> {
                     let axis_ok = matches!(
                         &fn_expr,
                         Instr::Symbol { name, .. }
-                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪")
+                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖")
                     );
                     if axis_ok
                         && matches!(self.peek().map(|t| &t.token), Some(Token::OpenBracket))
