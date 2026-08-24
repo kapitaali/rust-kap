@@ -438,6 +438,14 @@ fn curated_kap_parity() {
         //   ⍎"."    -> "⍎: Value cannot be parsed as a number: '.'"
         //   ⍎"@a"   -> "⍎: Value cannot be parsed as a number: '@a'"
         //   ⍎ 1 2 3 -> "⍎: Argument is not a string"
+        // ⍣ power operator (Kotlin PowerAPLOperator, operator.kt:7). All cases
+        // oracle-verified 2026-08-24. Iterate + until modes.
+        ("({⍵×2}⍣3) 5", "40"),
+        ("({⍵,((↑¯2↑⍵)+(↑¯1↑⍵))}⍣6) (0 1)", "(0 1 1 2 3 5 8 13)"),
+        ("({⍵×2}⍣{⍺>⌊⍵÷32}) 1000", "2000"),
+        // Error rows (harness cannot assert): 5 ({⍵×2}⍣3) 1 ->
+        // "⍣: Function cannot be called with two arguments";
+        // ({⍵+1}⍣¯2) 0 -> "⍣: Argument to power is negative: -2".
         // Indexing into a string (bracket indexing) — returns char scalars.
         ("\"abcdef\"[2]", "@c"),
         ("\"abcdef\"[0 2]", "\"ac\""),

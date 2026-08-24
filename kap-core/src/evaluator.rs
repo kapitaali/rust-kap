@@ -1200,13 +1200,16 @@ impl Engine {
         if let Some((params, split, body)) = lambda {
             return self.apply_user_fn(&params, split, &body, left, right, env, fn_name.as_deref());
         }
-        // --- Value-right-arg operators (e.g. `f⍤1` rank) ---
+        // --- Value-right-arg operators (e.g. `f⍤1` rank, `f⍣n`/`f⍣g` power) ---
         // Kotlin APLOperatorValueRightArg (engine.kt:494 RankOperator). The operand is
-        // a VALUE evaluated at application time. Currently `⍤` (rank) is the only one.
+        // a VALUE evaluated at application time.
         if let Instr::ValueOp { func, op_name, operand } = fn_expr {
             if op_name == "⍤" {
                 let rank_val = self.eval_instr(operand, env)?.force(self)?;
                 return self.apply_rank_op(func, &rank_val, left, right, env);
+            }
+            if op_name == "⍣" {
+                return self.apply_power_op(func, operand, left, right, env);
             }
             return Err(AplError::runtime(format!(
                 "unknown value-right-arg operator: {}",
@@ -2315,6 +2318,7 @@ impl Engine {
                 // Namespaced natives (P2): the parser's is_known_fn admits them, but
                 // this eval-time late-gate must also know them (two-gate rule).
                 | "sysparam"
+                | "⍣"
  )
  }
 
@@ -6448,6 +6452,138 @@ impl Engine {
                     return Ok(results.into_iter().next().unwrap_or_else(|| Rc::new(APLValue::Null)));
                 }
                 self.make_simple_or_nested(frame.clone(), results)
+            }
+        }
+    }
+
+    /// Power operator `f⍣n` / `f⍣g` (Kotlin PowerAPLOperator, operator.kt:7-65).
+    ///
+    /// Two modes, decided by the operand's parse shape (Kotlin distinguishes at
+    /// combine time: fn+expr ⇒ PowerAPLFunctionWithValueDescriptor = iterate,
+    /// fn+fn ⇒ PowerAPLFunctionDescriptor = until-loop). The port stores one
+    /// ValueOp; the operand `Instr` kind plays the same role:
+    ///
+    /// - **Iterate** (`f⍣n`, operand is a value expr): evaluate the operand to a
+    ///   number and apply `fn` to the argument exactly n times. Negative n →
+    ///   Kotlin text "Argument to power is negative: N". Monadic only.
+    /// - **Until** (`f⍣g`, operand parses as a function atom): repeatedly apply
+    ///   `fn` monadically; after each step call `g(next, prev)` dyadically and
+    ///   stop when it returns truthy. Monadic only.
+    ///
+    /// A dyadic application of the derived function errors with Kotlin's
+    /// `⍣: Function cannot be called with two arguments`.
+    fn apply_power_op(
+        &self,
+        func: &Instr,
+        operand: &Instr,
+        left: &Option<Box<Instr>>,
+        right: &Box<Instr>,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        if left.is_some() {
+            return Err(AplError::runtime(
+                "⍣: Function cannot be called with two arguments".into(),
+            ));
+        }
+        // Mode decided from the operand's VALUE (Kotlin splits at combine time; the
+        // port stores one ValueOp and inspects the operand): a brace-dfn operand
+        // (`{⍺>⌊⍵÷32}`) is an until-loop applied via eval_apply's Block arm (which
+        // binds ⍺/⍵); a UserFn-valued expr or other function value loops via
+        // apply_user_fn; anything else must be a number ⇒ iterate.
+        let mut curr = self.eval_instr(right, env)?.force(self)?;
+        if let Instr::Block { body } = operand {
+            let mut guard: u64 = 0;
+            loop {
+                let next = self.apply_fn_instr(func, None, &curr, env)?;
+                let check =
+                    self.eval_apply(&Instr::Block { body: body.clone() }, &Some(Box::new(self.apl_to_instr(next.as_ref())?)), &Box::new(self.apl_to_instr(curr.as_ref())?), env)?;
+                curr = next;
+                let truthy = match check.as_ref() {
+                    APLValue::Number(n) => !n.is_zero(),
+                    _ => false,
+                };
+                if truthy {
+                    break;
+                }
+                guard += 1;
+                if guard > 1_000_000 {
+                    return Err(AplError::runtime(
+                        "⍣: iteration limit exceeded (non-converging right function?)".into(),
+                    ));
+                }
+            }
+            return Ok(curr);
+        }
+        let op_val = self.eval_instr(operand, env)?.force(self)?;
+        match op_val.as_ref() {
+            APLValue::UserFn { params, split, body, env: fenv } => {
+                // Until-loop with a closure-carrying function value: apply it
+                // dyadically via apply_user_fn (apl_to_instr cannot round-trip a
+                // UserFn, so we must NOT convert it back into an Instr).
+                let mut guard: u64 = 0;
+                loop {
+                    let next = self.apply_fn_instr(func, None, &curr, env)?;
+                    let check = self.apply_user_fn(
+                        params,
+                        *split,
+                        body.as_ref(),
+                        &Some(Box::new(self.apl_to_instr(next.as_ref())?)),
+                        &Box::new(self.apl_to_instr(curr.as_ref())?),
+                        fenv,
+                        None,
+                    )?;
+                    curr = next;
+                    let truthy = match check.as_ref() {
+                        APLValue::Number(n) => !n.is_zero(),
+                        _ => false,
+                    };
+                    if truthy {
+                        break;
+                    }
+                    guard += 1;
+                    if guard > 1_000_000 {
+                        return Err(AplError::runtime(
+                            "⍣: iteration limit exceeded (non-converging right function?)".into(),
+                        ));
+                    }
+                }
+                Ok(curr)
+            }
+            APLValue::Number(n) => {
+                let n = n.as_long().map_err(AplError::runtime)?;
+                if n < 0 {
+                    return Err(AplError::runtime(format!(
+                        "⍣: Argument to power is negative: {}",
+                        n
+                    )));
+                }
+                for _ in 0..n {
+                    curr = self.apply_fn_instr(func, None, &curr, env)?;
+                }
+                Ok(curr)
+            }
+            other => {
+                let detail = match other {
+                    APLValue::Array(a) => format!(
+                        "array {}",
+                        a.elements()
+                            .iter()
+                            .map(|e| match e.as_ref() {
+                                APLValue::Number(n) => n
+                                    .as_long()
+                                    .map(|l| l.to_string())
+                                    .unwrap_or_else(|_| n.as_double().to_string()),
+                                _ => "?".to_string(),
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ),
+                    _ => other.class_name().to_string(),
+                };
+                Err(AplError::runtime(format!(
+                    "⍣: Wanted a value of type number. Got: {}",
+                    detail
+                )))
             }
         }
     }

@@ -578,6 +578,39 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
+            // Power operator `f⍣n` / `f⍣g` (Kotlin parseOperator → PowerAPLOperator,
+            // engine.kt:491): binds after a FUNCTION, exactly like the adverbs below,
+            // but carries a combined right arg (value OR function) ⇒ ValueOp.
+            if let Some(Token::Literal(LiteralValue::Symbol { ref name, .. })) =
+                self.peek().map(|t| &t.token)
+            {
+                if name == "⍣" && Self::is_function_expr(&cur) {
+                    self.advance();
+                    self.skip_newlines();
+                    // Function-shaped operands (brace dfn, ⍞ref, name) parse as function
+                    // atoms; everything else (numbers, parenthesised exprs) is a value
+                    // expr — mirrors Kotlin's APLOperatorCombinedRightArg split between
+                    // combineFunctions and combineFunctionAndExpr. The final MODE
+                    // (iterate vs until) is decided at eval from the operand's VALUE.
+                    let starts_fn = matches!(
+                        self.peek().map(|t| &t.token),
+                        Some(Token::OpenBrace)
+                            | Some(Token::ApplyToken)
+                            | Some(Token::Literal(LiteralValue::Symbol { .. }))
+                    );
+                    let operand = if starts_fn {
+                        self.parse_function_atom()?
+                    } else {
+                        self.parse_primary()?
+                    };
+                    cur = Instr::ValueOp {
+                        func: Box::new(cur),
+                        op_name: "⍣".to_string(),
+                        operand: Box::new(operand),
+                    };
+                    continue;
+                }
+            }
             // parseAxis (:1321): `f[axis]` wraps into AxisApplied.
             if let Some(t) = self.peek() {
                 if matches!(t.token, Token::OpenBracket) {
@@ -2522,9 +2555,24 @@ impl<'a> Parser<'a> {
 
     fn parse_function_expr_impl(&mut self, allow_train: bool) -> Result<Instr, AplError> {
         let left = self.parse_function_atom()?;
+        // Power operator `f⍣n` / `f⍣g` (Kotlin PowerAPLOperator, operator.kt:7,
+        // engine.kt:491 registerNativeOperator("⍣")). Like `f⍤spec`, it is a
+        // derived function stored as a ValueOp; the MODE is decided at eval time
+        // from the operand shape (Kotlin combines fn+expr ⇒ iterate-count,
+        // fn+fn ⇒ until-loop).
+        if let Some(t) = self.peek() {
+            let is_power = matches!(&t.token, Token::Literal(LiteralValue::Symbol { name, .. }) if name == "⍣");
+            if is_power {
+                self.advance(); // consume ⍣
+                let operand = self.parse_function_atom()?;
+                return Ok(Instr::ValueOp {
+                    func: Box::new(left),
+                    op_name: "⍣".to_string(),
+                    operand: Box::new(operand),
+                });
+            }
+        }
         // Rank-operator form `f⍤spec` is a *derived function* (APLOperatorValueRightArg).
-        // It may appear in function-expression position (e.g. inside a paren group `(f⍤1)`)
-        // and must yield a ValueOp, not be swallowed by the operator/data apply path.
         if let Some(t) = self.peek() {
             let is_rank = matches!(&t.token, Token::Literal(LiteralValue::Symbol { name, .. }) if name == "⍤");
             if is_rank {
