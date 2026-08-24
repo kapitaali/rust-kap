@@ -1790,10 +1790,25 @@ impl<'a> Parser<'a> {
             // must bind `Derived{dbl, ¨}` rather than applying `¨` to `dbl`.
             if (is_prim || is_known) && next_is_adverb {
                 let op = self.parse_primary()?; // consume the adverb symbol
+                // Optional explicit axis ON THE DERIVED FUNCTION: `+/[0] x`
+                // binds [0] to the reduction (Kotlin ReduceAPLOperator axis),
+                // NOT as a list literal stranded into the data.
+                let func_boxed =
+                    if matches!(self.peek().map(|t| &t.token), Some(Token::OpenBracket)) {
+                        self.advance();
+                        let ax = self.parse_apply()?;
+                        self.expect(Token::CloseBracket, "expected ] after axis specifier")?;
+                        Instr::AxisApplied {
+                            func: Box::new(first),
+                            axis: Box::new(ax),
+                        }
+                    } else {
+                        first
+                    };
                 let data = self.parse_apply()?;
                 return Ok(Instr::Apply {
                     fn_expr: Box::new(Instr::Derived {
-                        func: Box::new(first),
+                        func: Box::new(func_boxed),
                         op: Box::new(op),
                     }),
                     left: None,

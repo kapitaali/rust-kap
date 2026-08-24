@@ -1243,11 +1243,34 @@ impl Engine {
                 Instr::Symbol { name, .. } => name.clone(),
                 _ => return Err(AplError::runtime("adverb must be a symbol".into())),
             };
+            // `f[axis]/` etc.: the fn operand carries an explicit axis (parsed as
+            // AxisApplied). Extract the axis value and thread it into reduce/scan.
+            // The tuple keeps `func` borrowed from the same Box either way.
+            let adv_explicit_axis: Option<usize> = match func.as_ref() {
+                Instr::AxisApplied { axis, .. } => {
+                    let av = self.eval_instr(axis, env)?.force(self)?;
+                    let a = match av.as_ref() {
+                        APLValue::Number(n) => n
+                            .as_long()
+                            .map_err(|e| AplError::runtime(e))
+                            .and_then(|v| {
+                                if v < 0 {
+                                    Err(AplError::runtime("axis must be non-negative".into()))
+                                } else {
+                                    Ok(v as usize)
+                                }
+                            })?,
+                        _ => return Err(AplError::runtime("axis must be an integer".into())),
+                    };
+                    Some(a)
+                }
+                _ => None,
+            };
             return match adv_name.as_str() {
-                "/" | "reduce" => self.adverb_reduce(func, left, right, env, true),
-                "\\" | "scan" => self.adverb_scan(func, left, right, env, true),
-                "⌿" => self.adverb_reduce(func, left, right, env, false),
-                "⍀" => self.adverb_scan(func, left, right, env, false),
+                "/" | "reduce" => self.adverb_reduce(func, left, right, env, true, adv_explicit_axis),
+                "\\" | "scan" => self.adverb_scan(func, left, right, env, true, adv_explicit_axis),
+                "⌿" => self.adverb_reduce(func, left, right, env, false, adv_explicit_axis),
+                "⍀" => self.adverb_scan(func, left, right, env, false, adv_explicit_axis),
                 // `˝` inverse (Kotlin InverseFnOp, op.kt:298 + engine.kt:500): derives
                 // the INVERSE of fn. Per-builtin semantics (evalInverse* methods):
                 // ⌽˝/⊖˝ monadic = forward reverse; dyadic = NEGATED shifts;
@@ -6614,6 +6637,7 @@ impl Engine {
         right: &Box<Instr>,
         env: &AplRef<Environment>,
         last_axis: bool,
+        explicit_axis: Option<usize>,
     ) -> Result<AplRef<APLValue>, AplError> {
         let data = self.eval_instr(right, env)?.force(self)?;
         // Windowed reduce (`N f/`): sliding window of size `|N|` over the flat array,
@@ -6659,7 +6683,7 @@ impl Engine {
         if rank == 0 {
             return Err(AplError::runtime("reduce: cannot reduce a scalar".into()));
         }
-        let axis = if last_axis { rank - 1 } else { 0 };
+        let axis = explicit_axis.unwrap_or(if last_axis { rank - 1 } else { 0 });
         let axis_len = dims[axis];
         if axis_len == 0 {
             return Err(AplError::runtime("reduce: cannot reduce an empty axis".into()));
@@ -6732,6 +6756,7 @@ impl Engine {
         right: &Box<Instr>,
         env: &AplRef<Environment>,
         last_axis: bool,
+        explicit_axis: Option<usize>,
     ) -> Result<AplRef<APLValue>, AplError> {
         if left.is_some() {
             return Err(AplError::runtime("scan \\ is monadic (use f\\array)".into()));
@@ -6742,7 +6767,7 @@ impl Engine {
         if rank == 0 {
             return Err(AplError::runtime("scan: cannot scan a scalar".into()));
         }
-        let axis = if last_axis { rank - 1 } else { 0 };
+        let axis = explicit_axis.unwrap_or(if last_axis { rank - 1 } else { 0 });
         let axis_len = dims[axis];
         if axis_len == 0 {
             return Err(AplError::runtime("scan: cannot scan an empty axis".into()));
