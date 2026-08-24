@@ -4019,65 +4019,157 @@ impl Engine {
     fn reshape(&self, left_val: AplRef<APLValue>, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
         // Dyadic `⍴`: `(dims) ⍴ data` builds an array of shape `dims`, filled by
         // cycling through the flat elements of `data` (Kap/APL reshape semantics).
-        // A negative dimension (e.g. `-1`) means "infer this axis from the data length",
-        // exactly one such dimension is allowed.
+        // Dimension-spec ladder, mirroring Kotlin reshape.kt findSizeCalculationMethod
+        // (:375) + the computed-dimension logic (:278-337):
+        //   * literal ¯1 or a KEYWORD-namespace symbol :match/:fill/:truncate/:recycle
+        //     marks ONE computed dimension (more than one → "Only a single dimension is
+        //     allowed to be marked as computed");
+        //   :match requires divisibility (error "Invalid size of right argument: N.
+        //     Should be divisible by M."), :fill pads with 0s to fill,
+        //     :truncate truncates, :recycle recycles one extra element;
+        //   * any other negative size errors verbatim ("Attempt to reshape to
+        //     dimension with negative size: <n>");
+        //   * an unknown keyword symbol errors like Kotlin's ensureNumber:
+        //     "⍴: Wanted a value of type number. Got: symbol".
+        #[derive(Clone, Copy, PartialEq)]
+        enum SizeMethod {
+            Match,
+            Fill,
+            Truncate,
+            Recycle,
+        }
+        let method_of = |e: &APLValue| -> Option<Result<SizeMethod, AplError>> {
+            match e {
+                APLValue::Number(KapNumber::Long(v)) if *v == -1 => Some(Ok(SizeMethod::Match)),
+                APLValue::Symbol { name, namespace } if namespace.as_deref() == Some("keyword") => {
+                    match name.as_str() {
+                        "match" => Some(Ok(SizeMethod::Match)),
+                        "fill" => Some(Ok(SizeMethod::Fill)),
+                        "truncate" => Some(Ok(SizeMethod::Truncate)),
+                        "recycle" => Some(Ok(SizeMethod::Recycle)),
+                        _ => None, // not a spec symbol → falls into the numeric check below
+                    }
+                }
+                APLValue::Symbol { .. } => None,
+                _ => None,
+            }
+        };
+        // Flatten the left arg into a list of spec entries: either a resolved i64 dim
+        // or a computation method.
+        enum DimSpec {
+            Fixed(i64),
+            Computed(SizeMethod),
+        }
         let dims_val = left_val.force(self)?;
-        let mut raw_dims: Vec<i64> = Vec::new();
+        let mut specs: Vec<DimSpec> = Vec::new();
         match dims_val.as_ref() {
             APLValue::Array(a) => {
                 for e in a.elements() {
-                    if let APLValue::Number(KapNumber::Long(v)) = e.as_ref() {
-                        raw_dims.push(*v);
-                    } else {
-                        return Err(AplError::runtime("reshape dimensions must be integers".into()));
-                    }
+                    specs.push(match method_of(e.as_ref()) {
+                        Some(Ok(m)) => DimSpec::Computed(m),
+                        Some(Err(err)) => return Err(err),
+                        None => match e.as_ref() {
+                            APLValue::Number(KapNumber::Long(v)) => DimSpec::Fixed(*v),
+                            APLValue::Symbol { .. } => {
+                                // Unknown keyword symbol → Kotlin ensureNumber text.
+                                return Err(AplError::runtime(
+                                    "⍴: Wanted a value of type number. Got: symbol".into(),
+                                ));
+                            }
+                            _ => {
+                                return Err(AplError::runtime(
+                                    "reshape dimensions must be integers".into(),
+                                ))
+                            }
+                        },
+                    });
                 }
             }
-            APLValue::Number(KapNumber::Long(v)) => raw_dims.push(*v),
+            APLValue::Number(KapNumber::Long(v)) => specs.push(DimSpec::Fixed(*v)),
             APLValue::Str(s) => {
                 // A string as a reshape shape means its length as a single dimension
                 // (Kap: `"abc"⍴x` ≡ `(3)⍴x`).
-                raw_dims.push(s.chars().count() as i64);
+                specs.push(DimSpec::Fixed(s.chars().count() as i64));
             }
             _ => return Err(AplError::runtime("reshape dimensions must be an array or integer".into())),
         }
-        // Resolve negative dimensions. Kotlin (reshape.kt) allows ONLY `-1` as the
-        // inferred-dimension sentinel; any other negative size is an error
-        // (`Attempt to reshape to dimension with negative size: <n>`).
-        let neg_count = raw_dims.iter().filter(|&&d| d < 0).count();
-        if neg_count > 1 {
-            return Err(AplError::runtime("reshape allows at most one inferred (-1) dimension".into()));
+        // Kotlin (reshape.kt :278): at most ONE dimension may be computed.
+        let computed_count = specs
+            .iter()
+            .filter(|s| matches!(s, DimSpec::Computed(_)))
+            .count();
+        if computed_count > 1 {
+            return Err(AplError::runtime(
+                "Only a single dimension is allowed to be marked as computed".into(),
+            ));
         }
-        if let Some(&d) = raw_dims.iter().find(|&&d| d < 0 && d != -1) {
-            return Err(AplError::runtime(format!("Attempt to reshape to dimension with negative size: {}", d)));
+        // Any other negative size errors verbatim.
+        if let Some(DimSpec::Fixed(d)) = specs.iter().find(|s| matches!(s, DimSpec::Fixed(d) if *d < 0 && *d != -1))
+        {
+            return Err(AplError::runtime(format!(
+                "Attempt to reshape to dimension with negative size: {}",
+                d
+            )));
         }
         let data = right_val.force(self)?;
         let src_elements: Vec<AplRef<APLValue>> = match data.as_ref() {
             APLValue::Array(a) => a.elements(),
             other => vec![Rc::new(other.clone())],
         };
-        let data_len = std::cmp::max(src_elements.len(), 1) as i64;
-        let abs_prod_excl_neg: i64 = raw_dims
+        let b_size = match data.as_ref() {
+            APLValue::Array(a) => a.element_count() as i64,
+            _ => 1,
+        };
+        let total_fixed: i64 = specs
             .iter()
-            .filter(|&&d| d >= 0)
-            .map(|&d| d.max(0))
+            .map(|s| match s {
+                DimSpec::Fixed(d) => *d,
+                DimSpec::Computed(_) => 1,
+            })
+            .map(|d| d.max(0))
             .product::<i64>()
             .max(1);
-        let dims: Vec<usize> = if neg_count == 1 {
-            raw_dims
-                .iter()
-                .map(|&d| {
-                    if d < 0 {
-                        let inferred = data_len / abs_prod_excl_neg;
-                        inferred.max(0) as usize
-                    } else {
-                        d.max(0) as usize
+        let dims: Vec<usize> = if computed_count == 1 {
+            let mut out = Vec::with_capacity(specs.len());
+            for s in &specs {
+                match s {
+                    DimSpec::Fixed(d) => out.push((*d).max(0) as usize),
+                    DimSpec::Computed(method) => {
+                        // Kotlin :312-337 — the computed size depends on the method.
+                        let q = b_size / total_fixed;
+                        let r = b_size % total_fixed;
+                        let n = match method {
+                            SizeMethod::Match | SizeMethod::Truncate => q,
+                            SizeMethod::Fill | SizeMethod::Recycle => q + 1,
+                        };
+                        out.push(n.max(0) as usize);
                     }
+                }
+            }
+            out
+        } else {
+            specs
+                .iter()
+                .map(|s| match s {
+                    DimSpec::Fixed(d) => (*d).max(0) as usize,
+                    DimSpec::Computed(_) => unreachable!(),
                 })
                 .collect()
-        } else {
-            raw_dims.iter().map(|&d| d.max(0) as usize).collect()
         };
+        // MATCH requires divisibility (Kotlin :312-320, error verbatim).
+        if computed_count == 1 {
+            for s in &specs {
+                if let DimSpec::Computed(SizeMethod::Match) = s {
+                    let r = b_size % total_fixed;
+                    if r != 0 {
+                        return Err(AplError::runtime(format!(
+                            "Invalid size of right argument: {}. Should be divisible by {}.",
+                            b_size, total_fixed
+                        )));
+                    }
+                }
+            }
+        }
         if dims.is_empty() {
             return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(vec![], ArrayData::Nested(vec![]))))));
         }

@@ -460,6 +460,18 @@ fn curated_kap_parity() {
         // Error rows (harness cannot assert): 5 ∧∵ 3.5 ->
         // "∵: Bitwise calls can only be performed on integers";
         // !∵ 255 -> "!: Function does not support bitwise operations".
+        // reshape dimension-spec ladder (Kotlin reshape.kt findSizeCalculationMethod
+        // :375). Oracle-verified 2026-08-24. NOTE: full-array rows like (2 :match ⍴ ⍳6)
+        // flatten in the port's rank-2 render (KNOWN DISPLAY delta), so assert SHAPE.
+        ("⍴(2 :match ⍴ ⍳6)", "(2 3)"),
+        ("⍴(2 :fill ⍴ ⍳5)", "(2 3)"),
+        ("⍴(2 :truncate ⍴ ⍳9)", "(2 4)"),
+        ("⍴(2 :recycle ⍴ ⍳5)", "(2 3)"),
+        ("(⊃(2 :fill ⍴ ⍳5))[1;2]", "0"),
+        // Error rows (harness cannot assert): (2 :match ⍴ ⍳7) ->
+        // "Invalid size of right argument: 7. Should be divisible by 2.";
+        // (¯3 ⍴ 1 2 3) -> "Attempt to reshape to dimension with negative size: -3";
+        // (2 :foo ⍴ ⍳5) -> "⍴: Wanted a value of type number. Got: symbol".
         // Indexing into a string (bracket indexing) — returns char scalars.
         ("\"abcdef\"[2]", "@c"),
         ("\"abcdef\"[0 2]", "\"ac\""),
