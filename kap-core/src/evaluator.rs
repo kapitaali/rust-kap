@@ -1248,6 +1248,11 @@ impl Engine {
                 "\\" | "scan" => self.adverb_scan(func, left, right, env, true),
                 "⌿" => self.adverb_reduce(func, left, right, env, false),
                 "⍀" => self.adverb_scan(func, left, right, env, false),
+                // `˝` inverse (Kotlin InverseFnOp, op.kt:298 + engine.kt:500): derives
+                // the INVERSE of fn. Per-builtin semantics (evalInverse* methods):
+                // ⌽˝/⊖˝ monadic = forward reverse; dyadic = NEGATED shifts;
+                // ⍉˝ monadic = self; dyadic non-diagonal = INVERSE permutation.
+                "˝" | "inverse" => return self.adverb_inverse(func, left, right, env),
                 "¨" | "each" => self.adverb_each(func, left, right, env),
                 // `⌻` outer product (Kotlin outer_join.kt OuterJoinOp): `A f⌻ B`
                 // builds the rank-(⍴⍴A + ⍴⍴B) table of f(a,b) over every cell pair.
@@ -4482,6 +4487,144 @@ impl Engine {
     ) -> Result<AplRef<APLValue>, AplError> {
         // `⌽` reverses/rotates along the *last* axis (default for `⌽`).
         self.reverse_axis(left_val, right_val, None, true)
+    }
+
+    /// `f˝` inverse adverb (Kotlin InverseFnOp, op.kt:298; engine.kt:500). Dispatches
+    /// to each builtin's evalInverse* semantics:
+    /// - ⌽˝/⊖˝: monadic = forward reverse (evalInverse1Arg == eval1Arg, :243);
+    ///   dyadic = NEGATED shifts (evalInverse2ArgB → inverse=true, :246).
+    /// - ⍉˝: monadic = identity (evalInverse1Arg :525); dyadic non-diagonal =
+    ///   INVERSE permutation (TransposedAPLValue.make invert=true :546).
+    fn adverb_inverse(
+        &self,
+        func: &Box<Instr>,
+        left: &Option<Box<Instr>>,
+        right: &Box<Instr>,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let fname = match func.as_ref() {
+            Instr::Symbol { name, .. } => name.clone(),
+            // An axis-applied function (`⌽[0]˝`, i.e. `(f[k])˝`) keeps its axis:
+            // Kotlin binds ˝ to the AxisValAssignedFunctionDirect and evalInverse
+            // threads the axis through. Unwrap to the inner fn name.
+            Instr::AxisApplied { func: inner, .. } => match inner.as_ref() {
+                Instr::Symbol { name, .. } => name.clone(),
+                _ => {
+                    return Err(AplError::runtime(
+                        "˝: inverse not supported for this function".into(),
+                    ))
+                }
+            },
+            _ => {
+                return Err(AplError::runtime(
+                    "˝: inverse not supported for this function".into(),
+                ))
+            }
+        };
+        match fname.as_str() {
+            "⌽" | "⊖" => match left {
+                // Monadic reverse is its own inverse.
+                None => self.eval_apply(func, &None, right, env),
+                Some(l) => {
+                    let lv = self.eval_instr(l, env)?.force(self)?;
+                    let negated = match lv.as_ref() {
+                        APLValue::Number(KapNumber::Long(x)) => {
+                            Rc::new(APLValue::Number(KapNumber::Long(-x)))
+                        }
+                        APLValue::Array(va) => {
+                            let elems: Vec<AplRef<APLValue>> = va
+                                .elements()
+                                .iter()
+                                .map(|e| match e.as_ref() {
+                                    APLValue::Number(KapNumber::Long(x)) => Rc::new(
+                                        APLValue::Number(KapNumber::Long(-x)),
+                                    ),
+                                    other => Rc::new(other.clone()),
+                                })
+                                .collect();
+                            Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                                va.dimensions.clone(),
+                                ArrayData::Nested(elems),
+                            ))))
+                        }
+                        other => Rc::new(other.clone()),
+                    };
+                    self.eval_apply(
+                        func,
+                        &Some(Box::new(Instr::Value(negated))),
+                        right,
+                        env,
+                    )
+                }
+            },
+            "⍉" => match left {
+                // Monadic transpose is its own inverse (axis order reversed twice
+                // returns the original). Kotlin evalInverse1Arg :525 calls eval1Arg.
+                None => self.eval_apply(func, &None, right, env),
+                Some(l) => {
+                    let lv = self.eval_instr(l, env)?.force(self)?;
+                    let rv = self.eval_instr(right, env)?.force(self)?;
+                    let rank = rv.dimensions().len();
+                    if let APLValue::Array(va) = lv.as_ref() {
+                        let mut axes: Vec<i64> = Vec::with_capacity(va.element_count());
+                        let mut all_ints = true;
+                        for e in va.elements() {
+                            match e.as_ref() {
+                                APLValue::Number(KapNumber::Long(x)) => axes.push(*x),
+                                _ => {
+                                    all_ints = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if all_ints && !Self::axes_have_duplicate(&axes) {
+                            let rank = rv.dimensions().len();
+                            if axes.len() == rank {
+                                // inv[k] = position of k in axes.
+                                let mut inv = vec![0i64; rank];
+                                for (i, &a) in axes.iter().enumerate() {
+                                    inv[a as usize] = i as i64;
+                                }
+                                let inv_val = Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                                    vec![rank],
+                                    ArrayData::Nested(
+                                        inv.into_iter()
+                                            .map(|x| {
+                                                Rc::new(APLValue::Number(KapNumber::Long(x)))
+                                            })
+                                            .collect(),
+                                    ),
+                                ))));
+                                return self.eval_apply(
+                                    func,
+                                    &Some(Box::new(Instr::Value(inv_val))),
+                                    right,
+                                    env,
+                                );
+                            }
+                        }
+                    }
+                    // Fallback: forward application (errors for unsupported shapes,
+                    // matching Kotlin's checkValid path).
+                    self.eval_apply(func, &Some(l.clone()), right, env)
+                }
+            },
+            other => Err(AplError::runtime(format!(
+                "{}˝: inverse of this function is not supported",
+                other
+            ))),
+        }
+    }
+
+    fn axes_have_duplicate(axes: &[i64]) -> bool {
+        for i in 0..axes.len() {
+            for j in (i + 1)..axes.len() {
+                if axes[i] == axes[j] {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn reverse_vertical(

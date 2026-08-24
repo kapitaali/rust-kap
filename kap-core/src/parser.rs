@@ -2317,7 +2317,7 @@ impl<'a> Parser<'a> {
     /// Higher-order operators (adverbs) that take a *function* as one operand:
     /// `/` reduce, `\` scan, `¨` each.
     fn is_adverb(name: &str) -> bool {
-        matches!(name, "/" | "reduce" | "\\" | "scan" | "⌿" | "⍀" | "¨" | "each" | "⍨" | "commute" | "∵" | "bitwise" | "⌸" | "key" | "⌻")
+        matches!(name, "/" | "reduce" | "\\" | "scan" | "⌿" | "⍀" | "¨" | "each" | "⍨" | "commute" | "∵" | "bitwise" | "⌸" | "key" | "⌻" | "˝" | "inverse")
     }
 
     /// Try to parse a *train*: a parenthesised sequence of >=2 function expressions,
@@ -2792,6 +2792,11 @@ impl<'a> Parser<'a> {
                 | Instr::Lambda { .. }
                 | Instr::Train { .. }
                 | Instr::ValueOp { .. }
+                | // An axis-applied function (`⌽[0]`, `,[0.5]`) is a DERIVED
+                  // FUNCTION value (Kotlin AxisValAssignedFunctionDirect) — it must
+                  // count as a function so `⌽[0]˝` binds the inverse adverb and the
+                  // __KOTLIN_FALLBACK__ guard does not fire on it.
+                  Instr::AxisApplied { .. }
                 // P1-M7: a `{…}` block IS a function value (Kotlin OpenFnDef →
                 // processFn); required for `{2×⍵}¨ 1 2 3` to bind the each-adverb.
                 | Instr::Block { .. }
