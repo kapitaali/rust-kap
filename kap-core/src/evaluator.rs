@@ -1257,6 +1257,10 @@ impl Engine {
                 "unknown value-right-arg operator: {}",
                 op_name
             )));
+            return Err(AplError::runtime(format!(
+                "unknown value-right-arg operator: {}",
+                op_name
+            )));
         }
         // --- Derived functions from adverbs (e.g. `+/`, `×¨`) ---
         // `fn_expr` is an `Instr::Derived { func, op }`; `op` is the adverb name (`/`,
@@ -4611,6 +4615,28 @@ impl Engine {
                 Some(l) => {
                     let lv = self.eval_instr(l, env)?.force(self)?;
                     let rv = self.eval_instr(right, env)?.force(self)?;
+                    // Diagonal spec (duplicate axes) ⇒ INVERSE diagonal with a
+                    // default fill of 0 (Kotlin evalInverse2ArgBWithProto :538).
+                    if let APLValue::Array(va) = lv.as_ref() {
+                        let mut axes: Vec<i64> = Vec::with_capacity(va.element_count());
+                        let mut all_ints = true;
+                        for e in va.elements() {
+                            match e.as_ref() {
+                                APLValue::Number(KapNumber::Long(x)) => axes.push(*x),
+                                _ => { all_ints = false; break; }
+                            }
+                        }
+                        if all_ints && Self::axes_have_duplicate(&axes) {
+                            return match rv.as_ref() {
+                                APLValue::Array(a) => {
+                                    self.inverse_diagonal(&axes, a, &Rc::new(APLValue::Number(KapNumber::Long(0))))
+                                }
+                                _ => Err(AplError::runtime(
+                                    "⍉˝: right argument must be an array".into(),
+                                )),
+                            };
+                        }
+                    }
                     let rank = rv.dimensions().len();
                     if let APLValue::Array(va) = lv.as_ref() {
                         let mut axes: Vec<i64> = Vec::with_capacity(va.element_count());
@@ -5220,7 +5246,7 @@ impl Engine {
     /// ⍉˝ int:proto v path: inverse-diagonal transpose with a custom fill.
     fn adverb_inverse_with_proto(
         &self,
-        func: &Box<Instr>,
+        func: &Instr,
         left: &Option<Box<Instr>>,
         right: &Box<Instr>,
         env: &AplRef<Environment>,
@@ -7003,14 +7029,30 @@ impl Engine {
         env: &AplRef<Environment>,
     ) -> Result<AplRef<APLValue>, AplError> {
         // ⍉˝ int:proto v: inverse-diagonal with a custom default value.
-        if let Instr::Derived { func: inner, op } = func {
-            let is_inv = matches!(op.as_ref(), Instr::Symbol { name, .. } if name == "˝" || name == "inverse");
-            let is_transpose = matches!(inner.as_ref(), Instr::Symbol { name, .. } if name == "⍉");
-            if is_inv && is_transpose {
-                return self.adverb_inverse_with_proto(inner, left, right, env, proto_val);
+        // func may be EITHER the inner ⍉ (when ˝ bound outside) or the full
+        // Derived{⍉, ˝} wrapper (bind_operators_kotlin path). Handle both.
+        let (inv_inner, is_inv_derived) = match func {
+            Instr::Derived { func: inner, op } => {
+                let is_inv = matches!(op.as_ref(), Instr::Symbol { name, .. } if name == "˝" || name == "inverse");
+                if is_inv && matches!(inner.as_ref(), Instr::Symbol { name, .. } if name == "⍉") {
+                    (inner.as_ref(), true)
+                } else {
+                    (func, false)
+                }
             }
+            _ => (func, false),
+        };
+        let outer_is_inv = matches!(func, Instr::Symbol { name, .. } if name == "˝" || name == "inverse");
+        let inner_is_transpose =
+            matches!(inv_inner, Instr::Symbol { name, .. } if name == "⍉")
+                || matches!(func, Instr::Symbol { name, .. } if name == "⍉");
+        if is_inv_derived || (outer_is_inv && matches!(inv_inner, Instr::Symbol { name, .. } if name == "⍉")) {
+            return self.adverb_inverse_with_proto(inv_inner, left, right, env, proto_val);
         }
-        // `N (↑ int:proto v) arr`: take with a custom fill element.
+        let _ = inner_is_transpose;
+        // `N (↑ int:proto v) arr`: take with a custom fill element (Kotlin
+        // TakeAPLFunction.eval1ArgWithProto). The fill replaces the default 0
+        // for positions beyond the source. Thread it via take_with_fill.
         let fname_is_take = matches!(func, Instr::Symbol { name, .. } if name == "↑" || name == "take");
         if fname_is_take {
             let lv = match left {
@@ -7018,11 +7060,128 @@ impl Engine {
                 None => None,
             };
             let rv = self.eval_instr(right, env)?.force(self)?;
-            return self.take(lv, rv);
+            return self.take_or_drop_with_fill(true, lv, rv, proto_val);
         }
         // Default Kotlin behaviour: the proto is ignored for fns without a
         // WithProto override — call the fn normally.
         self.eval_apply(func, left, right, env)
+    }
+
+    /// Dyadic take with a CUSTOM fill value (`N (↑ int:proto v) arr`).
+    /// Mirrors take() but pads with `fill` instead of 0.
+    fn take_with_fill(
+        &self,
+        left_val: AplRef<APLValue>,
+        right_val: AplRef<APLValue>,
+        fill: &AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        // Monadic-valence misuse guard: `↑ int:proto v arr` without a count N is
+        // just plain first (the proto is irrelevant — Kotlin ignores it too).
+        self.take_or_drop_with_fill(true, Some(left_val), right_val, fill)
+    }
+
+    fn take_or_drop_with_fill(
+        &self,
+        take: bool,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+        fill_val: &AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        // Only the TAKE direction honours a custom fill; drop never pads.
+        if !take {
+            return self.drop(left_val, right_val);
+        }
+        let counts = self.count_vector(left_val.ok_or_else(|| {
+            AplError::runtime("take-with-fill requires a left count".into())
+        })?)?;
+        let right = right_val.force(self)?;
+        // Scalar right argument: shape |counts| filled with content + fill.
+        match right.as_ref() {
+            APLValue::Number(_) | APLValue::Char(_) | APLValue::Str(_) => {
+                let dims: Vec<usize> =
+                    counts.iter().map(|c| c.unsigned_abs() as usize).collect();
+                let total: usize = dims.iter().product();
+                if total == 0 {
+                    return Ok(Rc::new(APLValue::Null));
+                }
+                if total > 100_000_000 {
+                    return Err(AplError::runtime("take/drop result too large".into()));
+                }
+                let mut out = Vec::with_capacity(total);
+                for i in 0..total {
+                    out.push(if i == 0 { right.clone() } else { fill_val.clone() });
+                }
+                return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    dims,
+                    ArrayData::Nested(out),
+                )))));
+            }
+            _ => {}
+        }
+        // Array right argument: run the normal multi-axis slice, then overwrite
+        // any padded cells with the custom fill. Padding cells are exactly those
+        // whose flat index exceeds the source element count after each axis pass;
+        // simpler and exact: re-run slice_axis per axis but swap its fill. Since
+        // slice_axis hardcodes a 0-fill, do the axis slicing manually here.
+        if let APLValue::Array(a) = right.as_ref() {
+            let dims = a.dimensions.clone();
+            let rank = dims.len();
+            if counts.len() > rank && rank > 0 {
+                return Err(AplError::runtime(
+                    "↑/↓ count has more elements than the array rank".into(),
+                ));
+            }
+            let mut final_dims = dims.clone();
+            for axis in 0..rank {
+                let spec = counts.get(axis).copied();
+                let n = dims[axis];
+                final_dims[axis] = match spec {
+                    None => n,
+                    Some(c) => c.unsigned_abs() as usize,
+                };
+            }
+            let total: usize = final_dims.iter().product();
+            if total > 100_000_000 {
+                return Err(AplError::runtime("take/drop result too large".into()));
+            }
+            let old_stride = strides(&dims);
+            let new_stride = strides(&final_dims);
+            let elems = a.elements();
+            let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(total);
+            for pos in 0..total {
+                let mut rem = pos;
+                let mut coords = vec![0usize; rank];
+                for (k, d) in final_dims.iter().enumerate() {
+                    coords[k] = rem / new_stride[k];
+                    rem %= new_stride[k];
+                }
+                // Map result coord -> source coord; out-of-range ⇒ fill.
+                let mut in_range = true;
+                let mut oflat = 0usize;
+                for k in 0..rank {
+                    let c = counts.get(k).copied().unwrap_or(dims[k] as i64);
+                    let src_c = if c >= 0 {
+                        coords[k]
+                    } else {
+                        // Negative count takes from the end: source index =
+                        // dims[k] - abs(c) + coords[k].
+                        let start = dims[k].saturating_sub(c.unsigned_abs() as usize);
+                        start + coords[k]
+                    };
+                    if src_c >= dims[k] {
+                        in_range = false;
+                        break;
+                    }
+                    oflat += src_c * old_stride[k];
+                }
+                out.push(if in_range { elems[oflat].clone() } else { fill_val.clone() });
+            }
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                final_dims,
+                ArrayData::Nested(out),
+            )))));
+        }
+        Err(AplError::runtime("take-with-fill: unsupported argument".into()))
     }
 
     fn apply_rank_op(

@@ -586,7 +586,7 @@ impl<'a> Parser<'a> {
             // Power operator `f⍣n` / `f⍣g` (Kotlin parseOperator → PowerAPLOperator,
             // engine.kt:491): binds after a FUNCTION, exactly like the adverbs below,
             // but carries a combined right arg (value OR function) ⇒ ValueOp.
-            if let Some(Token::Literal(LiteralValue::Symbol { ref name, .. })) =
+            if let Some(Token::Literal(LiteralValue::Symbol { ref name, ref namespace })) =
                 self.peek().map(|t| &t.token)
             {
                 if name == "⍣" && Self::is_function_expr(&cur) {
@@ -611,6 +611,24 @@ impl<'a> Parser<'a> {
                     cur = Instr::ValueOp {
                         func: Box::new(cur),
                         op_name: "⍣".to_string(),
+                        operand: Box::new(operand),
+                    };
+                    continue;
+                }
+                // Native value-op `f int:proto v` (Kotlin ProtoOp, engine.kt:505):
+                // binds after a FUNCTION exactly like ⍣ — ValueOp with the proto
+                // value as operand. This is the path `(↑ int:proto 5)` inside a
+                // group takes (parse_value_kotlin → finish_fn_call → here).
+                if namespace.as_deref() == Some("int")
+                    && name == "proto"
+                    && Self::is_function_expr(&cur)
+                {
+                    self.advance(); // consume int:proto
+                    self.skip_newlines();
+                    let operand = self.parse_apply()?;
+                    cur = Instr::ValueOp {
+                        func: Box::new(cur),
+                        op_name: "int:proto".to_string(),
                         operand: Box::new(operand),
                     };
                     continue;
@@ -2434,7 +2452,7 @@ impl<'a> Parser<'a> {
                     // Rank-operator form `f⍤spec` inside a parenthesised group:
                     // the member is a function followed by `⍤` and a (numeric) spec.
                     // Parse it as a ValueOp derived function and use THAT as the member.
-                    if let Some(Token::Literal(LiteralValue::Symbol { name, .. })) = self.peek().map(|t| &t.token) {
+                    if let Some(Token::Literal(LiteralValue::Symbol { name, namespace })) = self.peek().map(|t| &t.token) {
                         if name == "⍤" {
                             self.advance(); // consume ⍤
                             let mut spec = match self.parse_primary() {
@@ -2463,6 +2481,21 @@ impl<'a> Parser<'a> {
                             funcs.push(Instr::ValueOp {
                                 func: Box::new(e),
                                 op_name: "⍤".to_string(),
+                                operand: Box::new(spec),
+                            });
+                            continue;
+                        }
+                        // Native value-op inside a parenthesised group:
+                        // `(↑ int:proto 5)` binds as ValueOp{↑, "int:proto", 5}.
+                        if namespace.as_deref() == Some("int") && name == "proto" {
+                            self.advance(); // consume int:proto
+                            let spec = match self.parse_apply() {
+                                Ok(s) => s,
+                                Err(_) => return None,
+                            };
+                            funcs.push(Instr::ValueOp {
+                                func: Box::new(e),
+                                op_name: "int:proto".to_string(),
                                 operand: Box::new(spec),
                             });
                             continue;
