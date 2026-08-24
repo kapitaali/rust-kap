@@ -4573,13 +4573,30 @@ impl Engine {
                                 shifts = vec![*x; cells];
                             }
                             APLValue::Array(va) => {
-                                for e in va.elements() {
-                                    match e.as_ref() {
-                                        APLValue::Number(KapNumber::Long(x)) => shifts.push(*x),
-                                        _ => {
+                                // Kotlin transpose.kt:210: a SINGLE-element left arg
+                                // (any rank — `(,2)` is a rank-1 1-element vector)
+                                // is ONE shift broadcast to every cell.
+                                if va.element_count() == 1 {
+                                    match va.elements().first().and_then(|e| match e.as_ref() {
+                                        APLValue::Number(KapNumber::Long(x)) => Some(*x),
+                                        _ => None,
+                                    }) {
+                                        Some(x) => shifts = vec![x; cells],
+                                        None => {
                                             return Err(AplError::runtime(
                                                 "⌽/⊖ shift must be integers".into(),
                                             ))
+                                        }
+                                    }
+                                } else {
+                                    for e in va.elements() {
+                                        match e.as_ref() {
+                                            APLValue::Number(KapNumber::Long(x)) => shifts.push(*x),
+                                            _ => {
+                                                return Err(AplError::runtime(
+                                                    "⌽/⊖ shift must be integers".into(),
+                                                ))
+                                            }
                                         }
                                     }
                                 }
