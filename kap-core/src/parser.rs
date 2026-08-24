@@ -115,6 +115,19 @@ impl<'a> Parser<'a> {
             || match qual.split_once(':') {
                 Some((ns, base)) => {
                     (ns == "io" && matches!(base, "print" | "println"))
+                        // P2 (ROADMAP §5 / engine.kt:436–466): the `math:` native
+                        // function family — trig, hyperbolic, number theory.
+                        || (ns == "math"
+                            && matches!(
+                                base,
+                                "sin" | "cos" | "tan"
+                                    | "asin" | "acos" | "atan" | "atan2" | "hypot"
+                                    | "sinh" | "cosh" | "tanh"
+                                    | "asinh" | "acosh" | "atanh"
+                                    | "gcd" | "lcm" | "numerator" | "denominator"
+                                    | "factor" | "divisors" | "primes" | "isPrime"
+                                    | "round" | "formatRational"
+                            ))
                         || (ns == "unicode"
                             && matches!(
                                 base,

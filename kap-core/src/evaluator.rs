@@ -1452,6 +1452,88 @@ impl Engine {
                 println!("{}", rendered);
                 Ok(right_val)
             }
+            // `math:*` — P2 (ROADMAP §5) port of engine.kt:436–466 registrations
+            // (`SinAPLFunction` etc. in math_functions.kt, prime.kt). Monadic fns are
+            // element-wise over arrays via scalar1; dyadic (atan2/hypot/gcd/lcm) via num2.
+            "math:sin" => self.scalar1(right_val, |x| KapNumber::Double(x.as_double().sin()), "math:sin"),
+            "math:cos" => self.scalar1(right_val, |x| KapNumber::Double(x.as_double().cos()), "math:cos"),
+            "math:tan" => self.scalar1(right_val, |x| KapNumber::Double(x.as_double().tan()), "math:tan"),
+            "math:asin" => self.scalar1(right_val, |x| KapNumber::Double(x.as_double().asin()), "math:asin"),
+            "math:acos" => self.scalar1(right_val, |x| KapNumber::Double(x.as_double().acos()), "math:acos"),
+            "math:atan" => self.scalar1(right_val, |x| KapNumber::Double(x.as_double().atan()), "math:atan"),
+            "math:sinh" => self.scalar1(right_val, |x| KapNumber::Double(x.as_double().sinh()), "math:sinh"),
+            "math:cosh" => self.scalar1(right_val, |x| KapNumber::Double(x.as_double().cosh()), "math:cosh"),
+            "math:tanh" => self.scalar1(right_val, |x| KapNumber::Double(x.as_double().tanh()), "math:tanh"),
+            "math:asinh" => self.scalar1(right_val, |x| KapNumber::Double(x.as_double().asinh()), "math:asinh"),
+            "math:acosh" => self.scalar1(right_val, |x| KapNumber::Double(x.as_double().acosh()), "math:acosh"),
+            "math:atanh" => self.scalar1(right_val, |x| KapNumber::Double(x.as_double().atanh()), "math:atanh"),
+            // Dyadic only (Kotlin Atan2APLFunction/HypotAPLFunction).
+            "math:atan2" => match left_val {
+                Some(_) => self.num2(left_val, right_val, |a, b|
+                    KapNumber::Double(a.as_double().atan2(b.as_double())), "math:atan2"),
+                None => Err(AplError::runtime("math:atan2 needs two args".into())),
+            },
+            "math:hypot" => match left_val {
+                Some(_) => self.num2(left_val, right_val, |a, b|
+                    KapNumber::Double(a.as_double().hypot(b.as_double())), "math:hypot"),
+                None => Err(AplError::runtime("math:hypot needs two args".into())),
+            },
+            // gcd/lcm: monadic call is an ERROR in Kotlin ("gcd: Function cannot be called
+            // with one argument"); dyadic on non-negative integers.
+            "math:gcd" => match left_val {
+                Some(_) => self.num2(left_val, right_val, Self::kap_gcd, "math:gcd"),
+                None => Err(AplError::runtime("gcd: Function cannot be called with one argument".into())),
+            },
+            "math:lcm" => match left_val {
+                Some(_) => self.num2(left_val, right_val, |a, b| {
+                    if matches!(a, KapNumber::Long(0)) && matches!(b, KapNumber::Long(0)) {
+                        return KapNumber::Long(0);
+                    }
+                    let g = Self::kap_gcd(a, b);
+                    let p = a.mul(b);
+                    // lcm = |a*b| / gcd; integer division when both integral.
+                    match p.div(&g) {
+                        KapNumber::Long(v) => KapNumber::Long(v.abs()),
+                        other => other,
+                    }
+                }, "math:lcm"),
+                None => Err(AplError::runtime("lcm: Function cannot be called with one argument".into())),
+            },
+            // numerator/denominator: rational components (Long n → n/1).
+            "math:numerator" => match right_val.as_ref() {
+                APLValue::Number(n) => Ok(Rc::new(APLValue::Number(match n {
+                    KapNumber::Rational(r) => KapNumber::BigInt(r.numer().clone()),
+                    KapNumber::Double(d) if d.fract() == 0.0 && *d >= i64::MIN as f64 && *d <= i64::MAX as f64 =>
+                        KapNumber::Long(*d as i64),
+                    other => KapNumber::Long(other.as_long().map_err(|e| AplError::runtime(e))?),
+                }))),
+                _ => Err(AplError::runtime("math:numerator requires a number".into())),
+            },            "math:denominator" => match right_val.as_ref() {
+                APLValue::Number(n) => Ok(Rc::new(APLValue::Number(match n {
+                    KapNumber::Rational(r) => KapNumber::BigInt(r.denom().clone()),
+                    _ => KapNumber::Long(1),                }))),
+                _ => Err(AplError::runtime("math:denominator requires a number".into())),
+            },
+
+            "math:round" => self.scalar1(right_val, |x| {
+                let d = x.as_double();
+                // kotlin.math.round: nearest integer, ties to EVEN
+                // (oracle: 2.5→2, 3.5→4, ¯2.5→¯2).
+                let r = d.round_ties_even();
+                if r >= i64::MIN as f64 && r <= i64::MAX as f64 {
+                    KapNumber::Long(r as i64)
+                } else {
+                    KapNumber::Double(r)
+                }
+            }, "math:round"),
+            // Number theory (prime.kt): factor / divisors / primes / isPrime.
+            "math:factor" => self.math_factor(right_val),
+            "math:divisors" => self.math_divisors(right_val),
+            "math:primes" => self.math_primes(right_val),
+            "math:isPrime" => self.scalar1(right_val, |x| {
+                let v = x.as_long().unwrap_or_else(|_| x.as_double() as i64);
+                KapNumber::Long(if v >= 2 && Self::is_prime_u64(v as u64) { 1 } else { 0 })
+            }, "math:isPrime"),
             // `unicode:*` — character / encoding utilities (Real Kap UnicodeModule).
             "unicode:toCodepoints" => self.unicode_to_codepoints(right_val),
             "unicode:fromCodepoints" => self.unicode_from_codepoints(right_val),
@@ -6339,6 +6421,157 @@ impl Engine {
             }
             _ => false,
         }
+    }
+
+    /// Integer GCD on KapNumbers (Kotlin `integerGcd`/`floatGcd`). Negative inputs
+    /// take absolute value; doubles truncate to i64 (Kotlin floatGcd works on the
+    /// integral value).
+    fn kap_gcd(a: &KapNumber, b: &KapNumber) -> KapNumber {
+        let gcd_u = |mut x: u64, mut y: u64| -> u64 {
+            while y != 0 {
+                let t = x % y;
+                x = y;
+                y = t;
+            }
+            x
+        };
+        let xa = a.as_long().unwrap_or_else(|_| a.as_double() as i64);
+        let xb = b.as_long().unwrap_or_else(|_| b.as_double() as i64);
+        if xa == 0 {
+            return KapNumber::Long(xb.abs());
+        }
+        if xb == 0 {
+            return KapNumber::Long(xa.abs());
+        }
+        KapNumber::Long(gcd_u(xa.unsigned_abs(), xb.unsigned_abs()) as i64)
+    }
+
+    /// Trial-division primality (sufficient for the port's i64 domain; Kotlin uses
+    /// Miller-Rabin only for bigint inputs).
+    fn is_prime_u64(n: u64) -> bool {
+        if n < 2 {
+            return false;
+        }
+        if n % 2 == 0 {
+            return n == 2;
+        }
+        if n % 3 == 0 {
+            return n == 3;
+        }
+        let mut d = 5u64;
+        while d * d <= n {
+            if n % d == 0 || n % (d + 2) == 0 {
+                return false;
+            }
+            d += 6;
+        }
+        true
+    }
+
+    /// Prime factorisation, monadic only (prime.kt FactorAPLFunctionImpl): non-integers
+    /// error "Only integers can be factorised", negatives "Argument must be positive".
+    fn math_factor(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        let one = |v: i64| -> Result<Vec<i64>, AplError> {
+            if v < 0 {
+                return Err(AplError::runtime("Argument must be positive".into()));
+            }
+            let mut n = v;
+            let mut out = Vec::new();
+            let mut d = 2u64;
+            while (d as i64) * (d as i64) <= n {
+                while n % (d as i64) == 0 {
+                    out.push(d as i64);
+                    n /= d as i64;
+                }
+                d += 1;
+            }
+            if n > 1 {
+                out.push(n);
+            }
+            Ok(out)
+        };
+        match right_val.as_ref() {
+            APLValue::Number(KapNumber::Long(v)) => {
+                let fs = one(*v)?;
+                self.make_long_vector(fs)
+            }
+            APLValue::Array(a) => Err(AplError::runtime(
+                "math:factor requires a scalar integer".into(),
+            )),
+            _ => Err(AplError::runtime("Only integers can be factorised".into())),
+        }
+    }
+
+    /// Divisors of n in ascending order (prime.kt DivisorsAPLFunctionImpl).
+    fn math_divisors(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        match right_val.as_ref() {
+            APLValue::Number(KapNumber::Long(v)) => {
+                let v = *v;
+                if v < 0 {
+                    return Err(AplError::runtime("Argument must be positive".into()));
+                }
+                let mut small = Vec::new();
+                let mut large = Vec::new();
+                let mut d = 1i64;
+                while d * d <= v {
+                    if v % d == 0 {
+                        small.push(d);
+                        if d != v / d {
+                            large.push(v / d);
+                        }
+                    }
+                    d += 1;
+                }
+                large.reverse();
+                small.extend(large);
+                // Kotlin divisorsLong iterates i in start..sqrt(n) — the bound is
+                // EXCLUSIVE of n, so n itself never enters (oracle: 12 → ⟨2 3 4 6⟩).
+                // 1 is also excluded (loop starts at 2 or 3).
+                small.retain(|&x| x != 1 && x != v);
+                self.make_long_vector(small)
+            }
+            _ => Err(AplError::runtime("Argument is not an integer".into())),
+        }
+    }
+
+    /// Primes ≤ n via simple sieve (prime.kt PrimesFunctionImpl / atkinSieve):
+    /// n ≤ 0 → Null; result ascending from 2.
+    fn math_primes(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        let n = match right_val.as_ref() {
+            APLValue::Number(n) => n.as_long().unwrap_or_else(|_| n.as_double() as i64),
+            _ => return Err(AplError::runtime("math:primes requires a number".into())),
+        };
+        if n <= 0 {
+            return Ok(Rc::new(APLValue::Null));
+        }
+        let mut sieve = vec![true; (n as usize) + 1];
+        sieve[0] = false;
+        if n >= 1 {
+            sieve[1] = false;
+        }
+        let mut d = 2usize;
+        while d * d <= n as usize {
+            if sieve[d] {
+                (d * d..=(n as usize)).step_by(d).for_each(|m| sieve[m] = false);
+            }
+            d += 1;
+        }
+        let primes: Vec<i64> = sieve
+            .iter()
+            .enumerate()
+            .filter(|(_, &p)| p)
+            .map(|(i, _)| i as i64)
+            .collect();
+        self.make_long_vector(primes)
+    }
+
+    /// Build a rank-1 Long array from i64 values.
+    fn make_long_vector(&self, vals: Vec<i64>) -> Result<AplRef<APLValue>, AplError> {
+        use crate::array::{ArrayData, KapArray};
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![vals.len()],
+            ArrayData::Long(vals),
+        )))))
     }
 
     /// Apply a unary numeric function to a scalar, or element-wise to an array.
