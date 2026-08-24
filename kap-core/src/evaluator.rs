@@ -10,7 +10,7 @@
 use crate::array::{ArrayData, KapArray};
 use crate::ast::{SyntaxMacro, Instr, BooleanOpKind};
 use crate::lexer::tokenise;
-use crate::number::KapNumber;
+use crate::number::{bigint_to_kap, KapNumber};
 use crate::parser;
 use crate::token::{LiteralValue, Token};
 use unicode_segmentation::UnicodeSegmentation;
@@ -1234,6 +1234,9 @@ impl Engine {
                 // `⌻` outer product (Kotlin outer_join.kt OuterJoinOp): `A f⌻ B`
                 // builds the rank-(⍴⍴A + ⍴⍴B) table of f(a,b) over every cell pair.
                 "⌻" => return self.outer_product(func, left, right, env),
+                // `∵` bitwise (Kotlin BitwiseOp, bitwise_ops.kt:55, engine.kt:495):
+                // `f∵` derives the BITWISE variant of scalar fn f (∧∨⍲⍱≠=<>≤≥~⌽⍴).
+                "∵" | "bitwise" => return self.adverb_bitwise(func, left, right, env),
                 // `⍨` commute (Kotlin commute.kt CommuteFunctionImpl):
                 // monadic f⍨ y = y f y; dyadic x f⍨ y = y f x (arguments swapped).
                 "⍨" | "commute" => match left {
@@ -6586,6 +6589,219 @@ impl Engine {
                 )))
             }
         }
+    }
+
+    /// Map a scalar op over a value: scalar → f(v); array/Str → element-wise
+    /// (Str iterates its chars). Mirrors Kotlin's scalar extension.
+    fn map_scalar_or_array(
+        &self,
+        v: &APLValue,
+        f: &dyn Fn(&APLValue) -> Result<APLValue, AplError>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        match v {
+            APLValue::Array(a) => {
+                let mut out = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    out.push(Rc::new(f(e.as_ref())?));
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    a.dimensions.clone(),
+                    ArrayData::Nested(out),
+                )))))
+            }
+            APLValue::Str(s) => {
+                let mut out = Vec::with_capacity(s.len());
+                for c in s.chars() {
+                    out.push(Rc::new(f(&APLValue::Char(c))?));
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![s.len()],
+                    ArrayData::Nested(out),
+                )))))
+            }
+            other => Ok(Rc::new(f(other)?)),
+        }
+    }
+
+    /// Dyadic element-wise map with scalar extension (mirrors num2's shape rules):
+    /// scalar×scalar, scalar×array, array×array (shapes must match).
+    fn map_scalar_or_array2(
+        &self,
+        lv: &APLValue,
+        rv: &APLValue,
+        f: &dyn Fn(&APLValue, &APLValue) -> Result<APLValue, AplError>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        use std::borrow::Borrow;
+        let pair = |a: &APLValue, b: &APLValue| -> Result<AplRef<APLValue>, AplError> {
+            Ok(Rc::new(f(a, b)?))
+        };
+        match (lv, rv) {
+            (APLValue::Array(la), APLValue::Array(ra)) => {
+                if la.dimensions != ra.dimensions {
+                    return Err(AplError::runtime(
+                        "bitwise: argument shapes do not match".into(),
+                    ));
+                }
+                let mut out = Vec::with_capacity(la.element_count());
+                for (a, b) in la.elements().iter().zip(ra.elements().iter()) {
+                    out.push(pair(a.as_ref(), b.as_ref())?);
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    la.dimensions.clone(),
+                    ArrayData::Nested(out),
+                )))))
+            }
+            (APLValue::Array(la), other) | (other, APLValue::Array(la)) if !matches!(lv, APLValue::Array(_)) || matches!(rv, APLValue::Array(_)) => {
+                // scalar extended element-wise against the array side.
+                let is_left_array = matches!(lv, APLValue::Array(_));
+                let mut out = Vec::with_capacity(la.element_count());
+                for e in la.elements() {
+                    let r = if is_left_array {
+                        pair(e.as_ref(), other)?
+                    } else {
+                        pair(other, e.as_ref())?
+                    };
+                    out.push(r);
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    la.dimensions.clone(),
+                    ArrayData::Nested(out),
+                )))))
+            }
+            _ => pair(lv, rv),
+        }
+    }
+
+    /// Bitwise adverb `f∵` (Kotlin `BitwiseOp` → `deriveBitwise()`, bitwise_ops.kt).
+    /// Derives the BITWISE variant of the scalar function operand:
+    ///   ∧∵ and · ∨∵ or · ⍲∵ nand · ⍱∵ nor · ≠∵ xor · =∵ xnor
+    ///   <∵ a.inv()&b · >∵ a&b.inv() · ≤∵ a.inv()\|b · ≥∵ a\|b.inv()
+    ///   ~∵ not/inv (monadic) · ⌽∵ shift (a=shift count, b<<a) · ⍴∵ bit-length (monadic)
+    /// All operands must be integers (Long, BigInt, or integer-valued Rational);
+    /// anything else errors with Kotlin's exact text
+    /// "∵: Bitwise calls can only be performed on integers". A glyph whose scalar fn
+    /// has no bitwise variant (e.g. !∵) → "<f>: Function does not support bitwise operations".
+    fn adverb_bitwise(
+        &self,
+        func: &Instr,
+        left: &Option<Box<Instr>>,
+        right: &Box<Instr>,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        use KapNumber::*;
+        // Which bitwise operation the derived fn performs.
+        let op_name = match func {
+            Instr::Symbol { name, .. } => name.clone(),
+            _ => return Err(AplError::runtime("bitwise operand must be a function".into())),
+        };
+        let to_bigint = |v: &APLValue| -> Result<num_bigint::BigInt, AplError> {
+            match v {
+                APLValue::Number(n) => match n {
+                    Long(l) => Ok(num_bigint::BigInt::from(*l)),
+                    BigInt(b) => Ok(b.clone()),
+                    Rational(r) => {
+                        if *r.denom() == num_bigint::BigInt::from(1) {
+                            Ok(r.numer().clone())
+                        } else {
+                            Err(AplError::runtime(
+                                "∵: Bitwise calls can only be performed on integers".into(),
+                            ))
+                        }
+                    }
+                    _ => Err(AplError::runtime(
+                        "∵: Bitwise calls can only be performed on integers".into(),
+                    )),
+                },
+                _ => Err(AplError::runtime(
+                    "∵: Bitwise calls can only be performed on integers".into(),
+                )),
+            }
+        };
+        let mk = |b: num_bigint::BigInt| -> APLValue {
+            APLValue::Number(bigint_to_kap(&b))
+        };
+        let binop = |a: &num_bigint::BigInt,
+                     b: &num_bigint::BigInt|
+         -> Option<num_bigint::BigInt> {
+            use num_bigint::BigInt;
+            let res = match op_name.as_str() {
+                "∧" => Some(a & b),
+                "∨" => Some(a | b),
+                "⍲" => Some(!(a & b)),
+                "⍱" => Some(!(a | b)),
+                "≠" => Some(a ^ b),
+                "=" => Some(!(a ^ b)),
+                "<" => Some(!a & b),
+                ">" => Some(a & !b),
+                "≤" => Some(!a | b),
+                "≥" => Some(a | !b),
+                "⌽" => {
+                    // Shift: count = a (must fit i64); value = b << a. Negative
+                    // counts RIGHT-shift (Kotlin BigInt.shl semantics), so a
+                    // negative count must not hit num-bigint's panicking `<<`.
+                    use num_traits::ToPrimitive;
+                    let shift = a.to_i64()?;
+                    if shift >= 0 {
+                        Some(b << shift)
+                    } else {
+                        Some(b >> shift.unsigned_abs())
+                    }
+                }
+                _ => None,
+            };
+            res.map(|x| x)
+        };
+        // Monadic ops: ~∵ (inv), ⍴∵ (bit length).
+        let monadic = match left {
+            None => true,
+            Some(_) => false,
+        };
+        if monadic {
+            let v = self.eval_instr(right, env)?.force(self)?;
+            // Element-wise for arrays.
+            return self.map_scalar_or_array(&v, &|elem: &APLValue| -> Result<APLValue, AplError> {
+                let b = to_bigint(elem)?;
+                match op_name.as_str() {
+                    "~" => Ok(mk(!b)),
+                    "⍴" => {
+                        // Kotlin BitwiseBitLengthFunctionImpl: negative values
+                        // measure a.inv() (the unsigned magnitude pattern).
+                        let bits = if b.sign() == num_bigint::Sign::Minus {
+                            (!b).bits() as i64
+                        } else {
+                            b.bits() as i64
+                        };
+                        Ok(APLValue::Number(Long(bits)))
+                    }
+                    "!" => Err(AplError::runtime(
+                        "!: Function does not support bitwise operations".into(),
+                    )),
+                    _ => Err(AplError::runtime(format!(
+                        "{}: Function cannot be called with one argument",
+                        op_name
+                    ))),
+                }
+            });
+        }
+        let lv = match left.as_deref() {
+            Some(l) => self.eval_instr(l, env)?.force(self)?,
+            None => return Err(AplError::runtime("bitwise: missing left argument".into())),
+        };
+        let rv = self.eval_instr(right, env)?.force(self)?;
+        self.map_scalar_or_array2(&lv, &rv, &|a: &APLValue, b: &APLValue| -> Result<
+            APLValue,
+            AplError,
+        > {
+            let ba = to_bigint(a)?;
+            let bb = to_bigint(b)?;
+            match binop(&ba, &bb) {
+                Some(r) => Ok(mk(r)),
+                None => Err(AplError::runtime(format!(
+                    "{}: Function does not support bitwise operations",
+                    op_name
+                ))),
+            }
+        })
     }
 
     /// Each `f¨array` (monadic) or `a f¨ b` (dyadic, element-wise with scalar extension).

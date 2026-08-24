@@ -446,6 +446,20 @@ fn curated_kap_parity() {
         // Error rows (harness cannot assert): 5 ({⍵×2}⍣3) 1 ->
         // "⍣: Function cannot be called with two arguments";
         // ({⍵+1}⍣¯2) 0 -> "⍣: Argument to power is negative: -2".
+        // ∵ bitwise family (Kotlin BitwiseOp, bitwise_ops.kt, engine.kt:495).
+        // All oracle-verified 2026-08-24.
+        ("192 ∨∵ 31", "223"),
+        ("5 ∧∵ 3", "1"),
+        ("5 ≠∵ 3", "6"),
+        ("2 <∵ 1", "1"),
+        ("2 >∵ 1", "2"),
+        ("12 ⌽∵ 5", "20480"),
+        ("¯1 ⌽∵ 5", "2"),
+        ("⍴∵ 255", "8"),
+        ("⍴∵ ¯1", "0"),
+        // Error rows (harness cannot assert): 5 ∧∵ 3.5 ->
+        // "∵: Bitwise calls can only be performed on integers";
+        // !∵ 255 -> "!: Function does not support bitwise operations".
         // Indexing into a string (bracket indexing) — returns char scalars.
         ("\"abcdef\"[2]", "@c"),
         ("\"abcdef\"[0 2]", "\"ac\""),

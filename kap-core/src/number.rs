@@ -384,7 +384,7 @@ fn num_digits_only(s: &str) -> Option<BigInt> {
 }
 
 /// Map a `BigInt` to the smallest `KapNumber` variant that holds it exactly.
-fn bigint_to_kap(v: &BigInt) -> KapNumber {
+pub fn bigint_to_kap(v: &BigInt) -> KapNumber {
     if let Ok(l) = v.to_string().parse::<i64>() {
         KapNumber::Long(l)
     } else {
