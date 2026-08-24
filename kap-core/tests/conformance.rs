@@ -472,6 +472,14 @@ fn curated_kap_parity() {
         // "Invalid size of right argument: 7. Should be divisible by 2.";
         // (¯3 ⍴ 1 2 3) -> "Attempt to reshape to dimension with negative size: -3";
         // (2 :foo ⍴ ⍳5) -> "⍴: Wanted a value of type number. Got: symbol".
+        // ,[axis] laminate + scalar extension (Kotlin concatenate-array.kt
+        // joinByLaminate :133). Oracle-verified 2026-08-24. Self-contained
+        // expressions (harness rows must not depend on prior-row bindings).
+        ("⍴((2 3⍴⍳6),[0.5](2 3⍴⍳6))", "(2 2 3)"),
+        ("⍴((2 3⍴⍳6),[1.5](2 3⍴⍳6))", "(2 3 2)"),
+        ("((2 3⍴⍳6),[0.5]9)[;1]", "(9 9 9 9 9 9)"),
+        // Error rows (harness cannot assert): 1 ,[0.5] 2 -> ",: Both arguments
+        // are scalar"; m,[3]m+10 -> "Axis 3 is not valid. Expected: 2".
         // Indexing into a string (bracket indexing) — returns char scalars.
         ("\"abcdef\"[2]", "@c"),
         ("\"abcdef\"[0 2]", "\"ac\""),

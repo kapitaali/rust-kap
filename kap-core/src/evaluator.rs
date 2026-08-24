@@ -4294,6 +4294,28 @@ impl Engine {
             _ => return Err(AplError::runtime(",[axis]: axis must be a number".into())),
         };
         if is_laminate {
+            // `joinByLaminate`: scalar args are first reshaped to the other side's
+            // shape (Kotlin :133-151), then a length-1 axis is inserted in both and
+            // they are joined along it.
+            let a_is_scalar = matches!(a.as_ref(), APLValue::Number(_) | APLValue::Char(_) | APLValue::Str(_));
+            let b_is_scalar = matches!(b.as_ref(), APLValue::Number(_) | APLValue::Char(_) | APLValue::Str(_));
+            if a_is_scalar && b_is_scalar {
+                return Err(AplError::runtime(",: Both arguments are scalar".into()));
+            }
+            let a: AplRef<APLValue> = if a_is_scalar {
+                let bd = b.dimensions();
+                let count = bd.iter().product::<usize>().max(1);
+                self.make_simple_or_nested(bd, vec![a.clone(); count])?
+            } else {
+                a.clone()
+            };
+            let b: AplRef<APLValue> = if b_is_scalar {
+                let ad = a.dimensions();
+                let count = ad.iter().product::<usize>().max(1);
+                self.make_simple_or_nested(ad, vec![b.clone(); count])?
+            } else {
+                b.clone()
+            };
             // `joinByLaminate`: insert a length-1 axis at `new_axis` in both, then concat.
             let a_dims = a.dimensions();
             let b_dims = b.dimensions();
