@@ -310,6 +310,33 @@ impl<'a> Parser<'a> {
                     self.advance();
                     left_args.push(Instr::Empty);
                 }
+                // P1-M7 (parser.kt:1014–1015 IfToken/WhileToken → processIf/processWhile):
+                // control-flow keyword blocks are plain INSTRUCTIONS. They are
+                // statement-complete (no trailing operands), so RETURN them — the loop
+                // cannot be relied on to stop, because skip_newlines() consumes the
+                // Newline that Kotlin's END_EXPR_TOKEN_LIST (:1342) would terminate on.
+                // The guard mirrors parse_keyword_prefix exactly (incl. the
+                // defsyntax-overrides-`when` rule) so the expect() below cannot fire.
+                Token::Literal(LiteralValue::Symbol { name, .. })
+                    if name == "if"
+                        || name == "while"
+                        || (name == "when" && !self.macros.contains_key("when")) =>
+                {
+                    let instr = self
+                        .parse_keyword_prefix()?
+                        .expect("keyword prefix guaranteed by the match guard");
+                    return Ok(instr);
+                }
+                // P1-M7 (parser.kt:999 FnDefSym → processFunctionDefinition :571): a ∇
+                // definition with accumulated operands is a parse error; otherwise the
+                // definition is processed and returned (APLNullValue in Kotlin — also
+                // statement-complete, hence a direct return, not an append).
+                Token::FnDefSym => {
+                    if !left_args.is_empty() {
+                        return Err(self.err("Function definition with non-null left argument"));
+                    }
+                    return self.parse_fn_def(); // consumes ∇ itself
+                }
                 Token::OpenBrace => {
                     // `{…}` is FUNCTION-SHAPED (Kotlin routes the lambda through
                     // processFn): `3 {⍺+⍵} 4` is dyadic; bare `{⍵×2}` is an ambivalent
@@ -440,6 +467,12 @@ impl<'a> Parser<'a> {
                                     rhs
                                 )));
                             }
+                        }
+                        // Kotlin processShortFormFn DEFINES the binding during parse
+                        // (lookupFunction sees it immediately), so a later statement in
+                        // the same block resolves `g ⍵` as an application. Mirror that.
+                        if !self.known_functions.iter().any(|f| f == &name) {
+                            self.known_functions.push(name.clone());
                         }
                         return Ok(Instr::FnAssign {
                             name,
@@ -768,7 +801,26 @@ impl<'a> Parser<'a> {
                     continue;
                 }
                 Some(_) => {
-                    let stmt = self.parse_expr()?;
+                    // P1-M7 / M5b-2: block-body statements go through the Kotlin
+                    // accumulator loop, which now carries ALL statement-level arms
+                    // (keyword blocks, ∇ defs, primitives, operators). On any error,
+                    // retry the statement via legacy parse_expr — a per-statement
+                    // fallback, not a whole-block bailout, so mixed bodies work.
+                    self.skip_newlines();
+                    let save = self.pos;
+                    let stmt = match self.parse_value_kotlin() {
+                        Ok(s) => s,
+                        Err(crate::AplError::Runtime(m))
+                            if m.contains("__KOTLIN_FALLBACK__") =>
+                        {
+                            self.pos = save;
+                            self.parse_expr()?
+                        }
+                        Err(_) => {
+                            self.pos = save;
+                            self.parse_expr()?
+                        }
+                    };
                     body.push(stmt);
                 }
                 None => return Err(self.err("expected '}' to close block")),
@@ -2615,6 +2667,9 @@ impl<'a> Parser<'a> {
                 | Instr::Lambda { .. }
                 | Instr::Train { .. }
                 | Instr::ValueOp { .. }
+                // P1-M7: a `{…}` block IS a function value (Kotlin OpenFnDef →
+                // processFn); required for `{2×⍵}¨ 1 2 3` to bind the each-adverb.
+                | Instr::Block { .. }
         )
     }
 
