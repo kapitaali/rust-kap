@@ -1992,7 +1992,7 @@ impl Engine {
                         ArrayData::Long(out),
                     )))))
                 }
-                Some(_) => self.cmp2(left_val, right_val, |o| o == Ordering::Equal, "="),
+                Some(_) => self.cmp2_elements(left_val, right_val, |o| o == Ordering::Equal, "="),
             },
             "≠" => match left_val {
                 // Monadic `≠` (unique-mask, Kotlin NotEqualsAPLFunction.eval1Arg):
@@ -2016,12 +2016,12 @@ impl Engine {
                         ArrayData::Long(out),
                     )))))
                 }
-                Some(_) => self.cmp2(left_val, right_val, |o| o != Ordering::Equal, "≠"),
+                Some(_) => self.cmp2_elements(left_val, right_val, |o| o != Ordering::Equal, "≠"),
             },
-            "<" => self.cmp2(left_val, right_val, |o| o == Ordering::Less, "<"),
-            ">" => self.cmp2(left_val, right_val, |o| o == Ordering::Greater, ">"),
-            "≤" => self.cmp2(left_val, right_val, |o| o != Ordering::Greater, "≤"),
-            "≥" => self.cmp2(left_val, right_val, |o| o != Ordering::Less, "≥"),
+            "<" => self.cmp2_elements(left_val, right_val, |o| o == Ordering::Less, "<"),
+            ">" => self.cmp2_elements(left_val, right_val, |o| o == Ordering::Greater, ">"),
+            "≤" => self.cmp2_elements(left_val, right_val, |o| o != Ordering::Greater, "≤"),
+            "≥" => self.cmp2_elements(left_val, right_val, |o| o != Ordering::Less, "≥"),
             "cmp" => self.cmp_values(left_val, right_val, "cmp"),
             "⍳" | "iota" => match left_val {
                 None => self.iota(right_val),
@@ -2681,6 +2681,32 @@ impl Engine {
         }
     }
 
+    /// Element-wise codepoint difference of a string against ONE broadcast scalar
+    /// char (oracle: `"abc" - @a` -> `(0 1 2)`). Result is a NUMERIC vector.
+    fn char_diff_scalar(s: &str, cp: i64) -> Result<AplRef<APLValue>, AplError> {
+        let out: Vec<AplRef<APLValue>> = s
+            .chars()
+            .map(|c| Rc::new(APLValue::Number(KapNumber::Long(c as i64 - cp))))
+            .collect();
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![out.len()],
+            ArrayData::Nested(out),
+        )))))
+    }
+
+    /// Scalar char on the LEFT: `cp - each string codepoint` (oracle:
+    /// `@b - "abc"` -> `(1 0 ¯1)`). Result is a NUMERIC vector.
+    fn char_diff_scalar_left(cp: i64, s: &str) -> Result<AplRef<APLValue>, AplError> {
+        let out: Vec<AplRef<APLValue>> = s
+            .chars()
+            .map(|c| Rc::new(APLValue::Number(KapNumber::Long(cp - c as i64))))
+            .collect();
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![out.len()],
+            ArrayData::Nested(out),
+        )))))
+    }
+
     /// Element-wise codepoint difference of two equal-length strings -> numeric vector.
     fn char_diff(a: &str, b: &str) -> Result<AplRef<APLValue>, AplError> {
         let ca: Vec<i64> = a.chars().map(|c| c as i64).collect();
@@ -2751,6 +2777,31 @@ impl Engine {
                 )));
             }
             return Some(Self::char_shift(&s, &nums, is_add, true));
+        }
+        // String ± Char (oracle-verified 2026-08-24):
+        //   "abc"-@a -> (0 1 2)   element-wise codepoint difference, NUMERIC vector
+        //                         (scalar char BROADCASTS across the string)
+        //   @b-"abc" -> (1 0 ¯1)  same, char on the left
+        //   "abc"+@a / @a+"ab" -> ERROR "+: Function does not support char arguments"
+        if let (APLValue::Str(s), APLValue::Char(c)) = (left, right) {
+            if is_add {
+                return Some(Err(AplError::runtime(
+                    "+: Function does not support char arguments".into(),
+                )));
+            }
+            let cp = *c as i64;
+            return Some(Self::char_diff_scalar(s, cp));
+        }
+        if let (APLValue::Char(c), APLValue::Str(s)) = (left, right) {
+            if is_add {
+                return Some(Err(AplError::runtime(
+                    "+: Function does not support char arguments".into(),
+                )));
+            }
+            // Char on the LEFT: scalar minus each string codepoint (oracle:
+            // `@b-"abc"` -> `(1 0 ¯1)`).
+            let cp = *c as i64;
+            return Some(Self::char_diff_scalar_left(cp, s));
         }
         // Exactly one operand is a string; the other must be a number (scalar or numeric array).
         let (s, nums, str_is_left) = match (left, right) {
@@ -3532,6 +3583,142 @@ impl Engine {
         };
         // Kap booleans are 1 (true) / 0 (false).
         Ok(Rc::new(APLValue::Number(KapNumber::Long(if pred(ord) { 1 } else { 0 }))))
+    }
+
+    /// Element-wise scalar comparison `A f B` for the six comparison operators.
+    /// Oracle-verified (2026-08-24): `1 2 3 < 2` -> `(1 0 0)`; `1 < 1 2 3` ->
+    /// `(0 1 1)`; `"abc" = "abc"` -> `(1 1 1)`; `"abc" ≤ "abd"` -> `(1 1 1)`.
+    /// Scalar extension both ways; equal-length arrays element-wise; chars compare
+    /// by codepoint. Length mismatch errors like Kotlin's dimension check.
+    fn cmp2_elements(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+        pred: impl Fn(Ordering) -> bool,
+        sym: &str,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        use std::cmp::Ordering as O;
+        // Total-ordering key for one operand cell: numbers numerically, chars by
+        // codepoint, everything else via Kap type order (never equal across types
+        // except through total_cmp semantics).
+        let key_of = |v: &APLValue| -> Option<(u8, i64)> {
+            match v {
+                APLValue::Number(n) => n.as_long().ok().map(|l| (0u8, l)),
+                APLValue::Char(c) => Some((1u8, *c as i64)),
+                _ => None,
+            }
+        };
+        let cmp_cells = |x: &APLValue, y: &APLValue| -> Option<bool> {
+            match (x, y) {
+                (APLValue::Number(a), APLValue::Number(b)) => {
+                    a.numeric_cmp(b).ok().map(|o| pred(o))
+                }
+                // Char-vs-char compares by codepoint; char-vs-number is an
+                // incompatible-type error in Kotlin (`< requires numbers`-class).
+                (APLValue::Char(a), APLValue::Char(b)) => {
+                    Some(pred((*a as i64).cmp(&(*b as i64))))
+                }
+                _ => None,
+            }
+        };
+        let a = left_val.clone().ok_or_else(|| AplError::runtime(format!("{} needs two args", sym)))?;
+        let (la, ra) = (a.as_ref(), right_val.as_ref());
+        // Scalar-scalar fast path delegates to the original cmp2 — but two Str
+        // operands (or Str + scalar) are element-wise char comparisons, so let
+        // them fall through to the general path.
+        if !matches!(la, APLValue::Array(_) | APLValue::Str(_))
+            && !matches!(ra, APLValue::Array(_) | APLValue::Str(_))
+        {
+            return self.cmp2(left_val, right_val, pred, sym);
+        }
+        // Gather element views. A Kap string (`Str`) participates element-wise as a
+        // char vector (oracle: "abc" = "abc" -> (1 1 1), "abc" ≤ "abd" -> (1 1 1)).
+        let l_chars = matches!(la, APLValue::Str(_));
+        let r_chars = matches!(ra, APLValue::Str(_));
+        let l_arr = match la {
+            APLValue::Array(x) => Some(x.clone()),
+            _ => None,
+        };
+        let r_arr = match ra {
+            APLValue::Array(x) => Some(x.clone()),
+            _ => None,
+        };
+        let l_len = match (l_arr.as_ref(), la) {
+            (Some(x), _) => x.element_count(),
+            (None, APLValue::Str(s)) => s.chars().count(),
+            _ => 1,
+        };
+        let r_len = match (r_arr.as_ref(), ra) {
+            (Some(x), _) => x.element_count(),
+            (None, APLValue::Str(s)) => s.chars().count(),
+            _ => 1,
+        };
+        let n = l_len.max(r_len);
+        if l_len != 1 && r_len != 1 && l_len != r_len {
+            return Err(AplError::runtime(format!(
+                "{}: Arguments must be of the same dimension, or one of the arguments must be a scalar. aDimensions=[{}], bDimensions=[{}]",
+                sym, l_len, r_len
+            )));
+        }
+        let l_elems = l_arr.as_ref().map(|x| x.elements());
+        let r_elems = r_arr.as_ref().map(|x| x.elements());
+        // Materialise Str operands as per-char closures for cell access.
+        let l_str: Option<Vec<char>> = if l_chars {
+            match la {
+                APLValue::Str(s) => Some(s.chars().collect()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let r_str: Option<Vec<char>> = if r_chars {
+            match ra {
+                APLValue::Str(s) => Some(s.chars().collect()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let mut out: Vec<i64> = Vec::with_capacity(n);
+        for i in 0..n {
+            let li = if l_len == 1 { 0 } else { i };
+            let ri = if r_len == 1 { 0 } else { i };
+            // Resolve left/right cells from array elements, string chars, or the scalar.
+            let l_cell = l_str.as_ref().map(|v| v[li]);
+            let r_cell = r_str.as_ref().map(|v| v[ri]);
+            let lx: &APLValue = match (&l_elems, l_cell) {
+                (Some(v), _) => v[li].as_ref(),
+                (None, Some(c)) => {
+                    out.push(if pred(c.cmp(&r_cell.unwrap()).into()) { 1 } else { 0 });
+                    continue;
+                }
+                _ => la,
+            };
+            let rx: &APLValue = match (&r_elems, r_cell) {
+                (Some(v), _) => v[ri].as_ref(),
+                (None, Some(c)) => {
+                    // Left was a non-string scalar; compare it against this char.
+                    return Err(AplError::runtime(format!(
+                        "{} requires numbers",
+                        sym
+                    )));
+                }
+                _ => ra,
+            };
+            match cmp_cells(lx, rx) {
+                Some(b) => out.push(if b { 1 } else { 0 }),
+                None => {
+                    return Err(AplError::runtime(format!(
+                        "{} requires numbers",
+                        sym
+                    )))
+                }
+            }
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![out.len()],
+            ArrayData::Long(out),
+        )))))
     }
 
     /// `cmp`: total-ordering comparison returning -1 (less), 0 (equal), or 1 (greater)

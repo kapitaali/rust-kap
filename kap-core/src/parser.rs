@@ -703,7 +703,7 @@ impl<'a> Parser<'a> {
                 if self.kotlin_close_stack.last().map(|c| {
                     std::mem::discriminant(c) == std::mem::discriminant(t)
                 }) == Some(true));
-            if at_close_now && Self::is_function_expr(&r) {
+            if at_close_now && self.nested_right_is_fn_result(&r) {
                 // parser.kt:479–491 FnParseResult branch: right is a FUNCTION ⇒
                 // Chain2(parsedFn, right) — atop composition, returned as a fn value.
                 return Ok(Instr::Train {
@@ -742,9 +742,30 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Whether the nested right-argument parse result `r` corresponds to Kotlin's
+    /// FnParseResult (parser.kt:479–491). Kotlin distinguishes by the parse RESULT
+    /// TYPE (Function vs Value); the port must classify structurally. A bare
+    /// `Instr::Symbol` is a VARIABLE (ValueParseResult) unless it names a known
+    /// function/primitive — misclassifying it chains the operator into an atop
+    /// Train and later fails with "unknown function: x" (the `(2+x)` / io.kap
+    /// `code` regression).
+    fn nested_right_is_fn_result(&self, r: &Instr) -> bool {
+        match r {
+            Instr::Symbol { name, namespace } => {
+                let qual = namespace
+                    .as_deref()
+                    .map(|ns| format!("{}:{}", ns, name))
+                    .unwrap_or_else(|| name.clone());
+                Self::is_primitive_op(&qual)
+                    || self.is_known_fn(name, namespace)
+                    || self.known_functions.iter().any(|f| f == name)
+            }
+            other => Self::is_function_expr(other),
+        }
+    }
+
     /// Expect the next token to be `tok`; consume it or return a parse error.
-    fn expect(&mut self, tok: Token, msg: &str) -> Result<(), AplError> {
-        match self.peek() {
+    fn expect(&mut self, tok: Token, msg: &str) -> Result<(), AplError> {        match self.peek() {
             Some(t) if std::mem::discriminant(&t.token) == std::mem::discriminant(&tok) => {
                 self.advance();
                 Ok(())
