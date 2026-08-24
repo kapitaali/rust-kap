@@ -7833,14 +7833,21 @@ impl Engine {
                 )),
             }
         } else {
-            // Monadic: ! b = gamma(b+1)
+            // Monadic: ! b = gamma(b+1). For b+1 <= 0.5 the naive exp(lgamma)
+            // loses Γ's sign (lgamma returns ln|Γ|), so use the reflection
+            // formula Γ(x) = π / (sin(πx)·Γ(1-x)).
+            // Oracle: !5→120.0, !¯0.5→1.772453850905516, !¯1.5→-3.5449077018110318.
             let b = right_val.force(self)?;
             match b.as_ref() {
                 APLValue::Number(y) => {
                     let d = y.as_double();
-                    // gamma(n+1) via lgamma
-                    let log_gamma = lgamma(d + 1.0);
-                    let v = log_gamma.exp();
+                    let x = d + 1.0;
+                    let v = if x >= 0.5 {
+                        lgamma(x).exp()
+                    } else {
+                        std::f64::consts::PI
+                            / ((std::f64::consts::PI * x).sin() * lgamma(1.0 - x).exp())
+                    };
                     Ok(Rc::new(APLValue::Number(KapNumber::Double(v))))
                 }
                 _ => Err(AplError::runtime("!: requires a number".into())),
