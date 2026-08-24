@@ -416,6 +416,28 @@ fn curated_kap_parity() {
         ("⍎\"123\"", "123"),
         // Kotlin renders rationals num/den (oracle ⍎"1/2" -> 1/2).
         ("⍎\"1/2\"", "1/2"),
+        // ⍎ is Kotlin's ParseNumberFunction: a strict NUMBER parser (not an
+        // expression evaluator). All cases oracle-verified 2026-08-24.
+        ("⍎\"-10\"", "¯10"),
+        ("⍎\"  30   \"", "30"),
+        ("⍎\"123456789012345678901234567890123456\"", "123456789012345678901234567890123456"),
+        ("⍎\"10.1\"", "10.1"),
+        ("⍎\"-.3\"", "¯0.3"),
+        ("⍎\"-3.\"", "¯3.0"),
+        ("⍎\"50e0\"", "50.0"),
+        ("⍎\"300e-1\"", "30.0"),
+        ("⍎\"1.5e4\"", "15000.0"),
+        ("⍎\"-1.5e4\"", "¯15000.0"),
+        ("⍎\"1.5e-2\"", "0.015"),
+        ("⍎\"12/4\"", "3"),
+        ("⍎\"-2/5\"", "¯2/5"),
+        ("⍎\"100000000000000000000000000000000000000000/2\"", "50000000000000000000000000000000000000000"),
+        // Error text rows (harness cannot assert errors — verified by hand vs the
+        // oracle, see KNOWN-NONCONFORMANCE / PROGRESS-20260824):
+        //   ⍎"1+2"  -> "⍎: Value cannot be parsed as a number: '1+2'"
+        //   ⍎"."    -> "⍎: Value cannot be parsed as a number: '.'"
+        //   ⍎"@a"   -> "⍎: Value cannot be parsed as a number: '@a'"
+        //   ⍎ 1 2 3 -> "⍎: Argument is not a string"
         // Indexing into a string (bracket indexing) — returns char scalars.
         ("\"abcdef\"[2]", "@c"),
         ("\"abcdef\"[0 2]", "\"ac\""),

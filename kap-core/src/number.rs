@@ -318,7 +318,128 @@ impl KapNumber {
         }
     }
 
-    /// Ceiling: smallest integer ≥ self. Identity for integer kinds; f64 ceil for Double.
+    /// Parse a Kap numeric *string* (from `⍎"…"` / `parseStringToNumber`) into a `KapNumber`.
+    ///
+    /// Faithful port of Kotlin `ParseNumberFunction.parseStringToNumber`
+    /// (format.kt:267): integer → double → rational, in that order, each via an
+    /// anchored regex. The regexes use ASCII `-` (NOT Kap's `¯` high-minus), so a
+    /// `¯`-prefixed string must error. Returns `None` when no pattern matches (the
+    /// caller then raises the Kotlin `Value cannot be parsed as a number` error).
+    ///
+    /// Reductions mirror Kotlin's `makeAPLNumberWithReduction` / `makeAPLNumber`:
+    /// a rational whose denominator is 1 collapses to an integer (long if it fits,
+    /// else bigint); a rational whose denominator is 0 is kept as-is (Kotlin does
+    /// not reduce a zero denominator). This is distinct from the Kap *literal* lexer
+    /// (`lex_helpers::lex_number`), which accepts `¯` and never produces zero-denom
+    /// rationals.
+    pub fn parse_kap_number_string(s: &str) -> Option<KapNumber> {
+        // INTEGER: ^(-?[0-9]+)$
+        if let Some(d) = s.strip_prefix('-') {
+            if !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()) {
+                let v = BigInt::parse_bytes(d.as_bytes(), 10)?;
+                return Some(bigint_to_kap(&-v));
+            }
+        } else if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
+            let v = BigInt::parse_bytes(s.as_bytes(), 10)?;
+            return Some(bigint_to_kap(&v));
+        }
+        // DOUBLE: ^(-?([0-9]*\.[0-9]+([eE]-?[0-9]+)?|[0-9]+[eE]-?[0-9]+|[0-9]+\.))$
+        // (Kotlin throws on a bare "."; here "." fails all three alternations.)
+        let double_ok = if let Some(d) = s.strip_prefix('-') {
+            double_shape(&d)
+        } else {
+            double_shape(s)
+        };
+        if double_ok {
+            if let Ok(f) = s.parse::<f64>() {
+                return Some(KapNumber::Double(f));
+            }
+        }
+        // RATIONAL: ^(-?[0-9]+)/(-?[0-9]+)$
+        if let Some((num_s, den_s)) = s.split_once('/') {
+            let num_digits = num_digits_only(num_s);
+            let den_digits = num_digits_only(den_s);
+            if let (Some(n), Some(d)) = (num_digits, den_digits) {
+                let num = if num_s.starts_with('-') { -n } else { n };
+                let den = if den_s.starts_with('-') { -d } else { d };
+                let r = BigRational::new(num, den); // den may be 0 → kept as-is
+                if *r.denom() == num_bigint::BigInt::from(1) {
+                    return Some(bigint_to_kap(r.numer()));
+                }
+                return Some(KapNumber::Rational(r));
+            }
+        }
+        None
+    }
+}
+
+/// True iff `s` is an optional `-` followed by one or more ASCII digits. Returns the
+/// magnitude as a `BigInt` when true, else `None`.
+fn num_digits_only(s: &str) -> Option<BigInt> {
+    let digits = s.strip_prefix('-').unwrap_or(s);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    BigInt::parse_bytes(digits.as_bytes(), 10)
+}
+
+/// Map a `BigInt` to the smallest `KapNumber` variant that holds it exactly.
+fn bigint_to_kap(v: &BigInt) -> KapNumber {
+    if let Ok(l) = v.to_string().parse::<i64>() {
+        KapNumber::Long(l)
+    } else {
+        KapNumber::BigInt(v.clone())
+    }
+}
+
+/// Match Kotlin's DOUBLE_PATTERN on the magnitude `s` (sign already stripped).
+/// Three alternatives after the optional `-`:
+///   (1) `[0-9]*.[0-9]+([eE]-?[0-9]+)?`  (digits . digits, optional exponent)
+///   (2) `[0-9]+[eE]-?[0-9]+`            (digits + exponent, no dot)
+///   (3) `[0-9]+.`                        (digits . — no fractional part)
+fn double_shape(s: &str) -> bool {
+    // alternative 3: [0-9]+\.  (digits . — no fractional part, no exponent)
+    if s.ends_with('.') {
+        let int_part = &s[..s.len() - 1];
+        return !int_part.is_empty() && int_part.bytes().all(|b| b.is_ascii_digit());
+    }
+    // A dot may carry an optional exponent: [0-9]*.[0-9]+([eE]-?[0-9]+)? (alt 1)
+    // OR there is no dot and the exponent form [0-9]+[eE]-?[0-9]+ (alt 2).
+    // Check the dot form first so `.`-and-`e` strings don't fall into alt 2.
+    if let Some(dot) = s.find('.') {
+        let (int_part, frac_part) = s.split_at(dot);
+        if !int_part.is_empty() && !int_part.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        let frac = &frac_part[1..]; // drop the dot
+        if let Some(e) = frac.find('e').or_else(|| frac.find('E')) {
+            let digits = &frac[..e];
+            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return false;
+            }
+            return exp_suffix(&frac[e..]);
+        }
+        return !frac.is_empty() && frac.bytes().all(|b| b.is_ascii_digit());
+    }
+    // alternative 2: [0-9]+[eE]-?[0-9]+  (no dot allowed)
+    if let Some(e) = s.find('e').or_else(|| s.find('E')) {
+        let (int_part, exp_part) = s.split_at(e);
+        if int_part.is_empty() || !int_part.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        return exp_suffix(exp_part);
+    }
+    false
+}
+
+/// Validate an exponent suffix `[eE]-?[0-9]+`. Accepts `e3`, `e-3`, `E12`.
+fn exp_suffix(s: &str) -> bool {
+    let body = s.strip_prefix('e').or_else(|| s.strip_prefix('E')).unwrap_or(s);
+    let digits = body.strip_prefix('-').unwrap_or(body);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+impl KapNumber {
     pub fn ceil(&self) -> KapNumber {
         use KapNumber::*;
         match self {

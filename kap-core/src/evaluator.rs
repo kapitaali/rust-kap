@@ -1376,62 +1376,24 @@ impl Engine {
                 }
             }
             "⍎" | "execute" => {
-                // Monadic execute-string: evaluate `s` as a Kap expression; the
-                // result must be a scalar number (Kotlin: `⍎"123"`=>123, `⍎"1/2"`=>1/2;
-                // `⍎"illegal"`/`⍎"1 2 3"` error).
+                // Monadic execute-string is Kotlin's `ParseNumberFunction`
+                // (format.kt:250), NOT a general expression evaluator. It parses `s`
+                // as a NUMBER ONLY — integer → double → rational, each via an
+                // anchored regex using ASCII `-` (not Kap's `¯`) — and throws if no
+                // number pattern matches (oracle: `⍎"1+2"` / `⍎"⍳3"` → error, not 3).
+                // Error text mirrors Kotlin's `Value cannot be parsed as a number`.
                 let s = match right_val.as_ref() {
                     APLValue::Str(s) => s.clone(),
-                    _ => return Err(AplError::runtime("⍎ requires a string argument".into())),
+                    _ => return Err(AplError::runtime("⍎: Argument is not a string".into())),
                 };
-                // Kap's number syntax includes rationals: `⍎"3/7"` → the rational 3r7.
-                // Kotlin ParseNumberFunction.parseStringToNumber (format.kt) tries
-                // integer → double → RATIONAL (`^(-?[0-9]+)/(-?[0-9]+)$`) in that
-                // order, WITHOUT evaluating. Mirror it: pattern-match first, and only
-                // fall back to full eval for anything else (e.g. `⍎"1+2"`, `⍎"⍳3"`).
                 let t = s.trim();
-                if let Ok(n) = t.parse::<i64>() {
-                    return Ok(Rc::new(APLValue::Number(KapNumber::Long(n))));
+                match KapNumber::parse_kap_number_string(t) {
+                    Some(n) => Ok(Rc::new(APLValue::Number(n))),
+                    None => Err(AplError::runtime(format!(
+                        "⍎: Value cannot be parsed as a number: '{}'",
+                        s
+                    ))),
                 }
-                if let Some((num, den)) = t.split_once('/') {
-                    if !num.is_empty()
-                        && !den.is_empty()
-                        && num.strip_prefix('-').unwrap_or(num).chars().all(|c| c.is_ascii_digit())
-                        && den.strip_prefix('-').unwrap_or(den).chars().all(|c| c.is_ascii_digit())
-                    {
-                        if let (Ok(n), Ok(d)) = (num.parse::<i64>(), den.parse::<i64>()) {
-                            if d != 0 {
-                                return Ok(Rc::new(APLValue::Number(
-                                    KapNumber::Rational(num_rational::BigRational::new(
-                                        num_bigint::BigInt::from(n),
-                                        num_bigint::BigInt::from(d),
-                                    )),
-                                )));
-                            }
-                        }
-                    }
-                }
-                if let Ok(val) = self.eval_string_in_env(&s, env)?.force(self) {
-                    if let APLValue::Number(_) = val.as_ref() {
-                        return Ok(Rc::new(val.as_ref().clone()));
-                    }
-                }
-                let t = s.trim();
-                if let Some((num, den)) = t.split_once('/') {
-                    if let (Ok(n), Ok(d)) = (num.trim().parse::<i64>(), den.trim().parse::<i64>()) {
-                        if d != 0 {
-                            return Ok(Rc::new(APLValue::Number(
-                                KapNumber::Rational(num_rational::BigRational::new(
-                                    num_bigint::BigInt::from(n),
-                                    num_bigint::BigInt::from(d),
-                                )),
-                            )));
-                        }
-                    }
-                }
-                Err(AplError::runtime(format!(
-                    "⍎: Value cannot be parsed as a number: '{}'",
-                    s
-                )))
             }
             // `io:print` / `io:println`: write the value's *plain* (unquoted) rendering
             // to stdout and return the value unchanged. The REPL then displays the

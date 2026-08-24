@@ -25,6 +25,37 @@ Legend for severity:
 
 ---
 
+## STRINGS — `⍎` (execute) — CLOSED (2026-08-24, commit pending)
+
+`⍎` is Kotlin's `ParseNumberFunction` (format.kt:250): a **strict number parser**
+(integer → double → rational, anchored regexes using ASCII `-`, NOT Kap's `¯`),
+which throws `Value cannot be parsed as a number: '<s>'` when nothing matches. It
+does NOT evaluate arbitrary expressions (`⍎"1+2"` → error, not 3). The port's old
+`eval_string` fallback (which silently evaluated expressions and used `i64` for
+rationals, breaking `⍎"1/1e41…"`) is removed. New `number.rs::parse_kap_number_string`
+is the faithful port; 14 curated value-rows added and all oracle matrix cases match
+on VALUE. Re-baseline numbers above are stale for this builtin — `⍎` is now conformant
+(value-level) except the DISPLAY `¯` vs `-` convention and the MSG items below.
+
+## STRINGS — char/string arithmetic error-text (MSG, pre-existing)
+
+Value-level char/string `+ -` and comparisons are conformant (18/18 oracle matrix
+cases match on value). Only the **error text** still diverges from the oracle
+(behavior — rejecting — is identical):
+
+| expr | port | oracle |
+|------|------|--------|
+| `98 200 - "aj"` (Num−Str) | `cannot subtract a character from a number` | `Incompatible argument types. Left arg: integer, Right arg: char` |
+| `@a - 98` (Char−Num, neg) | `character codepoint out of range` | `Codepoints cannot be negative: -1` |
+| `@a + 1j1` (Char+Complex) | `cannot add a complex number to a character` | `Number is complex: Complex(re=1.0, im=1.0)` |
+| `"a" + "b"` (Str+Str) | `cannot add two strings` | `+: Function does not support char arguments` |
+| `@a + @A` (Char+Char) | `cannot add two characters` | `+: Function does not support char arguments` |
+
+Align in a dedicated ERRORS.md pass (ROADMAP §0.3). `Str-Str` result `¯1` vs oracle
+`-1` is DISPLAY-glyph only (value `[-1]` correct).
+
+---
+
 ## CRITICAL — `⌷` (squad / index selection) — FIXED (commit 20260820+)
 
 `⌷` was mis-wired to `disclose`. It is now **index selection** (`AccessFromIndexAPLFunction`),
