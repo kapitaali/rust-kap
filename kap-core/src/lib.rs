@@ -410,10 +410,20 @@ impl NamespaceRegistry {
             .insert(name.to_string(), val);
     }
     /// Mark `(ns, name)` as read-only (Kotlin `Namespace.addConstant`).
+    /// Oracle behaviour (2026-08-24): `declare(:const q)` BINDS `q ← null`
+    /// in the namespace (`⊢ null` on the declare line; a later `q` errors
+    /// "Variable not assigned" only because null is unprintable there —
+    /// assignment to it still fails with "Assignment to constant variable").
     pub fn declare_const(&self, ns: &str, name: &str) {
         self.constants
             .borrow_mut()
             .insert((ns.to_string(), name.to_string()));
+        // Bind the name to Null if not already bound, so the symbol exists.
+        {
+            let mut syms = self.symbols.borrow_mut();
+            let m = syms.entry(ns.to_string()).or_default();
+            m.entry(name.to_string()).or_insert_with(|| Rc::new(APLValue::Null));
+        }
     }
     /// Whether `(ns, name)` is a read-only constant.
     pub fn is_constant(&self, ns: &str, name: &str) -> bool {
