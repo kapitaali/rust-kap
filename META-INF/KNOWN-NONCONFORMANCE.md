@@ -37,22 +37,22 @@ is the faithful port; 14 curated value-rows added and all oracle matrix cases ma
 on VALUE. Re-baseline numbers above are stale for this builtin — `⍎` is now conformant
 (value-level) except the DISPLAY `¯` vs `-` convention and the MSG items below.
 
-## STRINGS — char/string arithmetic error-text (MSG, pre-existing)
+## STRINGS — char/string arithmetic error-text — CLOSED (2026-08-24)
 
 Value-level char/string `+ -` and comparisons are conformant (18/18 oracle matrix
-cases match on value). Only the **error text** still diverges from the oracle
-(behavior — rejecting — is identical):
+cases match on value). The five MSG-class error texts were aligned verbatim to the
+Kotlin throw sites (`compare_functions.kt:273/281`, `number.kt:400`,
+`types.kt:1617`) and now match the oracle byte-for-byte:
 
-| expr | port | oracle |
-|------|------|--------|
-| `98 200 - "aj"` (Num−Str) | `cannot subtract a character from a number` | `Incompatible argument types. Left arg: integer, Right arg: char` |
-| `@a - 98` (Char−Num, neg) | `character codepoint out of range` | `Codepoints cannot be negative: -1` |
-| `@a + 1j1` (Char+Complex) | `cannot add a complex number to a character` | `Number is complex: Complex(re=1.0, im=1.0)` |
-| `"a" + "b"` (Str+Str) | `cannot add two strings` | `+: Function does not support char arguments` |
-| `@a + @A` (Char+Char) | `cannot add two characters` | `+: Function does not support char arguments` |
+| expr | port = oracle (verbatim) |
+|------|--------------------------|
+| `98 200 - "aj"` | `-: Incompatible argument types. Left arg: integer, Right arg: char` |
+| `@a - 98` | `-: Codepoints cannot be negative: -1` |
+| `@a + 1j1` | `+: Number is complex: Complex(re=1.0, im=1.0)` |
+| `"a" + "b"` / `@a + @A` | `+: Function does not support char arguments` |
 
-Align in a dedicated ERRORS.md pass (ROADMAP §0.3). `Str-Str` result `¯1` vs oracle
-`-1` is DISPLAY-glyph only (value `[-1]` correct).
+`Str-Str` result `¯1` vs oracle `-1` remains DISPLAY-glyph only (value `[-1]`
+correct).
 
 ---
 

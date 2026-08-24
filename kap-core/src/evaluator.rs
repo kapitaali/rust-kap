@@ -2625,16 +2625,21 @@ impl Engine {
         for (i, cp) in cps.iter().enumerate() {
             let num = &n[i];
             if num.is_complex() {
-                return Err(AplError::runtime(
-                    "cannot add a complex number to a character".into(),
-                ));
+                let (re, im) = num.as_complex();
+                return Err(AplError::runtime(format!(
+                    "+: Number is complex: Complex(re={:?}, im={:?})",
+                    re, im
+                )));
             }
             let delta: i64 = num
                 .as_long()
                 .unwrap_or_else(|_| num.as_double() as i64); // doubles truncate toward zero
             let new_cp = if is_add { cp + delta } else { cp - delta };
             if !(0..=0x10FFFF).contains(&new_cp) {
-                return Err(AplError::runtime("character codepoint out of range".into()));
+                return Err(AplError::runtime(format!(
+                    "-: Codepoints cannot be negative: {}",
+                    new_cp
+                )));
             }
             out.push(char::from_u32(new_cp as u32).unwrap_or('?'));
         }
@@ -2712,7 +2717,7 @@ impl Engine {
             if is_add {
                 // `+` does not support char arguments (only `-` subtracts chars).
                 return Some(Err(AplError::runtime(
-                    "cannot add two characters".into(),
+                    "+: Function does not support char arguments".into(),
                 )));
             }
             return Some(Ok(Rc::new(APLValue::Number(KapNumber::Long(
@@ -2722,7 +2727,9 @@ impl Engine {
         // String - String => element-wise codepoint difference (numbers). Addition errors.
         if let (APLValue::Str(a), APLValue::Str(b)) = (left, right) {
             if is_add {
-                return Some(Err(AplError::runtime("cannot add two strings".into())));
+                return Some(Err(AplError::runtime(
+                    "+: Function does not support char arguments".into(),
+                )));
             }
             return Some(Self::char_diff(a, b));
         }
@@ -2738,7 +2745,7 @@ impl Engine {
             // int - char asymmetry: subtracting a char from a number is forbidden.
             if !is_add {
                 return Some(Err(AplError::runtime(
-                    "cannot subtract a character from a number".into(),
+                    "-: Incompatible argument types. Left arg: integer, Right arg: char".into(),
                 )));
             }
             return Some(Self::char_shift(&s, &nums, is_add, true));
@@ -2777,7 +2784,7 @@ impl Engine {
         // int - char asymmetry: subtracting a string from a number is forbidden.
         if !is_add && !str_is_left {
             return Some(Err(AplError::runtime(
-                "cannot subtract a character from a number".into(),
+                "-: Incompatible argument types. Left arg: integer, Right arg: char".into(),
             )));
         }
         Some(Self::char_shift(&s, &nums, is_add, false))
