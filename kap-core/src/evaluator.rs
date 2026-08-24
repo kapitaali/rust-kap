@@ -4553,6 +4553,17 @@ impl Engine {
         right: &Box<Instr>,
         env: &AplRef<Environment>,
     ) -> Result<AplRef<APLValue>, AplError> {
+        // `⍉ int:proto v` wrapped by ˝ (the inline form `(⍉ int:proto 99)˝ m`):
+        // Kotlin binds ˝ OUTSIDE the proto wrapper and evalInverse2ArgBWithProto
+        // threads the proto through to the inverse-diagonal path. Unwrap here.
+        if let Instr::ValueOp { func: inner, op_name, operand } = func.as_ref() {
+            if op_name == "int:proto"
+                && matches!(inner.as_ref(), Instr::Symbol { name, .. } if name == "⍉")
+            {
+                let proto_val = self.eval_instr(operand, env)?.force(self)?;
+                return self.adverb_inverse_with_proto(inner, left, right, env, &proto_val);
+            }
+        }
         let fname = match func.as_ref() {
             Instr::Symbol { name, .. } => name.clone(),
             // An axis-applied function (`⌽[0]˝`, i.e. `(f[k])˝`) keeps its axis:
@@ -5282,9 +5293,7 @@ impl Engine {
         // Kotlin evalInverse2ArgBWithProto :538 — diagonal spec ⇒ inverse diagonal.
         let has_dup = Self::axes_have_duplicate(&axes);
         match rv.as_ref() {
-            APLValue::Array(a) if has_dup && a.dimensions.len() == 1 => {
-                self.inverse_diagonal(&axes, a, proto_val)
-            }
+            APLValue::Array(a) if has_dup => self.inverse_diagonal(&axes, a, proto_val),
             _ => Err(AplError::runtime(
                 "⍉˝: inverse not supported for this function".into(),
             )),
