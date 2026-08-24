@@ -141,6 +141,8 @@ impl<'a> Parser<'a> {
                         || (ns == "int" && matches!(base, "intern" | "symbolName" | "throwNative" | "unwindProtect" | "formatRational"))
                         || (ns == "default" && base == "sysparam")
                         || (ns == "kap" && base == "sysparam")
+                        // P2 encoder ns (engine.kt:469–470, encoder/encoder.kt).
+                        || (ns == "encoder" && matches!(base, "encode" | "decode"))
                         || (ns == "regex"
                             && matches!(
                                 base,

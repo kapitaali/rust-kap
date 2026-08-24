@@ -1630,6 +1630,9 @@ impl Engine {
                     }
                 }
             }
+            // `encoder:*` — P2 (engine.kt:469–470): binary value codec (Kap wire format).
+            "encoder:encode" => self.encoder_encode(right_val),
+            "encoder:decode" => self.encoder_decode(right_val),
             // `unicode:*` — character / encoding utilities (Real Kap UnicodeModule).
             "unicode:toCodepoints" => self.unicode_to_codepoints(right_val),
             "unicode:fromCodepoints" => self.unicode_from_codepoints(right_val),
@@ -6585,6 +6588,46 @@ impl Engine {
             out.push_str(&digits[dl - dec..]);
         }
         (out, exact)
+    }
+
+    /// Port of Kotlin `encoder/encoder.kt` via `encoder:encode` (EncodeToByteArrayFunction):
+    /// serialize the value into the Kap binary wire format, returning a byte vector
+    /// (rank-1 Long array). Errors mirror Kotlin's EncodeException text.
+    fn encoder_encode(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        let bytes = crate::encoder::encode_value(right_val.as_ref())
+            .map_err(|e| AplError::runtime(format!("Error when encoding value: {}", e)))?;
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![bytes.len()],
+            ArrayData::Long(bytes.into_iter().map(|b| b as i64).collect()),
+        )))))
+    }
+
+    /// `encoder:decode`: parse the Kap wire format back into a value. Input is a
+    /// rank-1 byte array (Longs 0–255).
+    fn encoder_decode(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        let bytes: Vec<u8> = match right_val.as_ref() {
+            APLValue::Array(a) => {
+                let mut out = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    match e.as_ref() {
+                        APLValue::Number(n) => {
+                            let l = n.as_long().map_err(|e| AplError::runtime(e))?;
+                            if !(0..=255).contains(&l) {
+                                return Err(AplError::runtime("Error decoding content: byte out of range".into()));
+                            }
+                            out.push(l as u8);
+                        }
+                        _ => return Err(AplError::runtime("encoder:decode requires a byte array".into())),
+                    }
+                }
+                out
+            }
+            APLValue::Number(n) => vec![n.as_long().map_err(|e| AplError::runtime(e))? as u8],
+            _ => return Err(AplError::runtime("encoder:decode requires an array".into())),
+        };
+        let v = crate::encoder::decode_value(&bytes)
+            .map_err(|e| AplError::runtime(format!("Error decoding content: {}", e)))?;
+        Ok(Rc::new(v))
     }
 
     /// Integer GCD on KapNumbers (Kotlin `integerGcd`/`floatGcd`). Negative inputs    /// take absolute value; doubles truncate to i64 (Kotlin floatGcd works on the

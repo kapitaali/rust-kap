@@ -21,6 +21,7 @@ pub mod lex_helpers;
 pub mod ast;
 pub mod parser;
 pub mod evaluator;
+pub mod encoder;
 pub mod session;
 
 /// A persistent, REPL-like Kap evaluation context. State (variables, user
