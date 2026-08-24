@@ -139,6 +139,11 @@ impl<'a> Parser<'a> {
                             ))
                         || (ns == "s" && matches!(base, "trimLeft" | "trimRight" | "trim"))
                         || (ns == "int" && matches!(base, "intern" | "symbolName" | "throwNative" | "unwindProtect" | "formatRational"))
+                        // `int:proto v` is a native VALUE-RIGHT-ARG OPERATOR
+                        // (engine.kt:505 registerNativeOperator("proto", ProtoOp(), "int")):
+                        // it must parse as a function so `f int:proto v` builds the
+                        // ValueOp form; the evaluator routes it to apply_proto_op.
+                        || (ns == "int" && base == "proto")
                         || (ns == "default" && base == "sysparam")
                         || (ns == "kap" && base == "sysparam")
                         // P2 encoder ns (engine.kt:469–470, encoder/encoder.kt).
@@ -1768,6 +1773,13 @@ impl<'a> Parser<'a> {
                                 if Self::is_primitive_op(name) || Self::is_adverb(name)
                                     || name == "⍤"
                         )
+                        // `int:proto` is a native VALUE-OP, never a data operand:
+                        // `↑ int:proto 5` must bind proto to ↑, not feed it as ⍵.
+                        && !matches!(
+                            t,
+                            Token::Literal(LiteralValue::Symbol { name, namespace })
+                                if namespace.as_deref() == Some("int") && name == "proto"
+                        )
                 }
                 None => false,
             };
@@ -1784,11 +1796,21 @@ impl<'a> Parser<'a> {
                 Some(Token::Literal(LiteralValue::Symbol { name: nn, .. })) => nn == "⍤",
                 _ => false,
             };
+            // A namespaced native value-op (`int:proto`) after a function: the
+            // function operand binds it as `ValueOp{fn, "int:proto", operand}`.
+            let next_is_native_value_op = match &next {
+                Some(Token::Literal(LiteralValue::Symbol { name, namespace })) => {
+                    namespace.as_deref() == Some("int") && name == "proto"
+                }
+                _ => false,
+            };
             let do_monadic = if is_prim {
                 // A leading primitive followed by an adverb (`+/`, `×¨`, `⍟\\`) is the
                 // *function-then-operator* form, NOT monadic application: it is a derived
                 // function `func op` applied to the following data.
-                (next_is_operand_not_fn || next_is_primitive) && !next_is_adverb
+                (next_is_operand_not_fn || next_is_primitive)
+                    && !next_is_adverb
+                    && !next_is_native_value_op
             } else {
                 // A leading user symbol applies monadically only when it names a function.
                 // A leading *value* symbol does not apply — it strands with the next operand.
@@ -1885,6 +1907,34 @@ impl<'a> Parser<'a> {
                 };
                 // If a trailing data argument was present on this same statement, apply it
                 // now as the right operand (mirrors how `+/ 1 2 3` binds its data).
+                if !matches!(data, Instr::Empty) {
+                    return Ok(Instr::Apply {
+                        fn_expr: Box::new(value_op),
+                        left: None,
+                        right: Box::new(data),
+                    });
+                }
+                return Ok(value_op);
+            }
+            // Native value-right-arg operator: `f int:proto v` (Kotlin ProtoOp,
+            // proto.kt — engine.kt:505). Same binding shape as `⍤`: the operator
+            // takes ONE value expression on its right and yields a derived function.
+            if (is_prim || is_known) && next_is_native_value_op {
+                self.advance(); // consume int:proto
+                let spec = self.parse_apply()?;
+                let data = if !self.at_statement_boundary()
+                    && self.peek().map(|t| &t.token) != Some(&Token::CloseParen)
+                    && self.peek().map(|t| &t.token) != Some(&Token::CloseBracket)
+                {
+                    self.parse_apply()?
+                } else {
+                    Instr::Empty
+                };
+                let value_op = Instr::ValueOp {
+                    func: Box::new(first),
+                    op_name: "int:proto".to_string(),
+                    operand: Box::new(spec),
+                };
                 if !matches!(data, Instr::Empty) {
                     return Ok(Instr::Apply {
                         fn_expr: Box::new(value_op),

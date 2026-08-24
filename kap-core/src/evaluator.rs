@@ -1246,6 +1246,13 @@ impl Engine {
             if op_name == "⍣" {
                 return self.apply_power_op(func, operand, left, right, env);
             }
+            // `f int:proto v` (Kotlin ProtoOp / CallWithProtoFunctionImpl, proto.kt):
+            // evaluate the proto value ONCE and thread it as the default-value
+            // argument of every WithProto eval path the wrapped fn supports.
+            if op_name == "int:proto" {
+                let proto_val = self.eval_instr(operand, env)?.force(self)?;
+                return self.apply_proto_op(func, &proto_val, left, right, env);
+            }
             return Err(AplError::runtime(format!(
                 "unknown value-right-arg operator: {}",
                 op_name
@@ -5143,6 +5150,121 @@ impl Engine {
         )))))
     }
 
+    /// Inverse diagonal transpose with a default fill value (Kotlin
+    /// InverseDiagonalTransposedValue, transpose.kt:415). Given axes like
+    /// `0 1 1` (duplicated indices = diagonal spec) and a DIAGONAL-shaped
+    /// source, produce a rank-`axes.len()` array whose off-diagonal cells are
+    /// `def_val`. Result dim per axis group = min of source dims on the group.
+    fn inverse_diagonal(
+        &self,
+        axes: &[i64],
+        src: &KapArray,
+        def_val: &AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let src_dims = src.dimensions.clone();
+        // Kotlin init: result dims[i] = bDimensions[indexes[0]] for every i.
+        if axes.is_empty() {
+            return Err(AplError::runtime("⍉˝: empty axis spec".into()));
+        }
+        let new_dims: Vec<usize> =
+            (0..axes.len()).map(|_| src_dims[axes[0] as usize]).collect();
+        // Group SOURCE positions by their index in `axes` (Kotlin posMap from
+        // computeDiagonalsAxisDefinition): posMap[srcAxisIndex] = list of dest
+        // positions sharing it. Dest coord i maps to src axis axes[i].
+        let total: usize = new_dims.iter().product();
+        if total > 100_000_000 {
+            return Err(AplError::runtime("transpose result too large".into()));
+        }
+        let new_stride = strides(&new_dims);
+        let old_stride = strides(&src_dims);
+        let elems = src.elements();
+        let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(total);
+        for pos in 0..total {
+            let mut rem = pos;
+            let mut res_coords = vec![0usize; new_dims.len()];
+            for (k, d) in new_dims.iter().enumerate() {
+                res_coords[k] = rem / new_stride[k];
+                rem %= new_stride[k];
+            }
+            // Kotlin valueAt: destCoord[i] is valid only when all dest positions
+            // sharing one source axis have EQUAL coords; else → defVal.
+            let mut src_axis_coord: Vec<Option<usize>> = vec![None; src_dims.len()];
+            let mut ok = true;
+            for (i, &m) in axes.iter().enumerate() {
+                match src_axis_coord[m as usize] {
+                    None => src_axis_coord[m as usize] = Some(res_coords[i]),
+                    Some(prev) => {
+                        if prev != res_coords[i] {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !ok {
+                out.push(def_val.clone());
+                continue;
+            }
+            let mut oflat = 0usize;
+            for (k, c) in src_axis_coord.iter().enumerate() {
+                oflat += c.unwrap_or(0) * old_stride[k];
+            }
+            out.push(elems[oflat].clone());
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            new_dims,
+            ArrayData::Nested(out),
+        )))))
+    }
+
+    /// ⍉˝ int:proto v path: inverse-diagonal transpose with a custom fill.
+    fn adverb_inverse_with_proto(
+        &self,
+        func: &Box<Instr>,
+        left: &Option<Box<Instr>>,
+        right: &Box<Instr>,
+        env: &AplRef<Environment>,
+        proto_val: &AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let lv = match left {
+            Some(l) => self.eval_instr(l, env)?.force(self)?,
+            None => {
+                return Err(AplError::runtime(
+                    "⍉˝ int:proto requires a left axis argument".into(),
+                ))
+            }
+        };
+        let rv = self.eval_instr(right, env)?.force(self)?;
+        let axes: Vec<i64> = match lv.as_ref() {
+            APLValue::Array(va) => {
+                let mut axes = Vec::with_capacity(va.element_count());
+                for e in va.elements() {
+                    match e.as_ref() {
+                        APLValue::Number(KapNumber::Long(x)) => axes.push(*x),
+                        _ => {
+                            return Err(AplError::runtime(
+                                "⍉˝: axis indices must be integers".into(),
+                            ))
+                        }
+                    }
+                }
+                axes
+            }
+            APLValue::Number(KapNumber::Long(x)) => vec![*x],
+            _ => return Err(AplError::runtime("⍉˝: invalid axis argument".into())),
+        };
+        // Kotlin evalInverse2ArgBWithProto :538 — diagonal spec ⇒ inverse diagonal.
+        let has_dup = Self::axes_have_duplicate(&axes);
+        match rv.as_ref() {
+            APLValue::Array(a) if has_dup && a.dimensions.len() == 1 => {
+                self.inverse_diagonal(&axes, a, proto_val)
+            }
+            _ => Err(AplError::runtime(
+                "⍉˝: inverse not supported for this function".into(),
+            )),
+        }
+    }
+
     fn take(
         &self,
         left_val: Option<AplRef<APLValue>>,
@@ -6866,6 +6988,43 @@ impl Engine {
     ///   * 2-elem vector   → [leftRank, rightRank]
     ///   * 3-elem vector   → monadic uses the MIDDLE element
     /// A negative index counts back from the argument's rank; clamped to [0, rank].
+    /// `f int:proto v` (Kotlin ProtoOp / CallWithProtoFunctionImpl, proto.kt):
+    /// evaluate the proto value and thread it as the default-value argument of
+    /// the wrapped function's WithProto paths. Only the two consumers that
+    /// override WithProto in Kotlin are supported: `⍉` inverse-diagonal fill
+    /// (evalInverse2ArgBWithProto, transpose.kt:538) and `↑` take-fill.
+    /// Everything else ignores the proto (Kotlin's default: WithProto == plain).
+    fn apply_proto_op(
+        &self,
+        func: &Instr,
+        proto_val: &AplRef<APLValue>,
+        left: &Option<Box<Instr>>,
+        right: &Box<Instr>,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        // ⍉˝ int:proto v: inverse-diagonal with a custom default value.
+        if let Instr::Derived { func: inner, op } = func {
+            let is_inv = matches!(op.as_ref(), Instr::Symbol { name, .. } if name == "˝" || name == "inverse");
+            let is_transpose = matches!(inner.as_ref(), Instr::Symbol { name, .. } if name == "⍉");
+            if is_inv && is_transpose {
+                return self.adverb_inverse_with_proto(inner, left, right, env, proto_val);
+            }
+        }
+        // `N (↑ int:proto v) arr`: take with a custom fill element.
+        let fname_is_take = matches!(func, Instr::Symbol { name, .. } if name == "↑" || name == "take");
+        if fname_is_take {
+            let lv = match left {
+                Some(l) => Some(self.eval_instr(l, env)?.force(self)?),
+                None => None,
+            };
+            let rv = self.eval_instr(right, env)?.force(self)?;
+            return self.take(lv, rv);
+        }
+        // Default Kotlin behaviour: the proto is ignored for fns without a
+        // WithProto override — call the fn normally.
+        self.eval_apply(func, left, right, env)
+    }
+
     fn apply_rank_op(
         &self,
         func: &Instr,
