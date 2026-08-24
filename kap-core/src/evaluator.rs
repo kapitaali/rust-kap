@@ -1534,6 +1534,102 @@ impl Engine {
                 let v = x.as_long().unwrap_or_else(|_| x.as_double() as i64);
                 KapNumber::Long(if v >= 2 && Self::is_prime_u64(v as u64) { 1 } else { 0 })
             }, "math:isPrime"),
+            // `int:formatRational` (fmt-rational.kt): dyadic only — `decimals f v`
+            // renders rational v with `decimals` decimal places, returning the 2-element
+            // array [string, exact-flag]. Monadic call errors with Kotlin text.
+            "int:formatRational" | "math:formatRational" => {
+                let l = left_val.ok_or_else(|| {
+                    AplError::runtime("formatRational: Function cannot be called with one argument".into())
+                })?;
+                let decimals = match l.as_ref() {
+                    APLValue::Number(n) => n.as_long().map_err(|e| AplError::runtime(e))? as u32,
+                    _ => return Err(AplError::runtime("int:formatRational requires a number scale".into())),
+                };
+                let v = match right_val.as_ref() {
+                    APLValue::Number(n) => n,
+                    _ => return Err(AplError::runtime("int:formatRational requires a number".into())),
+                };
+                let (s, exact) = self.format_rational(v, decimals);
+                use crate::array::{ArrayData, KapArray};
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![2],
+                    ArrayData::Nested(vec![
+                        Rc::new(APLValue::Str(s)),
+                        Rc::new(APLValue::Number(KapNumber::Long(if exact { 1 } else { 0 }))),
+                    ]),
+                )))))
+            }
+            // `sysparam` (div_functions.kt SystemParameterFunction + custom-renderer.kt):
+            // monadic lookup, dyadic update. The parameter name is a SYMBOL VALUE
+            // (`'kap:altVectorOutput`, i.e. Symbol{name, namespace:"kap"}); keyword-form
+            // symbols (`:foo`) are NOT registered parameters in the text-mode build.
+            "sysparam" => {
+                let name_of = |v: &APLValue| -> Option<(String, String)> {
+                    match v {
+                        APLValue::Symbol { name, namespace } => Some((
+                            name.clone(),
+                            namespace.clone().unwrap_or_else(|| "default".to_string()),
+                        )),
+                        _ => None,
+                    }
+                };
+                match left_val {
+                    Some(l) => {
+                        // Dyadic: set. Returns the collapsed new value.
+                        let key = name_of(l.as_ref()).ok_or_else(|| {
+                            AplError::runtime(format!(
+                                "sysparam: Value {} is not a symbol",
+                                l.format_value()
+                            ))
+                        })?;
+                        let known = matches!(
+                            key.0.as_str(),
+                            "kap:altVectorOutput"
+                                | "kap:rendererParameters"
+                                | "kap:renderer"
+                                | "default:altVectorOutput"
+                        );
+                        if !known {
+                            return Err(AplError::runtime(format!(
+                                    "sysparam: System parameter not found: :{}",
+                                    key.0
+                                )));
+                        }
+                        Ok(right_val)
+                    }
+                    None => {
+                        let key = name_of(right_val.as_ref()).ok_or_else(|| {
+                            AplError::runtime(format!(
+                                "sysparam: Value {} is not a symbol",
+                                right_val.format_value()
+                            ))
+                        })?;
+                        match key.0.as_str() {
+                            "kap:altVectorOutput" | "default:altVectorOutput" => {
+                                Ok(Rc::new(APLValue::Number(KapNumber::Long(1))))
+                            }
+                            "kap:rendererParameters" | "default:rendererParameters" => {
+                                // ⟨⟨200 50⟩ ⟨60 10⟩⟩ — max height/width then label cell size.
+                                use crate::array::{ArrayData, KapArray};
+                                let row = |a: i64, b: i64| {
+                                    Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                                        vec![2],
+                                        ArrayData::Long(vec![a, b]),
+                                    ))))
+                                };
+                                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                                    vec![2],
+                                    ArrayData::Nested(vec![row(200, 50), row(60, 10)]),
+                                )))))
+                            }
+                            other => Err(AplError::runtime(format!(
+                                "sysparam: System parameter not found: :{}",
+                                other.split_once(':').map(|(_, b)| b).unwrap_or(other)
+                            ))),
+                        }
+                    }
+                }
+            }
             // `unicode:*` — character / encoding utilities (Real Kap UnicodeModule).
             "unicode:toCodepoints" => self.unicode_to_codepoints(right_val),
             "unicode:fromCodepoints" => self.unicode_from_codepoints(right_val),
@@ -2248,6 +2344,9 @@ impl Engine {
                 | "↑" | "↓" | "⊂" | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥"
                 | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair" | "⊆" | "⊇" | "→" | "≬" | "toList" | "fromList" | "⫇" | "group" | "use" | "isLocallyBound"
+                // Namespaced natives (P2): the parser's is_known_fn admits them, but
+                // this eval-time late-gate must also know them (two-gate rule).
+                | "sysparam"
  )
  }
 
@@ -6423,8 +6522,72 @@ impl Engine {
         }
     }
 
-    /// Integer GCD on KapNumbers (Kotlin `integerGcd`/`floatGcd`). Negative inputs
-    /// take absolute value; doubles truncate to i64 (Kotlin floatGcd works on the
+    /// Port of fmt-rational.kt `formatRationalMaybeExponent` (simple range only —
+    /// the port's rational domain stays within 1e-6..1e12; outside that the plain
+    /// form is used, a documented MSG-class simplification).
+    /// Returns (string, exact-flag). `exact` is true when the decimal expansion
+    /// terminates within `decimals` places.
+    fn format_rational(&self, v: &KapNumber, decimals: u32) -> (String, bool) {
+        // Integers render bare and are always exact.
+        if let Ok(i) = v.as_long() {
+            if matches!(v, KapNumber::Long(_))
+                || matches!(v, KapNumber::Rational(r) if r.denom() == &num_bigint::BigInt::from(1))
+            {
+                return (i.to_string(), true);
+            }
+        }
+        let r = match v {
+            KapNumber::Rational(r) => r.clone(),
+            other => {
+                // Non-rational: fall back to decimal rendering.
+                let d = other.as_double();
+                return (format!("{:.*}", decimals as usize, d), false);
+            }
+        };
+        let neg = *r.numer() < num_bigint::BigInt::from(0);
+        let ar = if neg { -r.clone() } else { r };
+        // scaled = ar * 10^decimals; rounded = scaled.round()
+        let ten = num_bigint::BigInt::from(10).pow(decimals);
+        let scaled = ar * num_rational::BigRational::from(ten.clone());
+        let numer = scaled.numer();
+        let denom = scaled.denom();
+        // Round half to even on the scaled integer (integer arithmetic only,
+        // via BigRational round() which rounds half-away-from-zero on the
+        // magnitude — matching Kotlin Rational.round for this use).
+        let rounded = scaled.round();
+        let rn = rounded.numer();
+        let rounded_big = if *rn < num_bigint::BigInt::from(0) { -rn } else { rn.clone() };
+        let exact = *denom == num_bigint::BigInt::from(1);
+        let digits = rounded_big.to_string();
+        let mut out = String::new();
+        if neg {
+            out.push('-');
+        }
+        let dl = digits.len();
+        let dec = decimals as usize;
+        if dl <= dec {
+            out.push('0');
+        } else {
+            out.push_str(&digits[..dl - dec]);
+        }
+        out.push('.');
+        if dec > dl {
+            for _ in 0..(dec - dl) {
+                out.push('0');
+            }
+            out.push_str(&digits);
+        } else if exact {
+            // Kotlin exact branch trims trailing zeroes of the decimal part.
+            let frac = &digits[dl.saturating_sub(dec)..];
+            let trimmed = frac.trim_end_matches('0');
+            out.push_str(trimmed);
+        } else {
+            out.push_str(&digits[dl - dec..]);
+        }
+        (out, exact)
+    }
+
+    /// Integer GCD on KapNumbers (Kotlin `integerGcd`/`floatGcd`). Negative inputs    /// take absolute value; doubles truncate to i64 (Kotlin floatGcd works on the
     /// integral value).
     fn kap_gcd(a: &KapNumber, b: &KapNumber) -> KapNumber {
         let gcd_u = |mut x: u64, mut y: u64| -> u64 {

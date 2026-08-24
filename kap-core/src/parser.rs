@@ -109,6 +109,9 @@ impl<'a> Parser<'a> {
             None => name.to_string(),
         };
         self.known_functions.iter().any(|n| n == name || n == &qual)
+            // P2: bare-namespace natives registered in the DEFAULT namespace
+            // (engine.kt registers `sysparam` without a module qualifier).
+            || (name == "sysparam")
             // Namespaced native builtins (`io:print`, `unicode:enc`, …) are resolved at
             // runtime in `eval_apply`; treat them as functions so the parser builds the
             // dyadic `L f R` form (preserving any left operand).
@@ -135,7 +138,9 @@ impl<'a> Parser<'a> {
                                     | "toUpper" | "toNames" | "enc" | "dec"
                             ))
                         || (ns == "s" && matches!(base, "trimLeft" | "trimRight" | "trim"))
-                        || (ns == "int" && matches!(base, "intern" | "symbolName" | "throwNative" | "unwindProtect"))
+                        || (ns == "int" && matches!(base, "intern" | "symbolName" | "throwNative" | "unwindProtect" | "formatRational"))
+                        || (ns == "default" && base == "sysparam")
+                        || (ns == "kap" && base == "sysparam")
                         || (ns == "regex"
                             && matches!(
                                 base,
