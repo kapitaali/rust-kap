@@ -1043,6 +1043,13 @@ impl Engine {
                 }
                 _ => return Err(AplError::runtime("axis must be a number".into())),
             };
+            // `+/[k] x` / `⌽/[k] x`: when the wrapped fn is itself a Derived
+            // (an adverb application like `/`), the axis belongs to the ADVERB
+            // (Kotlin ReduceAPLOperator carries it). Dispatch to the Derived arm,
+            // which extracts adv_explicit_axis from the AxisApplied func operand.
+            if let Instr::Derived { .. } = **func {
+                return self.eval_apply(func, left, right, env);
+            }
             let fn_name = match **func {
                 Instr::Symbol { ref name, .. } => name.as_str(),
                 _ => {
@@ -1095,10 +1102,20 @@ impl Engine {
                     // An EXPLICIT axis replaces the default (last for ⌽, first for ⊖).
                     self.reverse_axis(left_v, right_v, Some(axis_as_long), true)
                 }
-                other => Err(AplError::runtime(format!(
-                    "axis specifier not supported for '{}'",
-                    other
-                ))),
+                _ => {
+                    // Not a scalar-arithmetic fn: the wrapper is likely
+                    // `(f[axis])/` — the axis belongs to the ADVERB inside.
+                    // Dispatch to the Derived arm, which extracts adv_explicit_axis.
+                    if let Instr::AxisApplied { func, .. } = fn_expr {
+                        if matches!(func.as_ref(), Instr::Derived { .. }) {
+                            return self.eval_apply(func, left, right, env);
+                        }
+                    }
+                    Err(AplError::runtime(format!(
+                        "axis specifier not supported for '{}'",
+                        fn_name
+                    )))
+                }
             };
         }
         // Resolve the function: a builtin name, a direct lambda, or a user function
@@ -6639,6 +6656,13 @@ impl Engine {
         last_axis: bool,
         explicit_axis: Option<usize>,
     ) -> Result<AplRef<APLValue>, AplError> {
+        // The axis on `f[k]/` belongs to the REDUCE itself, not to the folded
+        // function: strip the AxisApplied wrapper so fold steps call plain `f`
+        // instead of re-entering the axis-aware apply path.
+        let fn_instr: &Instr = match fn_instr {
+            Instr::AxisApplied { func, .. } => func,
+            other => other,
+        };
         let data = self.eval_instr(right, env)?.force(self)?;
         // Windowed reduce (`N f/`): sliding window of size `|N|` over the flat array,
         // producing `len-|N|+1` results (Kap's windowed reduce).
@@ -6758,6 +6782,11 @@ impl Engine {
         last_axis: bool,
         explicit_axis: Option<usize>,
     ) -> Result<AplRef<APLValue>, AplError> {
+        // Same as reduce: the axis belongs to the SCAN, strip it from fn.
+        let fn_instr: &Instr = match fn_instr {
+            Instr::AxisApplied { func, .. } => func,
+            other => other,
+        };
         if left.is_some() {
             return Err(AplError::runtime("scan \\ is monadic (use f\\array)".into()));
         }

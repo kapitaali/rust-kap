@@ -670,8 +670,27 @@ impl<'a> Parser<'a> {
                 if self.at_statement_boundary() {
                     return Err(self.err(&format!("Operator without left function: {}", op_name)));
                 }
+                // Explicit axis on a reduce/scan derived fn (`+/[0] x`): Kotlin binds
+                // the bracket to the FUNCTION operand of the reduction
+                // (`+/[0]` ≡ `(+/)[0]`): Derived{ func: AxisApplied{fn,k}, op: / } —
+                // so the evaluator's adverb arm finds adv_explicit_axis on its func.
+                let wants_axis = matches!(
+                    op_name.as_str(),
+                    "/" | "reduce" | "\\" | "scan" | "⌿" | "⍀"
+                ) && matches!(self.peek().map(|t| &t.token), Some(Token::OpenBracket));
+                let func_part = if wants_axis {
+                    self.advance(); // consume [
+                    let ax = self.parse_value_kotlin()?;
+                    self.expect(Token::CloseBracket, "expected ] after axis specifier")?;
+                    Instr::AxisApplied {
+                        func: Box::new(cur),
+                        axis: Box::new(ax),
+                    }
+                } else {
+                    cur
+                };
                 cur = Instr::Derived {
-                    func: Box::new(cur),
+                    func: Box::new(func_part),
                     op: Box::new(Instr::Symbol { name: op_name, namespace: ns }),
                 };
             }
