@@ -1672,6 +1672,42 @@ impl<'a> Parser<'a> {
                 return Ok(first);
             }
             let next = self.peek().map(|t| t.token.clone());
+            // `f[axis] …` where f is a primitive that supports an explicit axis
+            // (`⌽[0] v` in the right-arg position of another fn, e.g. `≢ ⌽[0] 1 2 3`).
+            // Without this, `[` counts as a VALUE operand below and `[0]` becomes a
+            // list literal stranded into the data (port produced `≢ ⌽[0] 1 2 3` = 4).
+            // Mirrors bind_operators_kotlin's axis arm / Kotlin parseAxis (:1321).
+            if is_prim
+                && matches!(
+                    name.as_str(),
+                    "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖"
+                )
+                && matches!(next, Some(Token::OpenBracket))
+            {
+                self.advance(); // consume [
+                let axis = self.parse_apply()?;
+                self.expect(Token::CloseBracket, "expected ] after axis specifier")?;
+                let fn_expr = Instr::AxisApplied {
+                    func: Box::new(first),
+                    axis: Box::new(axis),
+                };
+                // Optional trailing data argument (`≢ ⌽[0] 1 2 3` ⇒ right = (1 2 3)).
+                let has_data = !self.at_statement_boundary()
+                    && !matches!(
+                        self.peek().map(|t| &t.token),
+                        Some(Token::CloseParen) | Some(Token::CloseBracket)
+                    );
+                if has_data {
+                    self.skip_newlines();
+                    let data = self.parse_apply()?;
+                    return Ok(Instr::Apply {
+                        fn_expr: Box::new(fn_expr),
+                        left: None,
+                        right: Box::new(data),
+                    });
+                }
+                return Ok(fn_expr);
+            }
             // Fork postfix `a « b » c` (e.g. `⊢ « ⊣ » ,`): when a function atom is
             // immediately followed by `«`, parse the right-fork instead of treating the
             // following token as an operand.
