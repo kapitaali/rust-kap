@@ -414,7 +414,8 @@ fn curated_kap_parity() {
         ("\"$h\"⍕\"x&y<z>\"", "\"x&amp;y&lt;z&gt;\""),
         ("\"%s %s\"⍕(1 2)", "\"%s %s\""),
         ("⍎\"123\"", "123"),
-        ("⍎\"1/2\"", "1r2"),
+        // Kotlin renders rationals num/den (oracle ⍎"1/2" -> 1/2).
+        ("⍎\"1/2\"", "1/2"),
         // Indexing into a string (bracket indexing) — returns char scalars.
         ("\"abcdef\"[2]", "@c"),
         ("\"abcdef\"[0 2]", "\"ac\""),

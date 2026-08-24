@@ -8730,7 +8730,8 @@ mod tests {
 
     #[test]
     fn eval_div_rational() {
-        assert_eq!(eval("1 ÷ 2"), "1r2");
+        // Kotlin renders rationals num/den (oracle: 1÷2 -> 1/2).
+        assert_eq!(eval("1 ÷ 2"), "1/2");
         assert_eq!(eval("4 ÷ 2"), "2");
     }
 
@@ -8947,7 +8948,8 @@ mod tests {
         // x (f ∘ g) y = f(y, g(y))  (compose is dyadic: f(y, g(y)))
         assert_eq!(eval("¯2 3 4 (×∘-) 1000"), "(2000 ¯3000 ¯4000)");
         // monadic compose with reciprocal: (×∘÷) y = y × (1/y) = y, exactly 1 for all y≠0.
-        assert_eq!(eval("(×∘÷) ¯1 2 3"), "(1 1r1 1r1)");
+        // Kotlin renders rationals num/den (oracle: 1r2 displays 1/2).
+        assert_eq!(eval("(×∘÷) ¯1 2 3"), "(1 1/1 1/1)");
     }
 
     #[test]
