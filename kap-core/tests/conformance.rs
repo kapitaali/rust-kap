@@ -567,6 +567,10 @@ fn curated_kap_parity() {
         // ⌽/⊖ with an explicit axis (Kotlin RotateFunction.computeAxis) and the
         // single-element-vector shift broadcast (transpose.kt:210 a0.size==1 branch).
         ("1 2 3 ⌽ 3 3 ⍴ ⍳9", "(1 2 0 5 3 4 6 7 8)"),
+        // Multi-cell rotate specifier mapped over ALL non-rotated axes
+        // (Kotlin MultiRotationRotatedAPLValue).
+        ("1 2 ⌽[0] 2 2 ⍴ ⍳4", "(2 1 0 3)"),
+        ("(2 3 ⍴ 1 2 3 1 1 1) ⌽[1] 2 2 3 ⍴ ⍳12", "(3 1 5 0 4 2 9 10 11 6 7 8)"),
         ("(,2) ⌽ 4 5 ⍴ ⍳100", "(2 3 4 0 1 7 8 9 5 6 12 13 14 10 11 17 18 19 15 16)"),
         ("(,1) ⊖ 2 3 ⍴ ⍳6", "(3 4 5 0 1 2)"),
         // `˝` inverse adverb (Kotlin InverseFnOp): monadic reverse is its own

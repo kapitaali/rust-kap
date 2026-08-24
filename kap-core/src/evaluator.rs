@@ -4754,9 +4754,14 @@ impl Engine {
                                         }
                                     }
                                     // Cell count must match the specifier's cells.
+                                    // Kotlin maps the specifier over ALL axes
+                                    // EXCEPT the rotated one (its dims skip axis),
+                                    // not just the axes before it.
                                     let spec_cells: usize =
                                         spec_dims.iter().product::<usize>().max(1);
-                                    if spec_cells != cells {
+                                    let all_cells: usize =
+                                        dims.iter().product::<usize>().max(1) / n.max(1);
+                                    if spec_cells != all_cells {
                                         return Err(AplError::runtime(
                                             "⌽: Invalid dimension".into(),
                                         ));
@@ -4772,11 +4777,9 @@ impl Engine {
                                         }
                                     }
                                 }
-                                if !shifts.is_empty() && shifts.len() != cells {
-                                    return Err(AplError::runtime(
-                                        "⌽/⊖ shift vector length must match number of cells".into(),
-                                    ));
-                                }
+                                // Length-vs-cells is already enforced by the
+                                // specifier dims check above (spec_cells must
+                                // equal the product of ALL non-rotated dims).
                             }
                             _ => {
                                 return Err(AplError::runtime(
@@ -4790,19 +4793,77 @@ impl Engine {
                 let elems = a.elements();
                 let mut out = elems.clone();
                 let n64 = n as i64;
-                for c in 0..cells {
-                    let base = c * n * stride;
-                    let shift = if do_reverse { 0 } else { shifts[c % shifts.len().max(1)] };
+                // Per-cell shift selection: cells are enumerated over ALL axes
+                // except the rotated one (Kotlin MultiRotationRotatedAPLValue
+                // maps a0Collapsed dims onto b's non-rotated axes). For rank 1
+                // or scalar shift this is a single cell.
+                let other_dims: Vec<usize> = dims
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != axis)
+                    .map(|(_, d)| *d)
+                    .collect();
+                let other_strides: Vec<usize> = {
+                    let mut st = vec![1usize; other_dims.len()];
+                    for i in (0..other_dims.len().saturating_sub(1)).rev() {
+                        st[i] = st[i + 1] * other_dims[i + 1];
+                    }
+                    st
+                };
+                let total_cells: usize = other_dims.iter().product::<usize>().max(1);
+                for c in 0..total_cells {
+                    // Decompose c into coords over the non-rotated axes, then
+                    // rebuild the source flat offset of the cell's first element
+                    // and the per-axis stride product for stepping within axis.
+                    let mut rem = c;
+                    let mut cell_coords = vec![0usize; other_dims.len()];
+                    for (k, d) in other_dims.iter().enumerate() {
+                        cell_coords[k] = rem / other_strides[k];
+                        rem %= other_strides[k];
+                    }
+                    // Map back to full-rank coordinates (axis slot gets 0; the
+                    // k-loop below walks it).
+                    let mut full_coords = Vec::with_capacity(rank);
+                    let mut oi = 0usize;
+                    for i in 0..rank {
+                        if i == axis {
+                            full_coords.push(0usize);
+                        } else {
+                            full_coords.push(cell_coords[oi]);
+                            oi += 1;
+                        }
+                    }
+                    // Strides in ELEMENTS along each full-rank axis.
+                    let full_strides = strides(&dims);
+                    // Split the cell's offset into the part from axes BEFORE the
+                    // rotated axis (multiples of n*stride) and the part from axes
+                    // AFTER it (an offset inside one stride-block). Element (k,
+                    // same other coords) sits at pre + k*stride + post.
+                    let mut pre = 0usize;
+                    let mut post = 0usize;
+                    for i in 0..rank {
+                        if i == axis {
+                            continue;
+                        }
+                        if i < axis {
+                            pre += full_coords[i] * full_strides[i];
+                        } else {
+                            post += full_coords[i] * full_strides[i];
+                        }
+                    }
+                    let shift =
+                        if do_reverse { 0 } else { shifts[c % shifts.len().max(1)] };
+                    // With the other-axis coordinates folded into pre/post,
+                    // each k along the rotated axis addresses exactly ONE
+                    // element (k * stride steps the rotated axis itself).
                     for k in 0..n {
                         let src = if do_reverse {
                             n - 1 - k
                         } else {
                             (((k as i64) + shift).rem_euclid(n64)) as usize
                         };
-                        for s in 0..stride {
-                            out[base + k * stride + s] =
-                                elems[base + src * stride + s].clone();
-                        }
+                        out[pre + k * stride + post] =
+                            elems[pre + src * stride + post].clone();
                     }
                 }
                 Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
