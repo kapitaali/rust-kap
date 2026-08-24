@@ -4834,6 +4834,7 @@ impl Engine {
                         };
                         let mut seen = vec![false; rank];
                         let mut perm = Vec::with_capacity(rank);
+                        let mut has_dup = false;
                         for &x in &axes {
                             if x < 0 || x as usize >= rank {
                                 return Err(AplError::runtime(
@@ -4841,12 +4842,16 @@ impl Engine {
                                 ));
                             }
                             if seen[x as usize] {
-                                return Err(AplError::runtime(
-                                    "⍉ axes must be a permutation of 0..rank-1".into(),
-                                ));
+                                // Duplicate axis index ⇒ DIAGONAL (Kotlin
+                                // TransposeIndexes.isDiagonal, transpose.kt:580).
+                                // Handled after the loop below.
+                                has_dup = true;
                             }
                             seen[x as usize] = true;
                             perm.push(x as usize);
+                        }
+                        if has_dup {
+                            return Ok(self.transpose_diagonal(&axes, a)?);
                         }
                         // Kotlin rule: the left arg is a *prefix* of the full axis
                         // permutation. When it is shorter than the rank, the remaining
@@ -4912,6 +4917,90 @@ impl Engine {
             }
             other => Err(AplError::runtime("⍉ not implemented for this value type".into())),
         }
+    }
+
+    /// Dyadic `⍉` with a DIAGONAL axis spec (duplicated indices), e.g.
+    /// `0 0 ⍉ 4 4⍴⍳16` → the main diagonal `(0 5 10 15)`. Port of Kotlin
+    /// `computeDiagonalsAxisDefinition` (:397) + `TransposedDiagonalValue` (:376):
+    /// - group result axes by their source-axis index; groups must be contiguous
+    ///   ascending starting at 0 (`2 2 0 ⍉ …` → "Invalid transpose axes: [2, 2, 0]");
+    /// - result dim for group g = min of the source dims in that group;
+    /// - element at result coords c = source[c[idx₀], c[idx₁], …] — every axis in a
+    ///   group takes the SAME coordinate (the diagonal walk).
+    fn transpose_diagonal(
+        &self,
+        axes: &[i64],
+        src: &KapArray,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let src_dims = &src.dimensions;
+        // Group result positions by mapped index; preserve first-occurrence order
+        // within each group, order GROUPS by key ascending (Kotlin sorts entries).
+        let mut keys: Vec<i64> = Vec::new();
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for (i, &m) in axes.iter().enumerate() {
+            match keys.iter().position(|&k| k == m) {
+                Some(gi) => groups[gi].push(i),
+                None => {
+                    keys.push(m);
+                    groups.push(vec![i]);
+                }
+            }
+        }
+        // Kotlin: sortedBy key, each key must equal an incrementing `expected`
+        // counter from 0, else "Invalid transpose axes: [..]".
+        let mut sorted: Vec<(i64, Vec<usize>)> =
+            keys.into_iter().zip(groups.into_iter()).collect();
+        sorted.sort_by_key(|(k, _)| *k);
+        for (n, (k, _)) in sorted.iter().enumerate() {
+            if *k != n as i64 {
+                return Err(AplError::runtime(format!(
+                    "⍉: Invalid transpose axes: [{}]",
+                    axes.iter()
+                        .map(|a| a.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+        }
+        // Result dim per group = min of source dims on that group's axes.
+        let new_dims: Vec<usize> = sorted
+            .iter()
+            .map(|(_, idxs)| idxs.iter().map(|&i| src_dims[i]).min().unwrap())
+            .collect();
+        let total: usize = new_dims.iter().product();
+        if total > 100_000_000 {
+            return Err(AplError::runtime("transpose result too large".into()));
+        }
+        let old_stride = strides(src_dims);
+        let new_stride = strides(&new_dims);
+        let elems = src.elements();
+        let rank = src_dims.len();
+        let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(total);
+        for pos in 0..total {
+            let mut rem = pos;
+            let mut res_coords = vec![0usize; new_dims.len()];
+            for (k, d) in new_dims.iter().enumerate() {
+                res_coords[k] = rem / new_stride[k];
+                rem %= new_stride[k];
+            }
+            // Source coord on axis i = res_coords[the group containing i] —
+            // all axes in one group share the same coordinate.
+            let mut old_coords = vec![0usize; rank];
+            for (gi, (_, idxs)) in sorted.iter().enumerate() {
+                for &i in idxs {
+                    old_coords[i] = res_coords[gi];
+                }
+            }
+            let mut oflat = 0usize;
+            for (k, c) in old_coords.iter().enumerate() {
+                oflat += c * old_stride[k];
+            }
+            out.push(elems[oflat].clone());
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            new_dims,
+            ArrayData::Nested(out),
+        )))))
     }
 
     fn take(

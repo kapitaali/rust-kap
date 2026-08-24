@@ -587,6 +587,12 @@ fn curated_kap_parity() {
         ("⍉ 2 2 ⍴ 1 2 3 4", "(1 3 2 4)"),
         ("⍉ 3 4 5 ⍴ ⍳60", "(0 20 40 5 25 45 10 30 50 15 35 55 1 21 41 6 26 46 11 31 51 16 36 56 2 22 42 7 27 47 12 32 52 17 37 57 3 23 43 8 28 48 13 33 53 18 38 58 4 24 44 9 29 49 14 34 54 19 39 59)"),
         ("1 0 ⍉ 2 3 ⍴ ⍳6", "(0 3 1 4 2 5)"),
+        // Diagonal transpose (Kotlin TransposedDiagonalValue): duplicated axis
+        // indices pick the diagonal; groups must start at 0 ascending.
+        ("0 0 ⍉ 4 4 ⍴ ⍳16", "(0 5 10 15)"),
+        ("0 0 0 ⍉ 3 3 3 ⍴ ⍳27", "(0 13 26)"),
+        ("1 1 0 ⍉ 2 20 3 ⍴ ⍳120", "(0 63 1 64 2 65)"),
+        ("1 1 0 0 ⍉ 2 3 4 5 ⍴ ⍳1000", "(0 80 6 86 12 92 18 98)"),
         ("2 0 1 ⍉ 2 3 2 ⍴ ⍳12", "(0 6 1 7 2 8 3 9 4 10 5 11)"),
         // Partial-axis transpose (Kotlin prefix-fill rule): when the left arg is
         // shorter than the rank, the remaining axes are appended in ascending order.
