@@ -1228,6 +1228,9 @@ impl Engine {
                 "⌿" => self.adverb_reduce(func, left, right, env, false),
                 "⍀" => self.adverb_scan(func, left, right, env, false),
                 "¨" | "each" => self.adverb_each(func, left, right, env),
+                // `⌻` outer product (Kotlin outer_join.kt OuterJoinOp): `A f⌻ B`
+                // builds the rank-(⍴⍴A + ⍴⍴B) table of f(a,b) over every cell pair.
+                "⌻" => return self.outer_product(func, left, right, env),
                 // `⍨` commute (Kotlin commute.kt CommuteFunctionImpl):
                 // monadic f⍨ y = y f y; dyadic x f⍨ y = y f x (arguments swapped).
                 "⍨" | "commute" => match left {
@@ -7106,6 +7109,55 @@ impl Engine {
         }
         Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
             vec![out.len()],
+            ArrayData::Nested(out),
+        )))))
+    }
+
+    /// `⌻` outer product (Kotlin outer_join.kt OuterJoinOp / OuterJoinResult):
+    /// `A f⌻ B` applies f dyadically to every cell pair, producing an array whose
+    /// dimensions are ⍴A concatenated with ⍴B. Scalars are treated as rank-0
+    /// (a single cell). Oracle: `1 2 {⍺+⍵}⌻ 10 20` -> `(11 21)(12 22)` as a
+    /// 2×2 table; `{⍺=⍵}⌻` gives the boolean membership table.
+    fn outer_product(
+        &self,
+        func: &Box<Instr>,
+        left: &Option<Box<Instr>>,
+        right: &Box<Instr>,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let right_val = self.eval_instr(right, env)?.force(self)?;
+        let left_val = match left {
+            Some(l) => Some(self.eval_instr(l, env)?.force(self)?),
+            None => {
+                return Err(AplError::runtime("⌻ needs two args".into()));
+            }
+        };
+        // Flatten each side to (cells, dims). Scalars are one cell with no dims.
+        let flat =
+            |v: &APLValue| -> (Vec<AplRef<APLValue>>, Vec<usize>) {
+                match v {
+                    APLValue::Array(a) => (a.elements(), a.dimensions.clone()),
+                    other => (vec![Rc::new(other.clone())], vec![]),
+                }
+            };
+        let (a_cells, a_dims) = flat(left_val.as_ref().unwrap());
+        let (b_cells, b_dims) = flat(right_val.as_ref());
+        let mut dims = a_dims.clone();
+        dims.extend(b_dims.iter().copied());
+        let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(a_cells.len() * b_cells.len());
+        for a in &a_cells {
+            for b in &b_cells {
+                let v = self.eval_apply(
+                    func,
+                    &Some(Box::new(Instr::Value(a.clone()))),
+                    &Box::new(Instr::Value(b.clone())),
+                    env,
+                )?;
+                out.push(v);
+            }
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            dims,
             ArrayData::Nested(out),
         )))))
     }
