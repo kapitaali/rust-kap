@@ -4272,9 +4272,21 @@ impl Engine {
     }
 
     fn tally(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
-        Ok(Rc::new(APLValue::Number(KapNumber::Long(
-            right_val.element_count() as i64,
-        ))))
+        // Kotlin TallyFunction: ⍴⍵ of the SHAPE, not the flat element count
+        // (a 2×2 table has tally 2, not 4 — oracle-verified via `≢ A f⌻ B`).
+        // ⍬ (null) tallies 0.
+        if matches!(right_val.as_ref(), APLValue::Null) {
+            return Ok(Rc::new(APLValue::Number(KapNumber::Long(0))));
+        }
+        let n = match right_val.as_ref() {
+            APLValue::Array(a) => {
+                a.dimensions.first().copied().unwrap_or(1)
+            }
+            // A string is a rank-1 char vector (`≢"abc"` → 3, oracle).
+            APLValue::Str(s) => s.chars().count(),
+            _ => 1,
+        };
+        Ok(Rc::new(APLValue::Number(KapNumber::Long(n as i64))))
     }
 
     fn first(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
