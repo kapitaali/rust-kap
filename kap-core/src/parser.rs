@@ -3546,11 +3546,7 @@ impl<'a> Parser<'a> {
                 };
                 if next_is_fn_atom {
                     let mut right = self.parse_function_atom()?;
-                    // `2÷⍨` (Kotlin parser.kt:955–962 + makeLeftBindFunction):
-                    // a bound-constant left (`2`) followed by a function (`÷`)
-                    // whose adverb (`⍨`) follows — the adverb binds INTO the
-                    // right member FIRST, then the left-bind train forms:
-                    // Train[Literal(2), Derived{÷,⍨}]; called with y → y ÷ 2.
+                    // Adverb folds into the just-parsed atom (`÷` + `⍨` → `÷⍨`).
                     if let Some(Token::Literal(LiteralValue::Symbol { name: adv, namespace: None })) =
                         self.peek().map(|t| &t.token)
                     {
@@ -3565,64 +3561,81 @@ impl<'a> Parser<'a> {
                             };
                         }
                     }
-                    // `2÷⍨≢` (stat.kap median): after the left-bind pair, a further
-                    // fn-atom (e.g. `≢`) extends the chain. Kotlin nests Chain2s
-                    // LEFT-ASSOCIATED (parser.kt:479–484 FnParseResult branch →
-                    // Chain2(prevFn, nextFn) = ATOP), NOT a flat fork — so
-                    // `2÷⍨≢` ≡ atop(bind(2,÷⍨), ≢) and median's
-                    // `2÷⍨ +/ F ⊇ ∧` folds pairwise too.
+                    // Compose/reverse-compose binds the JUST-PARSED atom (NOT
+                    // the accumulated train) as its left — Kotlin parseOperator
+                    // runs on each function individually (parser.kt:1273).
+                    // `F (…)⍛⊇ ∧` ⇒ `⍛` binds `(…)`, not `F (…)`.
+                    if let Some(t) = self.peek() {
+                        match &t.token {
+                            Token::ComposeToken => {
+                                self.advance();
+                                let r = self.parse_function_atom()?;
+                                right = Instr::Train {
+                                    funcs: vec![right, r],
+                                    reverse: false,
+                                    compose: true,
+                                };
+                                // Trailing adverb on the compose.
+                                if let Some(Token::Literal(LiteralValue::Symbol { name: adv, namespace: None })) =
+                                    self.peek().map(|t| &t.token)
+                                {
+                                    if Self::is_adverb(adv) {
+                                        let adv = adv.clone();
+                                        self.advance();
+                                        right = Instr::Derived {
+                                            func: Box::new(right),
+                                            op: Box::new(Instr::Symbol { name: adv, namespace: None }),
+                                        };
+                                    }
+                                }
+                            }
+                            Token::ReverseComposeToken => {
+                                self.advance();
+                                let r = self.parse_function_atom()?;
+                                right = Instr::Train {
+                                    funcs: vec![right, r],
+                                    reverse: true,
+                                    compose: true,
+                                };
+                                // Trailing adverb/fork on the compose.
+                                if let Some(Token::Literal(LiteralValue::Symbol { name: adv, namespace: None })) =
+                                    self.peek().map(|t| &t.token)
+                                {
+                                    if Self::is_adverb(adv) {
+                                        let adv = adv.clone();
+                                        self.advance();
+                                        right = Instr::Derived {
+                                            func: Box::new(right),
+                                            op: Box::new(Instr::Symbol { name: adv, namespace: None }),
+                                        };
+                                    }
+                                }
+                            }
+                            Token::LeftForkToken => {
+                                self.advance();
+                                self.skip_newlines();
+                                let b = self.parse_function_atom()?;
+                                self.skip_newlines();
+                                self.expect(Token::RightForkToken, "expected » in fork")?;
+                                self.skip_newlines();
+                                let c = self.parse_function_atom()?;
+                                right = Instr::Train {
+                                    funcs: vec![right, b, c],
+                                    reverse: false,
+                                    compose: false,
+                                };
+                            }
+                            _ => {}
+                        }
+                    }
+                    // Now chain `right` (possibly compose-wrapped) as a
+                    // 2-train atop with `left`. Then loop for more fns.
                     let mut cur = Instr::Train {
                         funcs: vec![left, right],
                         reverse: false,
                         compose: false,
                     };
                     loop {
-                        // Check for compose/fork BEFORE plain fn-atom chaining —
-                        // `⍛` binds the current `cur` as its LEFT (e.g. stat.kap
-                        // median `(…)⍛⊇ ∧`).
-                        if let Some(t) = self.peek() {
-                            match &t.token {
-                                Token::ComposeToken => {
-                                    self.advance();
-                                    let r = self.parse_function_atom()?;
-                                    cur = Instr::Train {
-                                        funcs: vec![cur, r],
-                                        reverse: false,
-                                        compose: true,
-                                    };
-                                    continue;
-                                }
-                                Token::ReverseComposeToken => {
-                                    self.advance();
-                                    // Kotlin parseFunctionForOperatorRightArg: SINGLE
-                                    // function right operand (op.kt:31). `∧` chains
-                                    // as a separate 2-train in the next loop iteration.
-                                    let r = self.parse_function_atom()?;
-                                    cur = Instr::Train {
-                                        funcs: vec![cur, r],
-                                        reverse: true,
-                                        compose: true,
-                                    };
-                                    continue;
-                                }
-                                Token::LeftForkToken => {
-                                    self.advance();
-                                    self.skip_newlines();
-                                    let b = self.parse_function_atom()?;
-                                    self.skip_newlines();
-                                    self.expect(Token::RightForkToken, "expected » in fork")?;
-                                    self.skip_newlines();
-                                    let c = self.parse_function_atom()?;
-                                    cur = Instr::Train {
-                                        funcs: vec![cur, b, c],
-                                        reverse: false,
-                                        compose: false,
-                                    };
-                                    continue;
-                                }
-                                _ => {}
-                            }
-                        }
                         let more = match self.peek().map(|t| &t.token) {
                             Some(Token::Literal(LiteralValue::Symbol { name, .. })) => {
                                 Self::is_primitive_op(name)
@@ -3634,29 +3647,77 @@ impl<'a> Parser<'a> {
                         if !more {
                             break;
                         }
-                        let next_fn = self.parse_function_atom()?;
-                        // A trailing adverb on this member binds into it first
-                        // (same rule as above).
-                        let member = if let Some(Token::Literal(LiteralValue::Symbol {
-                            name: adv,
-                            namespace: None,
-                        })) = self.peek().map(|t| &t.token)
+                        let mut member = self.parse_function_atom()?;
+                        // Adverb folds into the atom (`+` + `/` → `+/`).
+                        if let Some(Token::Literal(LiteralValue::Symbol { name: adv, namespace: None })) =
+                            self.peek().map(|t| &t.token)
                         {
                             if Self::is_adverb(adv)
-                                && matches!(next_fn, Instr::Symbol { namespace: None, .. })
+                                && matches!(member, Instr::Symbol { namespace: None, .. })
                             {
                                 let adv = adv.clone();
                                 self.advance();
-                                Instr::Derived {
-                                    func: Box::new(next_fn),
+                                member = Instr::Derived {
+                                    func: Box::new(member),
                                     op: Box::new(Instr::Symbol { name: adv, namespace: None }),
-                                }
-                            } else {
-                                next_fn
+                                };
                             }
-                        } else {
-                            next_fn
-                        };
+                        }
+                        // Compose/reverse-compose binds the JUST-PARSED atom
+                        // (NOT the accumulated `cur`) as its left — Kotlin
+                        // parseOperator runs per-function (parser.kt:1273).
+                        if let Some(t) = self.peek() {
+                            match &t.token {
+                                Token::ComposeToken => {
+                                    self.advance();
+                                    let r = self.parse_function_atom()?;
+                                    member = Instr::Train {
+                                        funcs: vec![member, r],
+                                        reverse: false,
+                                        compose: true,
+                                    };
+                                }
+                                Token::ReverseComposeToken => {
+                                    self.advance();
+                                    let r = self.parse_function_atom()?;
+                                    member = Instr::Train {
+                                        funcs: vec![member, r],
+                                        reverse: true,
+                                        compose: true,
+                                    };
+                                    // Trailing fn after the compose: chain as
+                                    // 2-train atop (e.g. `(…)⍛⊇ ∧` → the `∧`).
+                                    let trailing = match self.peek().map(|t| &t.token) {
+                                        Some(Token::Literal(LiteralValue::Symbol { name, .. })) => Self::is_primitive_op(name),
+                                        Some(Token::OpenParen) | Some(Token::LambdaToken) | Some(Token::ApplyToken) | Some(Token::LeftForkToken) => true,
+                                        _ => false,
+                                    };
+                                    if trailing {
+                                        let next = self.parse_function_atom()?;
+                                        member = Instr::Train {
+                                            funcs: vec![member, next],
+                                            reverse: false,
+                                            compose: false,
+                                        };
+                                    }
+                                }
+                                Token::LeftForkToken => {
+                                    self.advance();
+                                    self.skip_newlines();
+                                    let b = self.parse_function_atom()?;
+                                    self.skip_newlines();
+                                    self.expect(Token::RightForkToken, "expected » in fork")?;
+                                    self.skip_newlines();
+                                    let c = self.parse_function_atom()?;
+                                    member = Instr::Train {
+                                        funcs: vec![member, b, c],
+                                        reverse: false,
+                                        compose: false,
+                                    };
+                                }
+                                _ => {}
+                            }
+                        }
                         cur = Instr::Train {
                             funcs: vec![cur, member],
                             reverse: false,
