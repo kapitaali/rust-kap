@@ -68,3 +68,31 @@ Oracle ground truth: the JVM oracle REJECTS inline `z ⇐ ((f g)¨ args)`
 trimLeft/filter fail at load/call. The port's filter macro now exceeds
 stock-file behavior. util.kap lines 19–21 (`@\s` regex literals) documented
 in KNOWN-NONCONFORMANCE.md as beyond-oracle scope.
+
+---
+
+# PROBLEM 2 — bound-constant commute `2÷⍨` (stat.kap median) — OPEN (2026-08-25)
+
+`stat:median 1 2 3 4`: oracle `5/2`, port `(2 1 2/3 1/2)`. Root cause chain:
+
+1. Median body `(¯1r2 0+2÷⍨≢)` needs `2÷⍨≢` to parse as ONE derived atom
+   (`(2÷⍨)∘≢`). The port splits the leading literal into separate members.
+2. Deeper issue: **bound-constant commute is inverted in the port.**
+   `z ⇐ 2÷⍨ ⋄ z 8` → oracle `4` (=8÷2), port `1/4` (=2÷8).
+   Plain monadic commute matches (`÷⍨ 8` → 1 both).
+
+Three attempted fixes (evaluator ⍨ bind-case ×2 shapes, parser
+bound-constant exemption in bind_operators_kotlin) each fixed one probe while
+breaking another — the shape flows through try_parse_train, impl's adverb arm,
+AND bind_operators_kotlin depending on context, so a single-site fix can't
+cover it. Reverted all three; tree back to committed state `9ba7eab`.
+
+Correct design (next session): introduce a first-class `BoundConstant`
+concept at parse time — when a Literal/Array is followed by an adverb in
+function position, wrap as `Derived{func: Value(x), op}` AND make the ⍨
+monadic evaluator arm check `matches!(func, Instr::Literal(_) | Instr::Array{..})`
+(syntactic, not eval-based) to select bind semantics `y f x`. All three parse
+sites must agree. Verify against oracle probes:
+- `(2÷⍨) 8` → 4   · `z⇐2÷⍨ ⋄ z 8` → 4   · `÷⍨ 8` → 1   · `(÷⍨≢) y` → y÷≢y
+
+Gates green throughout (lib 96/0 · curated 1/0); no partial edits left in tree.
