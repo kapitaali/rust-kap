@@ -386,6 +386,16 @@ impl<'a> Parser<'a> {
                     }
                     return self.parse_fn_def(); // consumes ∇ itself
                 }
+                // Symbol LITERALS (`'a`, `'ns:a`) are ordinary VALUE operands
+                // (Kotlin parser.kt:1003 QuotePrefix → LiteralSymbol). They must
+                // accumulate/strand like numbers: `'a 'b 'c` is a 3-strand of
+                // symbols, NOT a function application. Without this arm the
+                // statement bails wholesale to the legacy parser, whose strand
+                // collector drops all but the last literal.
+                Token::QuotePrefix | Token::Literal(LiteralValue::SymbolValue { .. }) => {
+                    let v = self.parse_primary()?;
+                    left_args.push(v);
+                }
                 Token::OpenBrace => {
                     // `{…}` is FUNCTION-SHAPED (Kotlin routes the lambda through
                     // processFn): `3 {⍺+⍵} 4` is dyadic; bare `{⍵×2}` is an ambivalent
@@ -2609,6 +2619,11 @@ impl<'a> Parser<'a> {
             | Token::OpenParen
             | Token::OpenBracket
             | Token::APLNullSym => true,
+            // A symbol LITERAL (`'a`, `'ns:a`) is always data (Kotlin parser.kt:1003
+            // LiteralSymbol) — strand it like any operand so `'a 'b 'c` is a
+            // 3-strand, and the QuotePrefix token itself opens a literal.
+            Token::QuotePrefix => true,
+            Token::Literal(LiteralValue::SymbolValue { .. }) => true,
             // NOTE: LambdaToken deliberately NOT a strand operand — a lambda is a
             // FUNCTION and applies to the preceding strand (`1 2 2 {≢⍵}⌸ v`), it
             // never joins it as data.
