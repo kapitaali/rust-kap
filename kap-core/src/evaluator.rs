@@ -499,6 +499,7 @@ impl Engine {
         &self,
         src: &str,
         env: &AplRef<Environment>,
+        file_label: &str,
     ) -> Result<AplRef<APLValue>, AplError> {
         // Kotlin's `use()` restores the *caller's* current namespace when the
         // included file finishes (a `namespace("…")` directive inside a stdlib
@@ -508,7 +509,7 @@ impl Engine {
         // interactive top-level in `man` (fhelp.kap) instead of `default`, which
         // then surfaces as wrong constant-error texts (`man:x` vs oracle `default:x`).
         let saved_ns = env.ns_registry.current.borrow().clone();
-        let result = self.eval_string_in_env_tolerant_inner(src, env);
+        let result = self.eval_string_in_env_tolerant_inner(src, env, file_label);
         env.ns_registry.current.replace(saved_ns);
         result
     }
@@ -517,7 +518,12 @@ impl Engine {
         &self,
         src: &str,
         env: &AplRef<Environment>,
+        file_label: &str,
     ) -> Result<AplRef<APLValue>, AplError> {
+        // OPEN-6: count failures per file instead of printing one line each.
+        let mut failed: usize = 0;
+        let mut total: usize = 0;
+        let mut first_err: Option<String> = None;
         let toks = tokenise(src);
         let mut pos = 0;
         let mut last: AplRef<APLValue> = Rc::new(APLValue::Null);
@@ -546,10 +552,14 @@ impl Engine {
             match p.parse_statements() {
                 Ok(Some(instr)) => {
                     pos = p.pos;
+                    total += 1;
                     match self.eval_instr(&instr, &anchor) {
                         Ok(v) => last = v,
                         Err(e) => {
-                            eprintln!("warning: use(): statement failed: {}", e);
+                            failed += 1;
+                            if first_err.is_none() {
+                                first_err = Some(e.to_string());
+                            }
                         }
                     }
                 }
@@ -557,7 +567,11 @@ impl Engine {
                 Err(e) => {
                     // Parse error: advance past this statement so we don't loop forever on a
                     // broken token stream. Best-effort skip to the next newline/separator.
-                    eprintln!("warning: use(): statement failed: {}", e);
+                    total += 1;
+                    failed += 1;
+                    if first_err.is_none() {
+                        first_err = Some(format!("parse: {}", e));
+                    }
                     let mut skipped = false;
                     while pos < toks.len() {
                         match &toks[pos].token {
@@ -574,6 +588,16 @@ impl Engine {
                     }
                 }
             }
+        }
+        // OPEN-6: one summary line per file (preserves the first error's text).
+        if failed > 0 {
+            eprintln!(
+                "warning: use(): {}/{} statements failed in {}: {}",
+                failed,
+                total,
+                file_label,
+                first_err.as_deref().unwrap_or("unknown error")
+            );
         }
         Ok(last)
     }
@@ -10198,12 +10222,12 @@ impl Engine {
         self.include_stack.borrow_mut().insert(basename.clone());
         let _guard = IncludeGuard {
             stack: self.include_stack.clone(),
-            name: basename,
+            name: basename.clone(),
         };
         // Evaluate the file in the *current* namespace so its top-level
         // `∇`/`⇐` definitions land where the `use` call appears. Per-statement errors are
         // tolerated (mirrors Real Kap: one bad line doesn't abort the whole library file).
-        self.eval_string_in_env_tolerant(&content, env)
+        self.eval_string_in_env_tolerant(&content, env, &basename)
     }
 }
 
