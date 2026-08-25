@@ -40,34 +40,31 @@ Candidate fix directions:
 Blocks P7c: `util.kap` line 6 `declare(:export (cols col))` cannot load while
 `cols`/`col` hold function values — which they always do after their `⇐`.
 
-## Status (updated 2026-08-25, P7c-2)
-The declare(...) half is FIXED and committed (`6441a30`). Remaining blocker narrowed:
+## Status — RESOLVED 2026-08-25 (commits 6441a30, a996a24, 15ab3a7)
+The full chain now works end-to-end in both parser paths:
 
-`(f ⍞g)` — a known user function followed by a `⍞` DynamicRef inside parens —
-fails `expected a function in train` / `unexpected token in primary`, which
-blocks util.kap's filter body `(toBoolean ⍞fn)¨ arg`. Two attempted fixes did
-not resolve it:
-1. `is_definite_function`: added `DynamicRef => true` and
-   `self.is_known_fn(...)` for symbols (now an instance method; both call sites
-   updated). Gates stayed green but the repro still fails.
-2. Verified parse_function_atom's ApplyToken arm handles `⍞g` standalone
-   (`⍞g 5` → works), so the failure is in how try_parse_train's member loop or
-   the primary OpenParen arm sequences these two members.
+```
+defsyntax filter (:value arg :function fn) {
+  ((toBoolean ⍞fn)¨ arg) / arg
+}
+toBoolean ⇐ {0≠⍵}
+filter (1 2 3 4) {0=2|⍵}   →  (2 4)
+```
 
-Next diagnostic: add a temporary eprintln! in try_parse_train's member loop
-showing each parsed member variant, run `(f ⍞g)`, then remove it. That will
-pin whether member 2 parses at all or the classifier rejects [Symbol, DynamicRef].
+Root causes fixed:
+1. `declare(...)` was routed through train classifiers → `parse_declare_special()`
+   parses the paren group structurally (Kotlin DeclareToken semantics).
+2. `is_definite_function` rejected known user fns and DynamicRefs → now an
+   instance method admitting both.
+3. `parse_function_atom`'s OpenParen arm hard-errored on train-parse failure →
+   falls back to `parse_function_expr`.
+4. `try_parse_train` had no classifier for `[fn-shape, DynamicRef]` → added
+   (⍞ref always denotes a function; names resolve at eval).
+5. Adverbs after a Train/Lambda/DynamicRef atom (`(f g)¨ xs`) were eaten by the
+   monadic-apply block → dedicated arm binds Derived{atom, adverb} first.
 
-Also confirmed by oracle probing (documented for P7c):
-- Oracle's OWN util.kap filter FAILS at call time ("No arguments specified for
-  function") — its body does `arg ← arg` on a macro-bound :value, which Kotlin
-  rejects. So full filter parity is impossible; matching definition-time parsing
-  is the correct goal.
-- Oracle call syntax is `filter (arg) {fn}` — `:value` REQUIRES parentheses
-  (Kotlin ValueSyntaxRule.isValid = token is OpenParen). Bare `1 2 3 filter {…}`
-  is invalid in the oracle too.
-- Port defsyntax expansion of `(:value v :function f)` works correctly in
-  isolation: `defsyntax m2 (:value v :function f) { (⍞f¨ v) } ⋄ m2 (1 2 3 4) {2|⍵}`
-  → `(1 0 1 0)`. Only bodies containing `(known-fn ⍞ref)` fail.
-
-Gates GREEN throughout (lib 96/0, curated 1/0).
+Oracle ground truth: the JVM oracle REJECTS inline `z ⇐ ((f g)¨ args)`
+("Right side of the arrow must be a function") and its own util.kap
+trimLeft/filter fail at load/call. The port's filter macro now exceeds
+stock-file behavior. util.kap lines 19–21 (`@\s` regex literals) documented
+in KNOWN-NONCONFORMANCE.md as beyond-oracle scope.

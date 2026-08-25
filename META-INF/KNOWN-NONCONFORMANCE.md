@@ -312,6 +312,14 @@ Features the engine does not build yet. Most are tracked in `ROADMAP.md`.
   - `io:base64Encode "Hello"` — needs `256 (⊥⍤1) …` (rank-op applied to a char-multidim
     value) plus `⊤`/`⊤`-on-chars; errors in the port today (oracle: `"SGVsbG8="`).
   These are stdlib-kernel items, tracked separately from the `∵` operator work.
+- **`util.kap` regex-literal lines (19–21)** — `trimLeft ⇐ (1⍳⍨@\s≠)⍛↓` and its
+  `trimRight`/`trim` dependents use an unsupported `@\s` regex literal inside a
+  train. **The JVM oracle also fails these**: `use("util.kap")` in
+  kap-jvm-text leaves `trimLeft`/`trimRight`/`trim` unassigned ("Variable not
+  assigned"), so there is no parity target to match. The port reports a clean
+  parse error (`Operator without left function: ⍨`) for line 19 and skips it;
+  all other util.kap exports load. Implementing `@regex` literals would be a
+  NEW feature beyond oracle behavior, not a fix. (Verified 2026-08-25, P7c.)
 
 ---
 
