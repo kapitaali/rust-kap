@@ -583,6 +583,28 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
+            // Fork postfix `f « g » h` (Kap 3-train, Kotlin parseOperator
+            // LeftForkToken case :1295): binds after a FUNCTION exactly like the
+            // adverbs — e.g. stat.kap `avg ⇐ +/«÷»≢` where the left member is the
+            // DERIVED reduce `+/`. Checked at LOOP level (not inside the symbol
+            // `if let` below) because « is a LeftForkToken, not a symbol.
+            if matches!(self.peek().map(|t| &t.token), Some(Token::LeftForkToken))
+                && Self::is_function_expr(&cur)
+            {
+                self.advance(); // consume «
+                self.skip_newlines();
+                let b = self.parse_function_atom()?;
+                self.skip_newlines();
+                self.expect(Token::RightForkToken, "expected » in fork")?;
+                self.skip_newlines();
+                let c = self.parse_function_atom()?;
+                cur = Instr::Train {
+                    funcs: vec![cur, b, c],
+                    reverse: false,
+                    compose: false,
+                };
+                continue;
+            }
             // Power operator `f⍣n` / `f⍣g` (Kotlin parseOperator → PowerAPLOperator,
             // engine.kt:491): binds after a FUNCTION, exactly like the adverbs below,
             // but carries a combined right arg (value OR function) ⇒ ValueOp.
@@ -612,6 +634,31 @@ impl<'a> Parser<'a> {
                         func: Box::new(cur),
                         op_name: "⍣".to_string(),
                         operand: Box::new(operand),
+                    };
+                    continue;
+                }
+                // Fork postfix `f « g » h` (Kap 3-train): binds after a FUNCTION
+                // exactly like ⍣ — e.g. stat.kap `avg ⇐ +/«÷»≢` where the left
+                // member is the DERIVED reduce `+/`. Mirrors the legacy-path arm in
+                // parse_function_expr (parser.rs ~1756): middle fn between « »,
+                // then a third function atom; nothing after » means the caller's
+                // next token supplies the right member only in legacy — here we
+                // REQUIRE it (Kotlin processFn always has a trailing fn for this
+                // shape; `f « g »` alone falls through to the adverb arms).
+                if matches!(self.peek().map(|t| &t.token), Some(Token::LeftForkToken))
+                    && Self::is_function_expr(&cur)
+                {
+                    self.advance(); // consume «
+                    self.skip_newlines();
+                    let b = self.parse_function_atom()?;
+                    self.skip_newlines();
+                    self.expect(Token::RightForkToken, "expected » in fork")?;
+                    self.skip_newlines();
+                    let c = self.parse_function_atom()?;
+                    cur = Instr::Train {
+                        funcs: vec![cur, b, c],
+                        reverse: false,
+                        compose: false,
                     };
                     continue;
                 }
@@ -1864,7 +1911,31 @@ impl<'a> Parser<'a> {
                     } else {
                         first
                     };
-                let data = self.parse_apply()?;
+                    // Fork postfix on a derived function: `+/«÷»≢` — the Derived is the
+                    // fork's LEFT member. Parse middle + right and return the 3-train
+                    // (mirrors bind_operators_kotlin's fork arm / Kotlin parseOperator).
+                    if matches!(self.peek().map(|t| &t.token), Some(Token::LeftForkToken)) {
+                        self.advance(); // consume «
+                        self.skip_newlines();
+                        let b = self.parse_function_atom()?;
+                        self.skip_newlines();
+                        self.expect(Token::RightForkToken, "expected » in fork")?;
+                        self.skip_newlines();
+                        let c = self.parse_function_atom()?;
+                        return Ok(Instr::Train {
+                            funcs: vec![
+                                Instr::Derived {
+                                    func: Box::new(func_boxed),
+                                    op: Box::new(op),
+                                },
+                                b,
+                                c,
+                            ],
+                            reverse: false,
+                            compose: false,
+                        });
+                    }
+                    let data = self.parse_apply()?;
                 return Ok(Instr::Apply {
                     fn_expr: Box::new(Instr::Derived {
                         func: Box::new(func_boxed),
@@ -2795,10 +2866,28 @@ impl<'a> Parser<'a> {
             };
             if let Some(adv) = adv_name {
                 self.advance();
-                return Ok(Instr::Derived {
+                let derived = Instr::Derived {
                     func: Box::new(left),
                     op: Box::new(Instr::Symbol { name: adv, namespace: None }),
-                });
+                };
+                // Fork postfix on the derived function: `+/«÷»≢` (stat.kap avg).
+                // The Derived is the fork's LEFT member; parse middle + right and
+                // return the 3-train. Without this the early return leaves « unconsumed.
+                if matches!(self.peek().map(|t| &t.token), Some(Token::LeftForkToken)) {
+                    self.advance(); // consume «
+                    self.skip_newlines();
+                    let b = self.parse_function_atom()?;
+                    self.skip_newlines();
+                    self.expect(Token::RightForkToken, "expected » in fork")?;
+                    self.skip_newlines();
+                    let c = self.parse_function_atom()?;
+                    return Ok(Instr::Train {
+                        funcs: vec![derived, b, c],
+                        reverse: false,
+                        compose: false,
+                    });
+                }
+                return Ok(derived);
             }
         }
         // 2-train chaining (atop): a function atom immediately followed by *another* function

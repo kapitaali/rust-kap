@@ -646,6 +646,11 @@ fn curated_kap_parity() {
         ("1 2 3 ! 4 5 6", "(4 10 20)"),    // element-wise binomial over arrays
         ("1 2 3 ! 2", "(2 1 0.0)"),
         ("1r2 + 1r2", "1"),                // whole-number rational renders as bare integer
+        // Phase 7 (P7a): statement-level fork postfix `f « g » h` with a DERIVED
+        // left member (Kotlin parseOperator LeftForkToken, parser.kt:1295).
+        // stat.kap `avg ⇐ +/«÷»≢` = (sum y) ÷ (tally y).
+        ("+/«÷»≢ 1 2 3 4", "5/2"),
+        ("avg ⇐ +/«÷»≢ ⋄ avg 1 2 3 4 5 6", "7/2"),
         // Phase 6 (P6): native quad constants + declare(:const) const enforcement.
         // Values are oracle-exact; the `Str`-vs-char-array `typeof` class name is a
         // separate deferred string-modeling gap (KNOWN-NONCONFORMANCE), not asserted here.
