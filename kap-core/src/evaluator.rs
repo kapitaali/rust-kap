@@ -9026,65 +9026,206 @@ impl Engine {
         left_val: Option<AplRef<APLValue>>,
         right_val: AplRef<APLValue>,
     ) -> Result<AplRef<APLValue>, AplError> {
-        // Dyadic: a ! b
         if let Some(l) = left_val {
+            // Dyadic: a ! b = binomial. Element-wise over arrays (Kotlin BinomialAPLFunction
+            // is a MathNumericCombineAPLFunction, so both args broadcast like +/*).
             let a = l.force(self)?;
             let b = right_val.force(self)?;
-            // Both scalar numbers.
             match (a.as_ref(), b.as_ref()) {
-                (APLValue::Number(x), APLValue::Number(y)) => {
-                    Self::binomial_two_numbers(x, y)
+                (APLValue::Number(_), APLValue::Number(_)) => {
+                    Self::binomial_two_numbers(&a, &b)
+                }
+                (APLValue::Array(_), APLValue::Array(_))
+                | (APLValue::Number(_), APLValue::Array(_))
+                | (APLValue::Array(_), APLValue::Number(_)) => {
+                    Self::binomial_broadcast(&a, &b)
                 }
                 _ => Err(AplError::runtime(
-                    "!: requires scalar numbers for both arguments".into(),
+                    "!: requires numbers for both arguments".into(),
                 )),
             }
         } else {
-            // Monadic: ! b = gamma(b+1). For b+1 <= 0.5 the naive exp(lgamma)
-            // loses Γ's sign (lgamma returns ln|Γ|), so use the reflection
-            // formula Γ(x) = π / (sin(πx)·Γ(1-x)).
-            // Oracle: !5→120.0, !¯0.5→1.772453850905516, !¯1.5→-3.5449077018110318.
+            // Monadic: ! b = gamma(b+1). Operates element-wise over arrays (Kotlin
+            // BinomialAPLFunction.numberCombine1Arg). Integer args yield an EXACT
+            // whole number (Kotlin keeps the factorial table, not exp(lgamma));
+            // non-integer / negative args use the lgamma reflection formula.
+            // Oracle: !5→120.0, !100→9.33e157, !¯1→Infinity, !¯2→NaN.
             let b = right_val.force(self)?;
             match b.as_ref() {
-                APLValue::Number(y) => {
-                    let d = y.as_double();
-                    let x = d + 1.0;
-                    let v = if x >= 0.5 {
-                        lgamma(x).exp()
-                    } else {
-                        std::f64::consts::PI
-                            / ((std::f64::consts::PI * x).sin() * lgamma(1.0 - x).exp())
-                    };
-                    Ok(Rc::new(APLValue::Number(KapNumber::Double(v))))
+                APLValue::Number(x) => Ok(Rc::new(APLValue::Number(Self::gamma_one_number(x)?))),
+                APLValue::Array(arr) => {
+                    let mut out = Vec::with_capacity(arr.element_count());
+                    for e in arr.elements() {
+                        match e.as_ref() {
+                            APLValue::Number(x) => {
+                                out.push(Rc::new(APLValue::Number(Self::gamma_one_number(x)?)))
+                            }
+                            _ => return Err(AplError::runtime("!: requires numbers".into())),
+                        }
+                    }
+                    Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        arr.dimensions.clone(),
+                        ArrayData::Nested(out),
+                    )))))
                 }
                 _ => Err(AplError::runtime("!: requires a number".into())),
             }
         }
     }
 
-    fn binomial_two_numbers(a: &KapNumber, b: &KapNumber) -> Result<AplRef<APLValue>, AplError> {
-        // Try the Long path: both non-negative ints, a <= b, within int range.
-        let a_long = a.as_long();
-        let b_long = b.as_long();
-        if let (Ok(x), Ok(y)) = (a_long, b_long) {
-            if x >= 0 && y >= 0 && y >= x && y <= i32::MAX as i64 {
-                let r = Self::long_binomial(y as i32, x as i32);
-                return Ok(Rc::new(APLValue::Number(KapNumber::Long(r as i64))));
+    /// `! x` for a single scalar number → exact-integer when x is an integer, else lgamma.
+    fn gamma_one_number(x: &KapNumber) -> Result<KapNumber, AplError> {
+        // Exact factorial path: only for a genuinely WHOLE number (n == floor(n)).
+        // `as_long` truncates (0.5 -> 0), so gate on the fractional part first.
+        let d = x.as_double();
+        let is_whole = d.fract() == 0.0 && d.is_finite();
+        if is_whole {
+            let n = d as i64;
+            if n >= 0 {
+                if let Some(f) = Self::exact_factorial(n) {
+                    return Ok(f);
+                }
+            } else if n == -1 {
+                // Γ(0) = +∞
+                return Ok(KapNumber::Double(f64::INFINITY));
+            } else {
+                // Γ of a non-positive integer ≤ -2 is undefined (NaN).
+                return Ok(KapNumber::Double(f64::NAN));
             }
         }
-        // Double path: binomial(a, b) = gamma(1+b) / (gamma(1+a) * gamma(1+b-a))
+        // Non-integer / non-finite: use the lgamma reflection formula
+        // Γ(x) = π / (sin(πx)·Γ(1-x)). For x >= 0.5 exp(lgamma) suffices.
+        // Oracle: !¯0.5→1.772453850905516, !¯1.5→-3.5449077018110318.
+        let xx = d + 1.0;
+        let v = if xx >= 0.5 {
+            lgamma(xx).exp()
+        } else {
+            std::f64::consts::PI / ((std::f64::consts::PI * xx).sin() * lgamma(1.0 - xx).exp())
+        };
+        Ok(KapNumber::Double(v))
+    }
+
+    /// Exact factorial of a non-negative integer, when it fits a supported variant.
+    /// Returns None for values too large to represent exactly (→ fall back to lgamma double).
+    fn exact_factorial(n: i64) -> Option<KapNumber> {
+        use num_bigint::BigInt;
+        if n > 20 {
+            // 21! already exceeds i64; Kotlin uses Double.POSITIVE_INFINITY beyond
+            // 171.63. Use BigInt and cap at a sane bound.
+            if n > 170 {
+                return Some(KapNumber::Double(f64::INFINITY));
+            }
+            let mut f = BigInt::from(1);
+            for i in 2..=n {
+                f *= BigInt::from(i);
+            }
+            return Some(KapNumber::Rational(num_rational::BigRational::new(f, BigInt::from(1))));
+        }
+        let mut r: i128 = 1;
+        for i in 1..=n as i128 {
+            r *= i;
+        }
+        Some(KapNumber::Long(r as i64))
+    }
+
+    fn binomial_broadcast(
+        a: &APLValue,
+        b: &APLValue,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        // Collect scalar-number operands; shape follows the array side.
+        let av = match a {
+            APLValue::Number(x) => vec![x.clone()],
+            APLValue::Array(arr) => {
+                let mut v = Vec::with_capacity(arr.element_count());
+                for e in arr.elements() {
+                    match e.as_ref() {
+                        APLValue::Number(x) => v.push(x.clone()),
+                        _ => return Err(AplError::runtime("!: requires numbers".into())),
+                    }
+                }
+                v
+            }
+            _ => return Err(AplError::runtime("!: requires numbers".into())),
+        };
+        let bv = match b {
+            APLValue::Number(x) => vec![x.clone()],
+            APLValue::Array(arr) => {
+                let mut v = Vec::with_capacity(arr.element_count());
+                for e in arr.elements() {
+                    match e.as_ref() {
+                        APLValue::Number(x) => v.push(x.clone()),
+                        _ => return Err(AplError::runtime("!: requires numbers".into())),
+                    }
+                }
+                v
+            }
+            _ => return Err(AplError::runtime("!: requires numbers".into())),
+        };
+        let (la, lb) = (av.len(), bv.len());
+        if la > 1 && lb > 1 && la != lb {
+            return Err(AplError::runtime(
+                "!: arguments must have matching length or one scalar".into(),
+            ));
+        }
+        let n = la.max(lb);
+        let dims = match (a, b) {
+            (APLValue::Array(arr), _) => arr.dimensions.clone(),
+            (_, APLValue::Array(arr)) => arr.dimensions.clone(),
+            _ => unreachable!(),
+        };
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let x = &av[i % la];
+            let y = &bv[i % lb];
+            out.push(Rc::new(APLValue::Number(Self::binomial_two_numbers_scalar(
+                x, y,
+            )?)));
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            dims,
+            ArrayData::Nested(out),
+        )))))
+    }
+
+    fn binomial_two_numbers(
+        a: &APLValue,
+        b: &APLValue,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let (x, y) = match (a, b) {
+            (APLValue::Number(x), APLValue::Number(y)) => (x, y),
+            _ => return Err(AplError::runtime("!: requires numbers".into())),
+        };
+        Ok(Rc::new(APLValue::Number(Self::binomial_two_numbers_scalar(
+            x, y,
+        )?)))
+    }
+
+    fn binomial_two_numbers_scalar(
+        a: &KapNumber,
+        b: &KapNumber,
+    ) -> Result<KapNumber, AplError> {
+        // Try the Long/exact path: both non-negative ints, a <= b, within int range.
+        if let (Ok(x), Ok(y)) = (a.as_long(), b.as_long()) {
+            if x >= 0 && y >= 0 && y >= x && y <= i32::MAX as i64 {
+                let r = Self::long_binomial(y as i32, x as i32);
+                // Kotlin returns a Long when k<=n; if the library decided 0 for k>n
+                // that path is unreachable here (we guard y>=x).
+                return Ok(KapNumber::Long(r as i64));
+            }
+        }
+        // Double path: binomial(a, b) = gamma(1+b) / (gamma(1+a) * gamma(1+b-a)).
         let a_f = a.as_double();
         let b_f = b.as_double();
-        // case table: a > b → 0.0
+        // a > b → 0.0 (Kotlin caseTable).
         if a_f > b_f {
-            return Ok(Rc::new(APLValue::Number(KapNumber::Double(0.0))));
+            return Ok(KapNumber::Double(0.0));
         }
         let log_gamma_1b = lgamma(b_f + 1.0);
         let log_gamma_1a = lgamma(a_f + 1.0);
         let log_gamma_1ba = lgamma(b_f - a_f + 1.0);
         let log_result = log_gamma_1b - log_gamma_1a - log_gamma_1ba;
         let v = log_result.exp();
-        Ok(Rc::new(APLValue::Number(KapNumber::Double(v))))
+        Ok(KapNumber::Double(v))
     }
 
     fn long_binomial(n: i32, k: i32) -> i32 {
@@ -10151,12 +10292,44 @@ mod tests {
     }
 
     #[test]
+    fn eval_factorial_binomial_p5() {
+        // Exact-integer factorial (oracle: !5 → 120.0, value = 120).
+        assert_eq!(eval("!5"), "120");
+        // Element-wise gamma over an array (oracle: ⟨1.0 2.0 6.0⟩).
+        assert_eq!(eval("! 1 2 3"), "(1 2 6)");
+        // Negative-integer gamma: !¯1 → +Infinity, !¯2 → NaN.
+        assert_eq!(eval("!¯1"), "Infinity");
+        assert_eq!(eval("!¯2"), "NaN");
+        // Non-integer gamma via lgamma reflection (oracle values).
+        assert_eq!(eval("!0.5"), "0.886226925452758");
+        assert_eq!(eval("!¯0.5"), "1.772453850905516");
+        assert_eq!(eval("!¯1.5"), "¯3.5449077018110318");
+        // Binomial: scalar and element-wise over arrays.
+        assert_eq!(eval("5 ! 2"), "0.0");
+        assert_eq!(eval("1 2 3 ! 4 5 6"), "(4 10 20)");
+        assert_eq!(eval("1 2 3 ! 2"), "(2 1 0.0)");
+    }
+
+    #[test]
+    fn eval_rational_normalize_on_display() {
+        // A whole-number rational renders as a bare integer (oracle: 1r2+1r2 → 1).
+        assert_eq!(eval("1r2 + 1r2"), "1");
+        assert_eq!(eval("3r3"), "1");
+        // Non-whole rationals keep the num/den form (oracle: 2r4 → 1/2).
+        assert_eq!(eval("2r4"), "1/2");
+        assert_eq!(eval("¯2r4"), "¯1/2");
+        assert_eq!(eval("6r9"), "2/3");
+    }
+
+
+    #[test]
     fn eval_train_compose() {
         // x (f ∘ g) y = f(y, g(y))  (compose is dyadic: f(y, g(y)))
         assert_eq!(eval("¯2 3 4 (×∘-) 1000"), "(2000 ¯3000 ¯4000)");
         // monadic compose with reciprocal: (×∘÷) y = y × (1/y) = y, exactly 1 for all y≠0.
-        // Kotlin renders rationals num/den (oracle: 1r2 displays 1/2).
-        assert_eq!(eval("(×∘÷) ¯1 2 3"), "(1 1/1 1/1)");
+        // The result is the rational 1/1, which Kap renders as the bare integer `1`
+        // (oracle: 1r2 displays 1/2, but a whole-number rational displays as `1`).
+        assert_eq!(eval("(×∘÷) ¯1 2 3"), "(1 1 1)");
     }
 
     #[test]

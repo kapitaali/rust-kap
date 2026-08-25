@@ -133,12 +133,21 @@ impl KapNumber {
             KapNumber::Double(v) => neg(format_double(*v)),
             KapNumber::BigInt(v) => neg(v.to_string()),
             KapNumber::Rational(v) => {
-                let num = v.numer().to_string();
-                let den = v.denom().to_string();
-                // Kotlin renders rationals as `num/den` in BOTH REPL and plain
-                // contexts (oracle: 1r2 -> 1/2, ¯1r2 -> -1/2). The `nrd` form
-                // is a port-only invention — removed 2026-08-24.
-                neg(format!("{}/{}", num, den))
+                // A whole-number rational renders as a bare integer in Kap (oracle:
+                // `1r2 + 1r2` -> `1`, `2r4` -> `1/2`, `3r3` -> `1`). The `num/den`
+                // form is used only when the denominator is not 1.
+                if *v.denom() == num_bigint::BigInt::from(1) {
+                    let s = v.numer().to_string();
+                    neg(if readable {
+                        s.replace('-', "¯")
+                    } else {
+                        s
+                    })
+                } else {
+                    let num = v.numer().to_string();
+                    let den = v.denom().to_string();
+                    neg(format!("{}/{}", num, den))
+                }
             }
             KapNumber::Complex(re, im) => {
                 // APL `J` notation: `re Jim`.

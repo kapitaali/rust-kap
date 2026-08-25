@@ -555,8 +555,9 @@ fn curated_kap_parity() {
         ("4 4 ↓ 5 5 5 ⍴ ⍳100", "(20 21 22 23 24)"),
         // Multi-dimensional reverse / rotate (⌽ last axis, ⊖ first axis) and
         // transpose (⍉ axis-reversal monadic + dyadic axis-permute).
-        // Reference: TransposeTest.kt. NOTE: `˝` (inverse-adverb) cases are NOT
-        // covered here — the `˝` adverb is not yet implemented.
+        // Reference: TransposeTest.kt. `⍉˝` (inverse-transpose adverb) cases ARE
+        // covered below; the nested-grouped form `, 0 1 0 (⍉)˝ m` / `,(⍉ int:proto v)˝ m`
+        // remains a general standalone-adverb-in-nested-position gap (DEFAULT too).
         ("⌽1 2 3 4", "(4 3 2 1)"),
         ("⌽4 5 ⍴ ⍳100", "(4 3 2 1 0 9 8 7 6 5 14 13 12 11 10 19 18 17 16 15)"),
         ("⌽4 5 4 ⍴ ⍳1000", "(3 2 1 0 7 6 5 4 11 10 9 8 15 14 13 12 19 18 17 16 23 22 21 20 27 26 25 24 31 30 29 28 35 34 33 32 39 38 37 36 43 42 41 40 47 46 45 44 51 50 49 48 55 54 53 52 59 58 57 56 63 62 61 60 67 66 65 64 71 70 69 68 75 74 73 72 79 78 77 76)"),
@@ -631,8 +632,20 @@ fn curated_kap_parity() {
         ("2 cmp 2", "0"),
         ("3 cmp 2", "1"),
         // Phase 6 breadth: ! (gamma / binomial — Kotlin FactorialFunction)
-        ("! 5", "119.99999999999997"), // gamma(6) ≈ 120 (floating point)
-        ("5 ! 2", "0.0"),              // binomial(2,5) = 0
+        // Exact-integer factorial: !5 = 5! = 120 (oracle renders 120.0; value-identical).
+        ("! 5", "120"),
+        ("! 10", "3628800"),
+        ("! 100", "93326215443944152681699238856266700490715968264381621468592963895217599993229915608941463976156518286253697920827223758251185210916864000000000000000000000000"),
+        ("! 1 2 3", "(1 2 6)"),            // element-wise gamma over an array
+        ("! ¯1", "Infinity"),
+        ("! ¯2", "NaN"),
+        ("! 0.5 1.5 2.5", "(0.886226925452758 1.329340388179137 3.3233509704478426)"),
+        ("!¯0.5", "1.772453850905516"),
+        ("!¯1.5", "¯3.5449077018110318"),
+        ("5 ! 2", "0.0"),                  // binomial(2,5) = 0
+        ("1 2 3 ! 4 5 6", "(4 10 20)"),    // element-wise binomial over arrays
+        ("1 2 3 ! 2", "(2 1 0.0)"),
+        ("1r2 + 1r2", "1"),                // whole-number rational renders as bare integer
         // Phase 6 breadth: … (range — Kotlin RangeFunction)
         ("1…5", "(1 2 3 4 5)"),
         ("\"a\"…\"e\"", "\"abcde\""),
