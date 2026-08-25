@@ -260,7 +260,7 @@ behave identically to the oracle in a scripted side-by-side. Current state:
 | regex.kap | ✅ loads | lambda-replacement form remains documented-deferred |
 | time.kap | ✅ loads | verify exported fns vs oracle (clock/date formats) |
 | util.kap | ❌ parse error 6:27 | `labels`, `⊂⍛cols` derived-compose chains, `defsyntax filter` w/ `declare(:local …)` inside — probe each construct standalone first |
-| stat.kap | ❌ parse error 3:9 | `+/«÷»≢` fork-in-strand shapes, `¯1r2` rationals (P5), `∧` monadic sort, `⍛⊇` chain |
+| stat.kap | ✅ loads; `median`/`avg` work | `classify` fn (line 20) needs `throw` from base-functions; `⍛⊇` chain FIXED (P1 commit 49f1286/21123ee) |
 | map.kap | ❌ parse error 13:6 | `'kap:map ≡ typeof m` symbol compare, `⍺.(⍵)` dynamic member access, `(@.≠)⍛⊂` — map-type surface may be its own mini-phase; consult Kotlin map module before scoping |
 | output.kap / output3.kap | ❌ train-parse errors | diagnose against P1's new parser — likely fixed FOR FREE by the accumulator migration; re-test before hand-porting anything |
 | http.kap / thread.kap / graph.kap / fhelp*.kap | ❌ | **out of scope** (networking/threads/charting per strategy doc); keep erroring cleanly |
