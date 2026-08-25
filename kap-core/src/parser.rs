@@ -498,7 +498,7 @@ impl<'a> Parser<'a> {
                         {
                             self.advance(); // consume 'declare'
                             let arg = self.parse_declare_special()?;
-                            left_args.push(Instr::Apply {
+                            return Ok(Instr::Apply {
                                 fn_expr: Box::new(Instr::Symbol {
                                     name: "declare".to_string(),
                                     namespace: None,
@@ -506,7 +506,6 @@ impl<'a> Parser<'a> {
                                 left: None,
                                 right: Box::new(arg),
                             });
-                            continue;
                         }
                         // defsyntax/defsyntaxsub DEFINITIONS are keyword-forms only
                         // legacy parse_expr knows; bail to it from statement start
