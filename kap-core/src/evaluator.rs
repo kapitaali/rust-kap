@@ -2338,7 +2338,14 @@ impl Engine {
                         env,
                     );
                 }
-                // Left-bind: [value, fn]
+                // Left-bind: [value, fn] — the value becomes ⍺ (Kotlin
+                // LeftAssignedFunction / makeLeftBindFunction). A 2-member [value, fn]
+                // pair is ALWAYS a left bind, whether `fn` is an atom or an atop
+                // chain: oracle `m⇐(1 2+2÷⍨≢) ⋄ m 3 4` → ⟨2 3⟩ = (1 2)+(2÷⍨≢3 4),
+                // i.e. the array is applied DYADICALLY as f's left arg — NOT
+                // monadically with itself on both sides. (The earlier separate
+                // "mixed atop" arm computed gy=A+(D y) and fed it to both sides of
+                // +; that was wrong and is removed.)
                 if funcs.len() == 2 && Self::is_value(&funcs[0]) {
                     return self.eval_apply(
                         &funcs[1],

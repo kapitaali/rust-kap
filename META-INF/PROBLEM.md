@@ -73,29 +73,55 @@ in KNOWN-NONCONFORMANCE.md as beyond-oracle scope.
 
 # PROBLEM 2 — bound-constant commute `2÷⍨` (stat.kap median) — PARTIALLY RESOLVED 2026-08-25
 
-The ⍨ INVERSION itself is FIXED and committed (4/4 oracle matrix passes —
-see PROGRESS-20260825.md P7d section). What remains open is the NEXT layer:
+The ⍨ INVERSION, value-tine-in-fork, fork-postfix-left-member, and the
+**bare** value-left-bind chain are now FIXED and committed this session.
 
-## Remaining: value-tine-in-fork semantics (median still diverges)
+## Resolved this session (P7d-6)
+**Bare value-left-bind chain** `f ⇐ 1 2+≢ ⋄ f 5` → `(2 3)` (oracle
+`⟨2 3⟩`, value-exact; display `()` vs `⟨⟩` is the P8 renderer gap).
+AST now `Train[ Train[Array(1,2), +], ≢ ]` — value strand binds to the
+FIRST function only; remaining fns chain. Also `f ⇐ 1 2+×≢ ⋄ f 5` → `(2 3)`.
 
-`stat:median 1 2 3 4`: oracle `5/2`; port `(1/2 1 3/2 2)`.
-Body: `median ⇐ 2 ÷⍨ +/ (¯1r2 0+2÷⍨≢)⍛⊇ ∧`
+Root cause of earlier wrong attempts (P7d-5 reverted, re-approached this
+session): Kotlin `Chain2.eval1Arg(a) = fn0(fn1(a))` (instr.kt:588) — `fn0`
+applied MONADICALLY to `fn1`'s result — and `processFn`'s FnParseResult
+branch builds `Chain2[ makeLeftBindFunction(valuestrand, f0), f1 ]`
+(parser.kt:479–491). The port folded the value strand as the *outer*
+funcs[0] of the whole chain (wrong) and inverted the fold direction. Fixed
+in `parse_function_expr_impl` allow_train arm (parser.rs ~3258): collect
+value-strand → left-bind inner `Train[Array(v*), f0]`; remaining fns
+left-fold as outer fn0.
 
-New evidence from oracle probes (kap-jvm-text, standard-lib):
-- `(¯1r2 0+2÷⍨≢) 1 2 3 4` → `⟨3/2 2⟩`   (port: `1`)
-- `(¯1r2 0+2÷⍨≢) 1 2 3 4 5` → `⟨2 5/2⟩`
-- `(¯1r2 0) 4`            → `⟨⟨-1/2 0⟩ 4⟩`  ← KEY: a bare VALUE in fn
-  position applied to y yields ⟨constant, y⟩ — Kotlin LeftAssignedFunction
-  (`functions.kt:628`) treats it as an ⍺-bind, NOT a constant-returning fn.
-- `(1r2 0+2) 9`           → `⟨⟨5/2 2⟩ 9⟩`
+## Remaining OPEN item: the PAREN-wrapped form `(¯1r2 0+2÷⍨≢)` (median body)
 
-So the fork's left tine `(¯1r2 0)` is an ⍺-BIND of the strand; the fork then
-evaluates with that bound value participating differently than a plain
-constant tine. The port's train evaluator treats value tines as constants.
-Open question: exact evaluation order for `(A B C) y` when A is a bare value
-strand — likely A becomes LeftBind(A, B∘C) or similar per Kotlin
-makeLeftBindFunctionParseResult. Next step: read Kotlin functions.kt
-LeftAssignedFunction + how Chain3 handles a leading non-function member,
-then mirror in the port's Train eval.
+`stat:median 1 2 3 4` still DIVERGES: oracle `5/2`, port errors. Oracle
+dissection (kap-jvm-text, standard-lib) proves the body is NOT a fn-train:
+
+- `¯1r2 0 + 2` → `⟨3/2 2⟩` — a **dyadic VALUE** (strand + scalar), not a fn.
+- `(¯1r2 0 + 2) 9` → `⟨⟨3/2 2⟩ 9⟩` — paren-wrapped VALUE applied to an arg
+  is a **constant** (`⟨value, arg⟩`, Kotlin `LeftAssignedFunction`).
+- `(¯1r2 0 + 2 ÷⍨ ≢) 1 2 3 4` → `⟨3/2 2⟩` — here `÷⍨ ≢` IS consumed as a
+  **fn-chain**, so the value `3/2 2` left-binds to it and evaluates
+  dyadically: `3/2 2 + (÷⍨≢ vec)` = `3/2 2 + 1` = `3/2 2`.
+- `(3/2 2 ÷⍨≢) 1 2 3 4` → `⟨2 2 2 2 2 2⟩` — confirms the value-strand binds
+  as the LEFT arg of the commute (`÷⍨` = `y÷x`), NOT as a constant.
+
+So the median body `(A + B ÷⍨ ≢)` is **a dyadic value `A + B` that
+left-binds to the fn-chain `÷⍨ ≢`** — the full `parseExpr` accumulator
+interleaves VALUE parsing (strand + `+` dyadic) with FUNCTION parsing (the
+`÷⍨≢` chain). The port's `try_parse_train` (parser.rs:2596) only accepts
+fn-ATOMS, so it tries to fold `¯1r2 0 + 2` as an fn-train member (wrong)
+and emits `Train[Array(¯1r2,0), +, …]` nested → evaluates to `2`, not `3/2 2`.
+
+**This is the P1 parser-migration scope** (module-mirror of Kotlin's single
+`parseExpr` value/function accumulator), NOT a localized train-classifier
+patch. Three prior localized attempts (P7d, P7d-4, P7d-5) reverted; the
+correct fix is to give paren groups in fn-chain position a VALUE-expression
+parse fallback (Kotlin `parseValue` vs `FnParseResult` at parser.kt:455–495)
+before/around `try_parse_train`.
+
+Pre-existing (NOT introduced this session, confirmed via `git stash` on clean
+HEAD): `(2÷⍨≢) 8` → port `1`, oracle `1/2` (bound-constant commute with a
+trailing `≢` in paren form; a separate paren-adverb bug).
 
 Gates green throughout (lib 96/0 · curated 1/0); no debug edits in tree.

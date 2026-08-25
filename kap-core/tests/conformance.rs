@@ -651,6 +651,12 @@ fn curated_kap_parity() {
         // stat.kap `avg ⇐ +/«÷»≢` = (sum y) ÷ (tally y).
         ("+/«÷»≢ 1 2 3 4", "5/2"),
         ("avg ⇐ +/«÷»≢ ⋄ avg 1 2 3 4 5 6", "7/2"),
+        // Bare value-left-bind chain (P7d-6): `1 2 + ≢` parses as a Chain2 of a
+        // LeftAssignedFunction([1,2], +) and ≢; the value strand binds to the FIRST
+        // function only, remaining fns chain. Oracle: `p9⇐1 2+≢ ⋄ p9 5` → ⟨2 3⟩;
+        // `f⇐1 2+×≢ ⋄ f 5` → ⟨2 3⟩. (Display glyph () vs ⟨⟩ is the P8 renderer gap.)
+        ("p9 ⇐ 1 2+≢ ⋄ p9 5", "(2 3)"),
+        ("f ⇐ 1 2+×≢ ⋄ f 5", "(2 3)"),
         // Phase 7 (P7b): dual / structural-under `base ⍢ wrapper`
         // (Kotlin StructuralUnderOp, engine.kt:501): wrapper⁻¹ ∘ base ∘ wrapper.
         ("(⌽⍢⌽) 1 2 3 4", "(4 3 2 1)"),

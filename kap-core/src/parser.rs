@@ -2605,6 +2605,56 @@ impl<'a> Parser<'a> {
                 }
                 None => return None,
                 _ => {
+                    // Left-bind pre-fold (Kotlin parser.kt makeLeftBindFunction:486, hit
+                    // during parseOperator's member accumulation): a Literal followed by
+                    // `<primitive fn><adverb>` (e.g. `2÷⍨`) binds INTO ONE derived member
+                    // Train[Literal(2), Derived{÷,⍨}] BEFORE train-member classification.
+                    // stat.kap median `(¯1r2 0+2÷⍨≢)`: without this, `Lit(2)` sits between
+                    // the leading value run and the fn tail and fold_train_members bails.
+                    if matches!(funcs.last(), Some(Instr::Literal(_)))
+                        && !matches!(self.peek().map(|t| &t.token), Some(Token::CloseParen))
+                    {
+                        let save = self.pos;
+                        let is_bind_shape = matches!(
+                            self.peek_at(0).map(|t| &t.token),
+                            Some(Token::Literal(LiteralValue::Symbol { name, namespace }))
+                                if namespace.is_none()
+                                    && Self::is_primitive_op(name)
+                                    && !Self::is_adverb(name)
+                        ) && matches!(
+                            self.peek_at(1).map(|t| &t.token),
+                            Some(Token::Literal(LiteralValue::Symbol { name, namespace }))
+                                if namespace.is_none() && Self::is_adverb(name)
+                        );
+                        if is_bind_shape {
+                            // Re-parse the two symbol tokens as instrs (peek borrows released).
+                            let f = match self.parse_function_atom() {
+                                Ok(f) => f,
+                                Err(_) => {
+                                    self.pos = save;
+                                    return None;
+                                }
+                            };
+                            // Capture the adverb BEFORE advancing past it.
+                            let adv = match self.peek().map(|t| &t.token) {
+                                Some(Token::Literal(LiteralValue::Symbol { name, namespace })) => {
+                                    Instr::Symbol { name: name.clone(), namespace: namespace.clone() }
+                                }
+                                _ => {
+                                    self.pos = save;
+                                    return None;
+                                }
+                            };
+                            self.advance();
+                            let lit = funcs.pop().unwrap();
+                            funcs.push(Instr::Train {
+                                funcs: vec![lit, Instr::Derived { func: Box::new(f), op: Box::new(adv) }],
+                                reverse: false,
+                                compose: false,
+                            });
+                            continue;
+                        }
+                    }
                     // Parse each member as a single *function atom* (not a full expression),
                     // so `1 +` inside `(1 +)` yields two members [Literal(1), Symbol(+)] (a
                     // left-bind) rather than `parse_function_expr` stopping at `1` and
@@ -2758,14 +2808,54 @@ impl<'a> Parser<'a> {
                         };
                         if let Some(rev) = reverse {
                             self.advance();
-                            if let Ok(right) = self.parse_function_atom() {
-                                let left = funcs.pop().unwrap();
-                                funcs.push(Instr::Train {
-                                    funcs: vec![left, right],
-                                    reverse: rev,
-                                    compose: true,
-                                });
-                            }
+                            // Kotlin parseFunctionForOperatorRightArg (parser.kt:447): an
+                            // operator's RIGHT operand is a multi-function ATOP chain —
+                            // `(…⍛⊇ ∧)` binds ⊇∧ as ONE operand (oracle ⟨2 1 2 1⟩);
+                            // grabbing a single atom dangles the trailing fn.
+                            // Applies to ⍛ (reverse-compose); ∘ keeps single-atom binding
+                            // (its right arg is monadic and chains rarely appear).
+                            let right = if rev
+                                && matches!(
+                                    self.peek().map(|t| &t.token),
+                                    Some(Token::Literal(LiteralValue::Symbol { name, .. }))
+                                        if Self::is_primitive_op(name)
+                                )
+                            {
+                                let mut members = vec![match self.parse_function_atom() {
+                                    Ok(m) => m,
+                                    Err(_) => return None,
+                                }];
+                                while matches!(
+                                    self.peek().map(|t| &t.token),
+                                    Some(Token::Literal(LiteralValue::Symbol { name, .. }))
+                                        if Self::is_primitive_op(name)
+                                ) {
+                                    match self.parse_function_atom() {
+                                        Ok(m) => members.push(m),
+                                        Err(_) => return None,
+                                    }
+                                }
+                                let mut mit = members.into_iter().rev();
+                                let mut cur = mit.next().unwrap();
+                                for f in mit {
+                                    cur = Instr::Train {
+                                        funcs: vec![f, cur],
+                                        reverse: false,
+                                        compose: false,
+                                    };
+                                }
+                                cur
+                            } else if let Ok(r) = self.parse_function_atom() {
+                                r
+                            } else {
+                                return None;
+                            };
+                            let left = funcs.pop().unwrap();
+                            funcs.push(Instr::Train {
+                                funcs: vec![left, right],
+                                reverse: rev,
+                                compose: true,
+                            });
                         }
                     }
                     // Fork postfix: `a « b » c` (Kap's right-fork / `⊢«⊣»,` style).
@@ -2827,7 +2917,25 @@ impl<'a> Parser<'a> {
         // `(+×÷) 6` → 1 = +∘(×∘(÷6))·signum; `(A + D) y` → A+(D y) elementwise.
         // Explicit forks use the «» glyphs. So fold members right-associated:
         // [f0, f1, f2] ⇒ Train[f0, Train[f1, f2]].
-        let two_train = funcs.len() == 2 && funcs.iter().all(|f| self.is_definite_function(f));
+        //
+        // Mixed value+fn groups (stat.kap median `(¯1r2 0+2÷⍨≢)`): leading VALUE
+        // members strand into one constant Array, then the rassoc-fold applies:
+        // [Lit(-1/2), Lit(0), +, D] ⇒ Train[Array(A), Train[+, D]]; called with y,
+        // the dyadic-atop arm gives A + (D y) — oracle-exact ⟨3/2 2⟩. Oracle also
+        // confirms this shape is accepted ONLY as an operator operand / fn chain
+        // member (`m⇐(…)` errors, `(3)⍛+` errors) — so we require ≥1 trailing fn.
+        if let Some(folded) = self.fold_train_members(&mut funcs) {
+            let mut it = folded.into_iter().rev();
+            let mut cur = it.next().unwrap();
+            for f in it {
+                cur = Instr::Train {
+                    funcs: vec![f, cur],
+                    reverse: false,
+                    compose: false,
+                };
+            }
+            return Some(cur);
+        }
         if funcs.len() >= 2 && (all_funcs || left_bind) {
             if funcs.len() == 2 {
                 Some(Instr::Train { funcs, reverse: false, compose: false })
@@ -2864,6 +2972,65 @@ impl<'a> Parser<'a> {
         } else {
             None
         }
+    }
+
+    /// Classify train members into a foldable chain: optional LEADING VALUE
+    /// members (literals strand into one constant Array) followed by ≥1
+    /// definite-function members. Returns the folded member list, or None —
+    /// restoring `funcs` unchanged — when the members don't fit that shape
+    /// (pure values, bare-symbol lists, non-definite tails).
+    fn fold_train_members(&self, funcs: &mut Vec<Instr>) -> Option<Vec<Instr>> {
+        // A single member can never chain; bail out immediately without
+        // touching `funcs` (the `Empty` sentinel below would corrupt it).
+        if funcs.len() < 2 {
+            return None;
+        }
+        let mut out: Vec<Instr> = Vec::with_capacity(funcs.len());
+        let mut pending_values: Vec<Instr> = Vec::new();
+        let mut tail_started = false;
+        let mut idx = 0;
+        while idx < funcs.len() {
+            let f = std::mem::replace(&mut funcs[idx], Instr::Empty);
+            if !tail_started && matches!(f, Instr::Literal(_) | Instr::Array { .. } | Instr::Empty)
+            {
+                pending_values.push(f);
+            } else {
+                if !tail_started {
+                    tail_started = true;
+                    match pending_values.len() {
+                        0 => {}
+                        1 => out.push(pending_values.pop().unwrap()),
+                        _ => out.push(Instr::Array {
+                            elements: std::mem::take(&mut pending_values),
+                        }),
+                    }
+                }
+                if self.is_definite_function(&f) {
+                    out.push(f);
+                } else {
+                    // Not a foldable shape: restore everything.
+                    funcs.insert(idx, f);
+                    for v in pending_values.into_iter().rev() {
+                        funcs.insert(idx, v);
+                    }
+                    return None;
+                }
+            }
+            idx += 1;
+        }
+        // Restore on failure shapes: no trailing function found (pure values),
+        // or fewer than two folded members (nothing to chain).
+        if !tail_started || out.len() < 2 {
+            for v in pending_values.into_iter().rev() {
+                funcs.insert(0, v);
+            }
+            // Put back any already-moved tail members.
+            for f in out.into_iter().rev() {
+                funcs.insert(0, f);
+            }
+            return None;
+        }
+        Some(out)
     }
 
     /// A *definite* function expression suitable for a 2-train (`f g` atop): a primitive
@@ -2978,7 +3145,38 @@ impl<'a> Parser<'a> {
                 }
                 Token::ReverseComposeToken => {
                     self.advance();
-                    let right = self.parse_function_atom()?;
+                    // Kotlin parseFunctionForOperatorRightArg (parser.kt:447): the ⍛
+                    // RIGHT operand is a multi-function ATOP chain — `⊇ ∧` binds as
+                    // atop(⊇, ∧), leaving nothing bare for a later fork tine.
+                    // stat.kap median `(…⍛⊇ ∧)` proved it: oracle ⟨2 1 2 1⟩ evaluates,
+                    // while grabbing only `⊇` dangles `∧` ("unknown adverb: ≢").
+                    let right = if matches!(
+                        self.peek().map(|t| &t.token),
+                        Some(Token::Literal(LiteralValue::Symbol { name, .. }))
+                            if Self::is_primitive_op(name)
+                    ) {
+                        let first = self.parse_function_atom()?;
+                        let mut members = vec![first];
+                        while matches!(
+                            self.peek().map(|t| &t.token),
+                            Some(Token::Literal(LiteralValue::Symbol { name, .. }))
+                                if Self::is_primitive_op(name)
+                        ) {
+                            members.push(self.parse_function_atom()?);
+                        }
+                        let mut it = members.into_iter().rev();
+                        let mut cur = it.next().unwrap();
+                        for f in it {
+                            cur = Instr::Train {
+                                funcs: vec![f, cur],
+                                reverse: false,
+                                compose: false,
+                            };
+                        }
+                        cur
+                    } else {
+                        self.parse_function_atom()?
+                    };
                     return Ok(Instr::Train { funcs: vec![left, right], reverse: true, compose: true });
                 }
                 Token::LeftForkToken => {
@@ -3043,6 +3241,109 @@ impl<'a> Parser<'a> {
         // primitive op, or a bracketed/lambda/dynamic/fork group) so we never chain on a
         // value variable or operand.
         if allow_train {
+            // Leading VALUE strand in a `⇐` RHS: `1 2+≢` (Kotlin parseValue accumulates
+            // the strand, then processFn applies + dyadically). The port's fn-atom
+            // parser stops at the literal, so fold the value run ourselves:
+            // [Lit(1), Lit(2), +, ≢] ⇒ Train[Array[1,2], +, ≢] — called with y,
+            // the left-bind rule gives (1 2)+(≢y). Oracle: `p9⇐1 2+≢ ⋄ p9 5` → ⟨2 3⟩.
+            if matches!(left, Instr::Literal(_)) {
+                let mut vals = vec![left.clone()];
+                while matches!(self.peek().map(|t| &t.token), Some(Token::Literal(LiteralValue::Number(_)))) {
+                    vals.push(self.parse_function_atom()?);
+                }
+                let is_chain_start = matches!(
+                    self.peek().map(|t| &t.token),
+                    Some(Token::Literal(LiteralValue::Symbol { name, .. })) if Self::is_primitive_op(name)
+                );
+                if vals.len() > 1 && is_chain_start {
+                    // Kotlin `parseExpr` returns at the FIRST FnParseResult, so a
+                    // `⇐` RHS / train value+fn chain is built by processFn's
+                    // FnParseResult branch: value-strand ⇒ leftArgs, first fn ⇒
+                    // Chain2[ makeLeftBindFunction(value, f0), f1 ]. Hence:
+                    //   [v*, f0, f1, f2] => Train[ Train[Array(v*), f0],
+                    //                                   (right-fold of f1,f2) ]
+                    // Chain2(fn0,fn1).eval1Arg(a) = fn0(fn1(a)) (instr.kt:588) ⇒
+                    // the value-left-bind is the INNER pair (fn0 = f0, applied
+                    // dyadically to (v*; arg)), and the remaining functions RIGHT-
+                    // FOLD as the outer fn0 (so f1 wraps f2's result). Oracle:
+                    // `f⇐1 2+≢ ⋄ f 5` → ⟨2 3⟩ ; `f⇐1 2+×≢ ⋄ f 5` → ⟨2 3⟩.
+                    let arr = Instr::Array { elements: vals };
+                    // First function member (the left-bind target).
+                    let mut f0 = self.parse_function_atom()?;
+                    if let Some(Token::Literal(LiteralValue::Symbol { name: adv, namespace: None })) =
+                        self.peek().map(|t| &t.token)
+                    {
+                        if Self::is_adverb(adv)
+                            && matches!(f0, Instr::Symbol { namespace: None, .. })
+                        {
+                            let adv = adv.clone();
+                            self.advance();
+                            f0 = Instr::Derived {
+                                func: Box::new(f0),
+                                op: Box::new(Instr::Symbol { name: adv, namespace: None }),
+                            };
+                        }
+                    }
+                    // Collect the remaining function members (right-fold targets).
+                    let mut rest: Vec<Instr> = Vec::new();
+                    while matches!(
+                        self.peek().map(|t| &t.token),
+                        Some(Token::Literal(LiteralValue::Symbol { name, .. })) if Self::is_primitive_op(name)
+                    ) || matches!(
+                        self.peek().map(|t| &t.token),
+                        Some(Token::OpenParen) | Some(Token::LambdaToken) | Some(Token::ApplyToken)
+                    ) {
+                        let mut member = self.parse_function_atom()?;
+                        if let Some(Token::Literal(LiteralValue::Symbol { name: adv, namespace: None })) =
+                            self.peek().map(|t| &t.token)
+                        {
+                            if Self::is_adverb(adv)
+                                && matches!(member, Instr::Symbol { namespace: None, .. })
+                            {
+                                let adv = adv.clone();
+                                self.advance();
+                                member = Instr::Derived {
+                                    func: Box::new(member),
+                                    op: Box::new(Instr::Symbol { name: adv, namespace: None }),
+                                };
+                            }
+                        }
+                        rest.push(member);
+                    }
+                    // Inner value-left-bind pair: Train[ Array(v*), f0 ].
+                    let inner_pair = Instr::Train {
+                        funcs: vec![arr, f0],
+                        reverse: false,
+                        compose: false,
+                    };
+                    // Remaining functions: the FIRST is the OUTERMOST wrapper, each
+                    // subsequent fn nests INSIDE (fn1) — left-fold as atop with new
+                    // fn as fn0: [×, ≢] ⇒ Train[×, ≢]. Final result wraps the inner
+                    // pair as the outer fn0: Train[ inner_pair, rest_folded ].
+                    // Train{funcs:[a,b]} monadic = a(b(y)) (evaluator.rs:2362), so:
+                    // `f⇐1 2+×≢ ⋄ f 5` ⇒ Train[Train[Array,+], Train[×,≢]] ⇒
+                    // (1 2) + (×(≢5)) = (1 2)+(×1) = (2 3). Oracle ✓.
+                    let final_instr = if rest.is_empty() {
+                        inner_pair
+                    } else {
+                        let mut outer = rest[0].clone();
+                        for i in 1..rest.len() {
+                            let r = rest[i].clone();
+                            outer = Instr::Train {
+                                funcs: vec![outer, r],
+                                reverse: false,
+                                compose: false,
+                            };
+                        }
+                        Instr::Train {
+                            funcs: vec![inner_pair, outer],
+                            reverse: false,
+                            compose: false,
+                        }
+                    };
+                    return Ok(final_instr);
+                }
+            }
             if let Some(t) = self.peek() {
                 let next_is_fn_atom = match &t.token {
                     Token::Literal(LiteralValue::Symbol { name, .. }) => Self::is_primitive_op(name),
