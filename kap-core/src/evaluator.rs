@@ -2230,8 +2230,14 @@ impl Engine {
                 None => self.scalar1(right_val, |x| x.nat_log(), "⍟"),
                 Some(_) => self.num2(left_val, right_val, |a, b| b.log(a), "⍟"),
             },
-            "∧" => self.bool2(left_val, right_val, |a, b| a & b, "∧"),
-            "∨" => self.bool2(left_val, right_val, |a, b| a | b, "∨"),
+            "∧" => match left_val {
+                None => self.sort_array(right_val, false),
+                Some(l) => self.bool2(Some(l), right_val, |a, b| a & b, "∧"),
+            },
+            "∨" => match left_val {
+                None => self.sort_array(right_val, true),
+                Some(l) => self.bool2(Some(l), right_val, |a, b| a | b, "∨"),
+            },
             "⍲" => self.bool_broadcast(left_val, right_val, |x, y| !(x && y), "⍲"),
             "⍱" => self.bool_broadcast(left_val, right_val, |x, y| !(x || y), "⍱"),
             "∼" | "not" => self.logical_not(right_val),
@@ -6530,12 +6536,18 @@ impl Engine {
         }
     }
 
-    /// Convert an `APLValue` into a 0-based integer index. Accepts Long and Double
-    /// (truncated toward zero, matching Kap's numeric->int coercion).
+    /// Convert an `APLValue` into a 0-based integer index. Accepts Long, Double,
+    /// and Rational (truncated toward zero, matching Kap's numeric->int coercion).
+    /// The oracle floors `3/2` to `1` when used as a pick index.
     fn index_to_i64(&self, v: &APLValue) -> Result<i64, AplError> {
         match v {
             APLValue::Number(KapNumber::Long(i)) => Ok(*i),
             APLValue::Number(KapNumber::Double(f)) => Ok(*f as i64),
+            APLValue::Number(KapNumber::Rational(r)) => {
+                // Truncate toward zero (matches Kap's asInt for rationals).
+                let q = r.numer() / r.denom();
+                Ok(i64::try_from(q).unwrap_or(0))
+            }
             _ => Err(AplError::runtime("array index must be an integer".into())),
         }
     }
@@ -9117,6 +9129,63 @@ impl Engine {
     /// Grade down `⍒ x`: descending first-axis grade.
     fn grade_down(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
         self.grade(right_val, false)
+    }
+
+    /// Sort `∧ x` (ascending) / `∨ x` (descending). Mirrors Kotlin
+    /// `sortKapArray` (sort.kt:192): sorts the FIRST AXIS using
+    /// `compareTotalOrdering`, returns the sorted array (NOT indices — that's
+    /// `⍋`/`⍒`). Scalar → error; empty first axis → null.
+    fn sort_array(
+        &self,
+        right_val: AplRef<APLValue>,
+        reverse: bool,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let dims = right_val.dimensions();
+        if dims.is_empty() {
+            return Err(AplError::runtime("Scalars cannot be sorted".into()));
+        }
+        if dims[0] == 0 {
+            return Ok(Rc::new(APLValue::Null));
+        }
+        if dims.len() == 1 {
+            let n = dims[0];
+            let mut items: Vec<AplRef<APLValue>> = Vec::with_capacity(n);
+            for i in 0..n {
+                items.push(Rc::new(right_val.value_at(i)));
+            }
+            items.sort_by(|a, b| {
+                a.total_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            if reverse {
+                items.reverse();
+            }
+            let arr = KapArray::new(vec![n], ArrayData::Nested(items));
+            return Ok(Rc::new(APLValue::Array(Rc::new(arr))));
+        }
+        // Multi-axis: sort first-axis cells using total_cmp.
+        let first_axis = dims[0];
+        let cell_size: usize = dims[1..].iter().product();
+        let mut indices: Vec<usize> = (0..first_axis).collect();
+        indices.sort_by(|&a, &b| {
+            for i in 0..cell_size {
+                let va = right_val.value_at(a * cell_size + i);
+                let vb = right_val.value_at(b * cell_size + i);
+                let cmp = va.total_cmp(&vb).unwrap_or(std::cmp::Ordering::Equal);
+                if cmp != std::cmp::Ordering::Equal {
+                    return if reverse { cmp.reverse() } else { cmp };
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+        let total: usize = first_axis * cell_size;
+        let mut sorted: Vec<AplRef<APLValue>> = Vec::with_capacity(total);
+        for &idx in &indices {
+            for i in 0..cell_size {
+                sorted.push(Rc::new(right_val.value_at(idx * cell_size + i)));
+            }
+        }
+        let arr = KapArray::new(dims.clone(), ArrayData::Nested(sorted));
+        Ok(Rc::new(APLValue::Array(Rc::new(arr))))
     }
 
     /// Logical not `∼ x`: element-wise `1 - x` for boolean arrays (0↔1). Dyadic-free;

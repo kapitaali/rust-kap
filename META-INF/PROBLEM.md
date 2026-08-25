@@ -125,3 +125,54 @@ HEAD): `(2÷⍨≢) 8` → port `1`, oracle `1/2` (bound-constant commute with a
 trailing `≢` in paren form; a separate paren-adverb bug).
 
 Gates green throughout (lib 96/0 · curated 1/0); no debug edits in tree.
+
+---
+
+# PROBLEM 3 — `⇐` RHS multi-function chain builds Train instead of nested Apply (stat:median last mile)
+
+## Symptom
+`stat:median 1 2 3 4` → port `(1)`, oracle `5/2`. The body
+`2 ÷⍨ +/ (¯1r2 0+2÷⍨≢)⍛⊇ ∧` parses (no error), and the pieces ALL
+evaluate correctly in isolation, but the full body gives wrong result.
+
+## Root cause (AST diff confirmed)
+The value-strand arm in `parse_function_expr_impl` builds a 2-train chain
+(`Train[Train[2,÷⍨], Train[+/, inner]]`) for `2 ÷⍨ +/ F`. But Kotlin
+builds nested **Apply** instructions: `Apply(÷⍨, 2, Apply(+/, F))`. The
+2-train `Train[Train[2,÷⍨], +/]` evaluates as atop: `÷⍨(+(y))` — which
+applies `÷⍨` to the result of `+/`, NOT `÷⍨(2, +/F)` (dyadic).
+
+In the unparen form `2 ÷⍨ +/ (…)⍛⊇ ∧`, the `⍛` also binds the WHOLE
+accumulated chain as its left (wrong — should bind only the preceding
+function). The parenthesized form `2 ÷⍨ +/ ((…)⍛⊇ ∧)` works because
+the parens isolate the `⍛` binding.
+
+## Evidence (all pieces work in isolation)
+```
+inner ⇐ (¯1r2 0+2÷⍨≢)⍛⊇ ∧ ⋄ inner 1 2 3 4   → (2 3)   oracle ⟨2 3⟩ ✓
++/inner 1 2 3 4                                   → 5                   ✓
+2 ÷⍨ +/inner 1 2 3 4                              → 5/2                 ✓
+```
+But `m ⇐ 2 ÷⍨ +/ (…)⍛⊇ ∧ ⋄ m 1 2 3 4` → `(1)` — the train
+structure evaluates wrong because `÷⍨` is applied monadically (atop),
+not dyadically (with `2` as left arg).
+
+## Fix direction
+The value-strand arm's continuation should build nested **Apply**
+instructions for the function chain (Kotlin `processFn` creates
+`FunctionCall1Arg`/`FunctionCall2Arg`, not `Chain2`). The 2-train
+(atop) is ONLY for the `(⍛⊇∧)` part where functions compose without
+data args. For `2 ÷⍨ +/ F`, `2` is a DATA left arg of `÷⍨`, and
+`+/ F` is the right arg — a dyadic Apply, not a train.
+
+## What WORKS now (uncommitted, gates green)
+- Paren-grouped value/fn accumulator (`parse_paren_vfn_chain`):
+  `(¯1r2 0+2÷⍨≢) 1 2 3 4` → `(3/2 2)` ✓
+- `(2÷⍨≢) 8` → `1/2` ✓ (pre-existing bug fixed)
+- `finish_fn_call` left-bind for nested fn-result (default Kotlin path)
+- `⍛` single-function right operand (multi-fn chain bug fixed)
+- Monadic `∧` (sort) / `∨` (sort descending) — `sort_array` evaluator
+- Rational index truncation in `index_to_i64` (`⊇` with `3/2` index)
+- `+/((…)⍛⊇ ∧) 1 2 3 4` → `5` ✓, `2 ÷⍨ +/((…)⍛⊇ ∧) 1 2 3 4` → `5/2` ✓
+
+Gates: lib 96/0 · curated 1/0.
