@@ -1740,6 +1740,33 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        // A function atom followed by an adverb (`(f g)¨ xs`, `λ…/ ys`): bind the
+        // derived function `atom op` and apply it to the following data — same
+        // semantics as the symbol form (`dbl¨`) handled below, which a paren-atom
+        // first cannot reach (it is not a Symbol, so that arm never fires).
+        // MUST run before the monadic-apply block below, which would otherwise
+        // treat the adverb glyph as the data operand.
+        if matches!(
+            &first,
+            Instr::Train { .. } | Instr::Lambda { .. } | Instr::DynamicRef { .. }
+        ) && matches!(
+            self.peek().map(|t| &t.token),
+            Some(Token::Literal(LiteralValue::Symbol { ref name, .. }))
+                if Self::is_adverb(name)
+        )
+        {
+            let op = self.parse_primary()?; // consume the adverb symbol
+            let derived = Instr::Derived {
+                func: Box::new(first),
+                op: Box::new(op),
+            };
+            let operand = self.parse_apply()?;
+            return Ok(Instr::Apply {
+                fn_expr: Box::new(derived),
+                left: None,
+                right: Box::new(operand),
+            });
+        }
         // A leading *function atom* that cannot be a value — a train, a lambda, or a
         // derived (adverb) operator — is a monadic/dyadic application `fn x` / `x fn y`
         // (e.g. `(f g) y`, `λ(x)x*2 5`, `+/ 1 2 3`). Bare symbols are handled below by the
@@ -1765,6 +1792,31 @@ impl<'a> Parser<'a> {
             let operand = self.parse_apply()?;
             return Ok(Instr::Apply {
                 fn_expr: Box::new(first),
+                left: None,
+                right: Box::new(operand),
+            });
+        }
+        // A function atom followed by an adverb (`(f g)¨ xs`, `λ…/ ys`): bind the
+        // derived function `atom op` and apply it to the following data — same
+        // semantics as the symbol form (`dbl¨`) handled below, which a paren-atom
+        // first cannot reach (it is not a Symbol, so that arm never fires).
+        if matches!(
+            &first,
+            Instr::Train { .. } | Instr::Lambda { .. } | Instr::DynamicRef { .. }
+        ) && matches!(
+            self.peek().map(|t| &t.token),
+            Some(Token::Literal(LiteralValue::Symbol { ref name, .. }))
+                if Self::is_adverb(name)
+        )
+        {
+            let op = self.parse_primary()?; // consume the adverb symbol
+            let derived = Instr::Derived {
+                func: Box::new(first),
+                op: Box::new(op),
+            };
+            let operand = self.parse_apply()?;
+            return Ok(Instr::Apply {
+                fn_expr: Box::new(derived),
                 left: None,
                 right: Box::new(operand),
             });
@@ -2767,6 +2819,16 @@ impl<'a> Parser<'a> {
         let two_train = funcs.len() == 2 && funcs.iter().all(|f| self.is_definite_function(f));
         if funcs.len() >= 2 && (all_funcs || left_bind) && (funcs.len() >= 3 || two_train || left_bind) {
             Some(Instr::Train { funcs, reverse: false, compose: false })
+        } else if funcs.len() == 2
+            && matches!(funcs[1], Instr::DynamicRef { .. })
+            && matches!(funcs[0], Instr::Symbol { .. } | Instr::Derived { .. } | Instr::Train { .. } | Instr::ValueOp { .. })
+        {
+            // `[fn, ⍞ref]`: the DynamicRef ALWAYS denotes a function (it is only
+            // resolvable inside a macro expansion), so a symbol/derived member in
+            // front of it can only be an atop — even when the symbol's function-ness
+            // cannot be verified at parse time (e.g. `toBoolean` in an unexpanded
+            // macro body). Kotlin resolves these names at evaluation time.
+            Some(Instr::Train { funcs, reverse: false, compose: false })
         } else if funcs.len() == 1 && Self::is_function_expr(&funcs[0]) {
             Some(Instr::Train { funcs, reverse: false, compose: false })
         } else if !funcs.is_empty()
@@ -3016,8 +3078,13 @@ impl<'a> Parser<'a> {
                 if let Some(train) = self.try_parse_train() {
                     return Ok(train);
                 }
+                // Not a train — fall back to a single function expression, e.g.
+                // `((f ⍞g)¨ arg)` inside a `⇐` RHS: the outer group holds one
+                // derived function plus its DATA argument, which is an
+                // application, not a train. parse_function_expr parses the
+                // derived fn and leaves `arg` for the caller's apply loop.
                 self.pos = save;
-                Err(self.err("expected a function in train"))
+                self.parse_function_expr()
             }
             Token::Literal(lv) => {
                 // A literal value is a valid train member (enables left-bind e.g. `(10 +)`).
