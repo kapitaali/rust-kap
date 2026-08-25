@@ -2821,18 +2821,29 @@ impl<'a> Parser<'a> {
         let left_bind = funcs.len() == 2
             && matches!(funcs[0], Instr::Literal(_) | Instr::Array { .. } | Instr::Empty)
             && matches!(funcs[1], Instr::Symbol { .. } | Instr::Derived { .. } | Instr::Lambda { .. } | Instr::Train { .. });
+        // Oracle-verified (kap-jvm-text, 2026-08-25): implicit juxtaposition of
+        // functions inside parens is a RIGHT-ASSOCIATED ATOP chain — NOT an APL
+        // fork. Evidence: `(≢,≢) 7 8 9` → 1 (fork would be ⟨3 3⟩);
+        // `(+×÷) 6` → 1 = +∘(×∘(÷6))·signum; `(A + D) y` → A+(D y) elementwise.
+        // Explicit forks use the «» glyphs. So fold members right-associated:
+        // [f0, f1, f2] ⇒ Train[f0, Train[f1, f2]].
         let two_train = funcs.len() == 2 && funcs.iter().all(|f| self.is_definite_function(f));
-        // Constant-fork: a leading VALUE member (`(1r2 0 + 2÷⍨≢)` from stat.kap's
-        // median) followed by >= 2 definite functions is a fork whose left tine
-        // supplies a constant array. The evaluator already handles Train members
-        // that evaluate to values in tine position.
-        let const_fork = funcs.len() >= 3
-            && matches!(funcs[0], Instr::Literal(_) | Instr::Array { .. } | Instr::Empty)
-            && funcs[1..].iter().all(|f| self.is_definite_function(f));
-        if (funcs.len() >= 2 && (all_funcs || left_bind) && (funcs.len() >= 3 || two_train || left_bind))
-            || const_fork
-        {
-            Some(Instr::Train { funcs, reverse: false, compose: false })
+        if funcs.len() >= 2 && (all_funcs || left_bind) {
+            if funcs.len() == 2 {
+                Some(Instr::Train { funcs, reverse: false, compose: false })
+            } else {
+                // Right-fold: f0 ∘ (f1 ∘ (... fn)).
+                let mut it = funcs.into_iter().rev();
+                let mut cur = it.next().unwrap();
+                for f in it {
+                    cur = Instr::Train {
+                        funcs: vec![f, cur],
+                        reverse: false,
+                        compose: false,
+                    };
+                }
+                Some(cur)
+            }
         } else if funcs.len() == 2
             && matches!(funcs[1], Instr::DynamicRef { .. })
             && matches!(funcs[0], Instr::Symbol { .. } | Instr::Derived { .. } | Instr::Train { .. } | Instr::ValueOp { .. })
@@ -3153,6 +3164,7 @@ impl<'a> Parser<'a> {
             }
             Token::OpenParen => {
                 // Nested train or group of functions.
+                let open_pos = self.pos;
                 self.advance();
                 self.skip_newlines();
                 let save = self.pos;
