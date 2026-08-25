@@ -1264,6 +1264,14 @@ impl Engine {
             if op_name == "⍣" {
                 return self.apply_power_op(func, operand, left, right, env);
             }
+            // `wrapper ⍢ base` (Kotlin StructuralUnderOp, engine.kt:501):
+            // (wrapper ⍢ base) a = wrapper⁻¹(base(wrapper(a))). Functions whose
+            // inverse is themselves (⌽, -) support this via the generic
+            // inversibleStructuralUnder path; others error
+            // "under not supported for function" (common.kt:155).
+            if op_name == "⍢" {
+                return self.apply_under_op(func, operand, left, right, env);
+            }
             // `f int:proto v` (Kotlin ProtoOp / CallWithProtoFunctionImpl, proto.kt):
             // evaluate the proto value ONCE and thread it as the default-value
             // argument of every WithProto eval path the wrapped fn supports.
@@ -4723,6 +4731,14 @@ impl Engine {
                     self.eval_apply(func, &Some(l.clone()), right, env)
                 }
             },
+            // `-` negate is its own inverse (Kotlin SubAPLFunction evalInverse1Arg
+            // = itself; oracle: (-˝) 5 → -5). Monadic only.
+            "-" => match left {
+                None => self.eval_apply(func, &None, right, env),
+                Some(_) => Err(AplError::runtime(
+                    "-˝: inverse of this function is not supported".into(),
+                )),
+            },
             other => Err(AplError::runtime(format!(
                 "{}˝: inverse of this function is not supported",
                 other
@@ -7359,6 +7375,50 @@ impl Engine {
     /// ValueOp; the operand `Instr` kind plays the same role:
     ///
     /// - **Iterate** (`f⍣n`, operand is a value expr): evaluate the operand to a
+    /// `base ⍢ wrapper` (Kotlin StructuralUnderOp → StructuralUnderDerivedFunction,
+    /// operator.kt:387). NOTE the operand order: combineFunction(fn0=LEFT,
+    /// fn1=RIGHT) stores baseFn=fns[0], wrapperFn=fns[1], and eval1Arg delegates
+    /// to `wrapperFn.evalWithStructuralUnder1Arg(baseFn, …)` =
+    /// inversibleStructuralUnder1Arg (functions.kt:267):
+    ///     v    = wrapper(a)
+    ///     res' = base(v)
+    ///     res  = wrapper⁻¹(res')
+    /// Wrappers whose evalInverse1Arg is themselves (⌽ reverse, - negate)
+    /// are supported here; others error with Kotlin's
+    /// StructuralUnderNotSupported text "under not supported for function"
+    /// (common.kt:155). Dyadic under reports the same unsupported error for now.
+    fn apply_under_op(
+        &self,
+        base: &Instr,
+        wrapper: &Instr,
+        left: &Option<Box<Instr>>,
+        right: &Box<Instr>,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let unsupported = || {
+            AplError::runtime("under not supported for function".to_string())
+        };
+        if left.is_some() {
+            return Err(unsupported());
+        }
+        // v = wrapper(a)
+        let wa = self.eval_apply(wrapper, &None, right, env)?;
+        // res' = base(v)
+        let bwa = self.eval_apply(base, &None, &Box::new(Instr::Value(wa.clone())), env)?;
+        // res = wrapper⁻¹(res'). Reuse the port's generic inverse machinery (the
+        // same evalInverse* dispatch that the `˝` adverb uses): evaluating
+        // Derived{wrapper, "˝"} applies wrapper's inverse to bwa. Wrappers with
+        // no inverse surface Kotlin's unsupported error.
+        let inv_wrapper = Instr::Derived {
+            func: Box::new(wrapper.clone()),
+            op: Box::new(Instr::Symbol {
+                name: "˝".to_string(),
+                namespace: None,
+            }),
+        };
+        self.eval_apply(&inv_wrapper, &None, &Box::new(Instr::Value(bwa)), env)
+    }
+
     ///   number and apply `fn` to the argument exactly n times. Negative n →
     ///   Kotlin text "Argument to power is negative: N". Monadic only.
     /// - **Until** (`f⍣g`, operand parses as a function atom): repeatedly apply

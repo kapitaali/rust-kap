@@ -651,6 +651,12 @@ fn curated_kap_parity() {
         // stat.kap `avg ⇐ +/«÷»≢` = (sum y) ÷ (tally y).
         ("+/«÷»≢ 1 2 3 4", "5/2"),
         ("avg ⇐ +/«÷»≢ ⋄ avg 1 2 3 4 5 6", "7/2"),
+        // Phase 7 (P7b): dual / structural-under `base ⍢ wrapper`
+        // (Kotlin StructuralUnderOp, engine.kt:501): wrapper⁻¹ ∘ base ∘ wrapper.
+        ("(⌽⍢⌽) 1 2 3 4", "(4 3 2 1)"),
+        ("(-⍢-) 5", "¯5"),
+        ("(-⍢⌽) 1 2 3", "(¯1 ¯2 ¯3)"),
+        ("(⌽⍢-) 5", "5"),
         // Phase 6 (P6): native quad constants + declare(:const) const enforcement.
         // Values are oracle-exact; the `Str`-vs-char-array `typeof` class name is a
         // separate deferred string-modeling gap (KNOWN-NONCONFORMANCE), not asserted here.

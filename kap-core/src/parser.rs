@@ -611,7 +611,21 @@ impl<'a> Parser<'a> {
             if let Some(Token::Literal(LiteralValue::Symbol { ref name, ref namespace })) =
                 self.peek().map(|t| &t.token)
             {
-                if name == "⍣" && Self::is_function_expr(&cur) {
+                // Dual / structural-under operator `wrapper ⍢ base` (Kotlin
+            // StructuralUnderOp, engine.kt:501 registerNativeOperator("⍢")).
+            // Binds after a FUNCTION exactly like ⍣: ValueOp carrying the base fn.
+            if name == "⍢" && Self::is_function_expr(&cur) {
+                self.advance();
+                self.skip_newlines();
+                let operand = self.parse_function_atom()?;
+                cur = Instr::ValueOp {
+                    func: Box::new(cur),
+                    op_name: "⍢".to_string(),
+                    operand: Box::new(operand),
+                };
+                continue;
+            }
+            if name == "⍣" && Self::is_function_expr(&cur) {
                     self.advance();
                     self.skip_newlines();
                     // Function-shaped operands (brace dfn, ⍞ref, name) parse as function
@@ -2792,6 +2806,19 @@ impl<'a> Parser<'a> {
                 return Ok(Instr::ValueOp {
                     func: Box::new(left),
                     op_name: "⍣".to_string(),
+                    operand: Box::new(operand),
+                });
+            }
+            // Dual / structural-under `base ⍢ wrapper`: ValueOp like ⍣ (Kotlin
+            // StructuralUnderOp, engine.kt:501). Evaluator applies
+            // wrapper⁻¹ ∘ base ∘ wrapper.
+            let is_dual = matches!(&t.token, Token::Literal(LiteralValue::Symbol { name, .. }) if name == "⍢");
+            if is_dual {
+                self.advance(); // consume ⍢
+                let operand = self.parse_function_atom()?;
+                return Ok(Instr::ValueOp {
+                    func: Box::new(left),
+                    op_name: "⍢".to_string(),
                     operand: Box::new(operand),
                 });
             }
