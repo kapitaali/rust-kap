@@ -3060,11 +3060,59 @@ impl<'a> Parser<'a> {
                             };
                         }
                     }
-                    return Ok(Instr::Train {
+                    // `2÷⍨≢` (stat.kap median): after the left-bind pair, a further
+                    // fn-atom (e.g. `≢`) extends the chain. Kotlin nests Chain2s
+                    // LEFT-ASSOCIATED (parser.kt:479–484 FnParseResult branch →
+                    // Chain2(prevFn, nextFn) = ATOP), NOT a flat fork — so
+                    // `2÷⍨≢` ≡ atop(bind(2,÷⍨), ≢) and median's
+                    // `2÷⍨ +/ F ⊇ ∧` folds pairwise too.
+                    let mut cur = Instr::Train {
                         funcs: vec![left, right],
                         reverse: false,
                         compose: false,
-                    });
+                    };
+                    loop {
+                        let more = match self.peek().map(|t| &t.token) {
+                            Some(Token::Literal(LiteralValue::Symbol { name, .. })) => {
+                                Self::is_primitive_op(name)
+                            }
+                            Some(Token::OpenParen) | Some(Token::LambdaToken)
+                            | Some(Token::ApplyToken) | Some(Token::LeftForkToken) => true,
+                            _ => false,
+                        };
+                        if !more {
+                            break;
+                        }
+                        let next_fn = self.parse_function_atom()?;
+                        // A trailing adverb on this member binds into it first
+                        // (same rule as above).
+                        let member = if let Some(Token::Literal(LiteralValue::Symbol {
+                            name: adv,
+                            namespace: None,
+                        })) = self.peek().map(|t| &t.token)
+                        {
+                            if Self::is_adverb(adv)
+                                && matches!(next_fn, Instr::Symbol { namespace: None, .. })
+                            {
+                                let adv = adv.clone();
+                                self.advance();
+                                Instr::Derived {
+                                    func: Box::new(next_fn),
+                                    op: Box::new(Instr::Symbol { name: adv, namespace: None }),
+                                }
+                            } else {
+                                next_fn
+                            }
+                        } else {
+                            next_fn
+                        };
+                        cur = Instr::Train {
+                            funcs: vec![cur, member],
+                            reverse: false,
+                            compose: false,
+                        };
+                    }
+                    return Ok(cur);
                 }
             }
         }

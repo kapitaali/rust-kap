@@ -2358,9 +2358,22 @@ impl Engine {
                         self.eval_apply(&funcs[0], &None, &Box::new(Instr::Value(gy)), env)
                     }
                     3 => {
-                        // Fork: (A y) B (C y)
-                        let ay = self.eval_apply(&funcs[0], &None, right, env)?;
-                        let cy = self.eval_apply(&funcs[2], &None, right, env)?;
+                        // Fork: (A y) B (C y). A VALUE tine (e.g. the bound constant
+                        // in `2÷⍨≢` → Train[2, Derived{÷,⍨}, ≢]) evaluates to itself
+                        // — Kotlin constant-tine semantics.
+                        let eval_tine = |s: &Self,
+                                         t: &Instr,
+                                         r: &Box<Instr>,
+                                         e: &AplRef<Environment>|
+                         -> Result<AplRef<APLValue>, AplError> {
+                            if Self::is_value(t) {
+                                s.eval_instr(t, e)
+                            } else {
+                                s.eval_apply(t, &None, r, e)
+                            }
+                        };
+                        let ay = eval_tine(self, &funcs[0], right, env)?;
+                        let cy = eval_tine(self, &funcs[2], right, env)?;
                         self.eval_apply(
                             &funcs[1],
                             &Some(Box::new(Instr::Value(ay))),
