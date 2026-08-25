@@ -71,28 +71,31 @@ in KNOWN-NONCONFORMANCE.md as beyond-oracle scope.
 
 ---
 
-# PROBLEM 2 — bound-constant commute `2÷⍨` (stat.kap median) — OPEN (2026-08-25)
+# PROBLEM 2 — bound-constant commute `2÷⍨` (stat.kap median) — PARTIALLY RESOLVED 2026-08-25
 
-`stat:median 1 2 3 4`: oracle `5/2`, port `(2 1 2/3 1/2)`. Root cause chain:
+The ⍨ INVERSION itself is FIXED and committed (4/4 oracle matrix passes —
+see PROGRESS-20260825.md P7d section). What remains open is the NEXT layer:
 
-1. Median body `(¯1r2 0+2÷⍨≢)` needs `2÷⍨≢` to parse as ONE derived atom
-   (`(2÷⍨)∘≢`). The port splits the leading literal into separate members.
-2. Deeper issue: **bound-constant commute is inverted in the port.**
-   `z ⇐ 2÷⍨ ⋄ z 8` → oracle `4` (=8÷2), port `1/4` (=2÷8).
-   Plain monadic commute matches (`÷⍨ 8` → 1 both).
+## Remaining: value-tine-in-fork semantics (median still diverges)
 
-Three attempted fixes (evaluator ⍨ bind-case ×2 shapes, parser
-bound-constant exemption in bind_operators_kotlin) each fixed one probe while
-breaking another — the shape flows through try_parse_train, impl's adverb arm,
-AND bind_operators_kotlin depending on context, so a single-site fix can't
-cover it. Reverted all three; tree back to committed state `9ba7eab`.
+`stat:median 1 2 3 4`: oracle `5/2`; port `(1/2 1 3/2 2)`.
+Body: `median ⇐ 2 ÷⍨ +/ (¯1r2 0+2÷⍨≢)⍛⊇ ∧`
 
-Correct design (next session): introduce a first-class `BoundConstant`
-concept at parse time — when a Literal/Array is followed by an adverb in
-function position, wrap as `Derived{func: Value(x), op}` AND make the ⍨
-monadic evaluator arm check `matches!(func, Instr::Literal(_) | Instr::Array{..})`
-(syntactic, not eval-based) to select bind semantics `y f x`. All three parse
-sites must agree. Verify against oracle probes:
-- `(2÷⍨) 8` → 4   · `z⇐2÷⍨ ⋄ z 8` → 4   · `÷⍨ 8` → 1   · `(÷⍨≢) y` → y÷≢y
+New evidence from oracle probes (kap-jvm-text, standard-lib):
+- `(¯1r2 0+2÷⍨≢) 1 2 3 4` → `⟨3/2 2⟩`   (port: `1`)
+- `(¯1r2 0+2÷⍨≢) 1 2 3 4 5` → `⟨2 5/2⟩`
+- `(¯1r2 0) 4`            → `⟨⟨-1/2 0⟩ 4⟩`  ← KEY: a bare VALUE in fn
+  position applied to y yields ⟨constant, y⟩ — Kotlin LeftAssignedFunction
+  (`functions.kt:628`) treats it as an ⍺-bind, NOT a constant-returning fn.
+- `(1r2 0+2) 9`           → `⟨⟨5/2 2⟩ 9⟩`
 
-Gates green throughout (lib 96/0 · curated 1/0); no partial edits left in tree.
+So the fork's left tine `(¯1r2 0)` is an ⍺-BIND of the strand; the fork then
+evaluates with that bound value participating differently than a plain
+constant tine. The port's train evaluator treats value tines as constants.
+Open question: exact evaluation order for `(A B C) y` when A is a bare value
+strand — likely A becomes LeftBind(A, B∘C) or similar per Kotlin
+makeLeftBindFunctionParseResult. Next step: read Kotlin functions.kt
+LeftAssignedFunction + how Chain3 handles a leading non-function member,
+then mirror in the port's Train eval.
+
+Gates green throughout (lib 96/0 · curated 1/0); no debug edits in tree.

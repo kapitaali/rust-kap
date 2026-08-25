@@ -1339,26 +1339,67 @@ impl Engine {
                 "∵" | "bitwise" => return self.adverb_bitwise(func, left, right, env),
                 // `⍨` commute (Kotlin commute.kt CommuteFunctionImpl):
                 // monadic f⍨ y = y f y; dyadic x f⍨ y = y f x (arguments swapped).
-                "⍨" | "commute" => match left {
-                    None => {
-                        let y = self.eval_instr(right, env)?.force(self)?;
-                        self.eval_apply(
-                            func,
-                            &Some(Box::new(Instr::Value(y.clone()))),
-                            &Box::new(Instr::Value(y)),
-                            env,
-                        )
-                    }
-                    Some(l) => {
-                        let x = self.eval_instr(l, env)?.force(self)?;
-                        let y = self.eval_instr(right, env)?.force(self)?;
-                        // x f⍨ y = y f x  → left arg = y, right arg = x.
-                        self.eval_apply(
-                            func,
-                            &Some(Box::new(Instr::Value(y))),
-                            &Box::new(Instr::Value(x)),
-                            env,
-                        )
+                // BIND case (Kotlin CommuteFunctionImpl's ConstantFunction check):
+                // when the function operand is syntactically a *value* — a bound
+                // constant like `z ⇐ 2÷⍨` — monadic call means `y f x` with x = that
+                // constant (`z 8` → 8÷2 = 4). Gate on INSTR SHAPE (Literal/Array),
+                // not eval-as-value: evaluating a Symbol func as a value errors and
+                // regresses plain `÷⍨ 8 → 1`.
+                "⍨" | "commute" => {
+                    let bind_const: Option<APLValue> = if left.is_none() {
+                        match func.as_ref() {
+                            Instr::Literal(LiteralValue::Number(n)) => {
+                                Some(APLValue::Number(n.clone()))
+                            }
+                            Instr::Literal(_) => None,
+                            Instr::Array { elements } => {
+                                let mut vals: Vec<AplRef<APLValue>> =
+                                    Vec::with_capacity(elements.len());
+                                for e in elements {
+                                    let v = self.eval_instr(e, env)?.force(self)?;
+                                    vals.push(v);
+                                }
+                                Some(APLValue::Array(Rc::new(KapArray::new(
+                                    vec![vals.len()],
+                                    ArrayData::Nested(vals),
+                                ))))
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    match left {
+                        None => {
+                            if let Some(x) = bind_const {
+                                let y = self.eval_instr(right, env)?.force(self)?;
+                                self.eval_apply(
+                                    &Instr::Symbol { name: adv_name.clone(), namespace: None },
+                                    &Some(Box::new(Instr::Value(y))),
+                                    &Box::new(Instr::Value(Rc::new(x))),
+                                    env,
+                                )
+                            } else {
+                                let y = self.eval_instr(right, env)?.force(self)?;
+                                self.eval_apply(
+                                    func,
+                                    &Some(Box::new(Instr::Value(y.clone()))),
+                                    &Box::new(Instr::Value(y)),
+                                    env,
+                                )
+                            }
+                        }
+                        Some(l) => {
+                            let x = self.eval_instr(l, env)?.force(self)?;
+                            let y = self.eval_instr(right, env)?.force(self)?;
+                            // x f⍨ y = y f x  → left arg = y, right arg = x.
+                            self.eval_apply(
+                                func,
+                                &Some(Box::new(Instr::Value(y))),
+                                &Box::new(Instr::Value(x)),
+                                env,
+                            )
+                        }
                     }
                 },
                 // `∵` (BitwiseOp, Kotlin bitwise_ops.kt): a one-arg operator that derives the

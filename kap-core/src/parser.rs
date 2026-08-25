@@ -593,8 +593,13 @@ impl<'a> Parser<'a> {
             // An operator binding on a VALUE (`1 / 2`, the `1/2` rational literal
             // inside ⍎) is not operator application — Kotlin's processFn only
             // calls parseOperator after a FUNCTION. Legacy handles these shapes;
-            // signal the caller to retry from statement start.
-            if !Self::is_function_expr(&cur) {
+            // signal the caller to retry from statement start. EXCEPTION: a
+            // *bound constant* before an adverb (`(2÷⍨) 8` → 4, `z ⇐ 2÷⍨`) IS
+            // valid Kap: fall through to the adverb arm below which wraps it as
+            // Derived{Literal(x), adverb} (evaluator bind case: y f x).
+            if !Self::is_function_expr(&cur)
+                && !matches!(cur, Instr::Literal(_) | Instr::Array { .. } | Instr::Empty)
+            {
                 if let Some(t) = self.peek().map(|t| t.token.clone()) {
                     if let Token::Literal(LiteralValue::Symbol { ref name, .. }) = t {
                         if Self::is_adverb(name)
@@ -3035,7 +3040,26 @@ impl<'a> Parser<'a> {
                     _ => false,
                 };
                 if next_is_fn_atom {
-                    let right = self.parse_function_atom()?;
+                    let mut right = self.parse_function_atom()?;
+                    // `2÷⍨` (Kotlin parser.kt:955–962 + makeLeftBindFunction):
+                    // a bound-constant left (`2`) followed by a function (`÷`)
+                    // whose adverb (`⍨`) follows — the adverb binds INTO the
+                    // right member FIRST, then the left-bind train forms:
+                    // Train[Literal(2), Derived{÷,⍨}]; called with y → y ÷ 2.
+                    if let Some(Token::Literal(LiteralValue::Symbol { name: adv, namespace: None })) =
+                        self.peek().map(|t| &t.token)
+                    {
+                        if Self::is_adverb(adv)
+                            && matches!(right, Instr::Symbol { namespace: None, .. })
+                        {
+                            let adv = adv.clone();
+                            self.advance();
+                            right = Instr::Derived {
+                                func: Box::new(right),
+                                op: Box::new(Instr::Symbol { name: adv, namespace: None }),
+                            };
+                        }
+                    }
                     return Ok(Instr::Train {
                         funcs: vec![left, right],
                         reverse: false,
