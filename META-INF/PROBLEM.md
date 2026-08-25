@@ -40,6 +40,34 @@ Candidate fix directions:
 Blocks P7c: `util.kap` line 6 `declare(:export (cols col))` cannot load while
 `cols`/`col` hold function values — which they always do after their `⇐`.
 
-## Status
-No fix attempted yet. Gates were GREEN before this investigation
-(lib 96/0, curated_kap_parity 1/0); no debug eprintln! left in the tree.
+## Status (updated 2026-08-25, P7c-2)
+The declare(...) half is FIXED and committed (`6441a30`). Remaining blocker narrowed:
+
+`(f ⍞g)` — a known user function followed by a `⍞` DynamicRef inside parens —
+fails `expected a function in train` / `unexpected token in primary`, which
+blocks util.kap's filter body `(toBoolean ⍞fn)¨ arg`. Two attempted fixes did
+not resolve it:
+1. `is_definite_function`: added `DynamicRef => true` and
+   `self.is_known_fn(...)` for symbols (now an instance method; both call sites
+   updated). Gates stayed green but the repro still fails.
+2. Verified parse_function_atom's ApplyToken arm handles `⍞g` standalone
+   (`⍞g 5` → works), so the failure is in how try_parse_train's member loop or
+   the primary OpenParen arm sequences these two members.
+
+Next diagnostic: add a temporary eprintln! in try_parse_train's member loop
+showing each parsed member variant, run `(f ⍞g)`, then remove it. That will
+pin whether member 2 parses at all or the classifier rejects [Symbol, DynamicRef].
+
+Also confirmed by oracle probing (documented for P7c):
+- Oracle's OWN util.kap filter FAILS at call time ("No arguments specified for
+  function") — its body does `arg ← arg` on a macro-bound :value, which Kotlin
+  rejects. So full filter parity is impossible; matching definition-time parsing
+  is the correct goal.
+- Oracle call syntax is `filter (arg) {fn}` — `:value` REQUIRES parentheses
+  (Kotlin ValueSyntaxRule.isValid = token is OpenParen). Bare `1 2 3 filter {…}`
+  is invalid in the oracle too.
+- Port defsyntax expansion of `(:value v :function f)` works correctly in
+  isolation: `defsyntax m2 (:value v :function f) { (⍞f¨ v) } ⋄ m2 (1 2 3 4) {2|⍵}`
+  → `(1 0 1 0)`. Only bodies containing `(known-fn ⍞ref)` fail.
+
+Gates GREEN throughout (lib 96/0, curated 1/0).

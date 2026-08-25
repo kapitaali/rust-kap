@@ -2760,11 +2760,11 @@ impl<'a> Parser<'a> {
         // like `(a b c d e)` is a *list literal* of symbols (see `declare`), not a
         // 5-function train. Using `is_function_expr` here (which admits ANY symbol)
         // would wrongly turn `(a b c d e)` into a 5-train.
-        let all_funcs = funcs.iter().all(Self::is_definite_function);
+        let all_funcs = funcs.iter().all(|f| self.is_definite_function(f));
         let left_bind = funcs.len() == 2
             && matches!(funcs[0], Instr::Literal(_) | Instr::Array { .. } | Instr::Empty)
             && matches!(funcs[1], Instr::Symbol { .. } | Instr::Derived { .. } | Instr::Lambda { .. } | Instr::Train { .. });
-        let two_train = funcs.len() == 2 && funcs.iter().all(Self::is_definite_function);
+        let two_train = funcs.len() == 2 && funcs.iter().all(|f| self.is_definite_function(f));
         if funcs.len() >= 2 && (all_funcs || left_bind) && (funcs.len() >= 3 || two_train || left_bind) {
             Some(Instr::Train { funcs, reverse: false, compose: false })
         } else if funcs.len() == 1 && Self::is_function_expr(&funcs[0]) {
@@ -2782,7 +2782,7 @@ impl<'a> Parser<'a> {
     /// A *definite* function expression suitable for a 2-train (`f g` atop): a primitive
     /// symbol, a known function/operator symbol, a lambda, a derived adverb, or a nested
     /// train. Excludes bare variable symbols (which may hold a value at runtime) and literals.
-    fn is_definite_function(e: &Instr) -> bool {
+    fn is_definite_function(&self, e: &Instr) -> bool {
         match e {
             Instr::Symbol { name, namespace } => {
                 // A primitive/identity symbol, OR a namespace-qualified name
@@ -2791,12 +2791,18 @@ impl<'a> Parser<'a> {
                 // treat as a definite function in a 2-train. This lets `(⊣ io:print)`
                 // parse as an atop; a bare local variable (`x` in `(⌷x)`) stays
                 // non-definite so it parses as the monadic application `⌷ x` instead.
+                // A KNOWN user-defined function (`(toBoolean ⍞fn)`) is also definite.
                 Self::is_primitive_op(name)
                     || name == "⊢"
                     || name == "⊣"
                     || (namespace.is_some() && namespace.as_deref() != Some("keyword"))
+                    || self.is_known_fn(name, namespace)
             }
             Instr::Derived { .. } | Instr::OpCall { .. } | Instr::Lambda { .. } | Instr::Train { .. } | Instr::ValueOp { .. } => true,
+            // `⍞name` (DynamicRef) ALWAYS means "fetch the value bound to name as a
+            // function" — never a data variable — so it is a definite function for
+            // train members (util.kap filter body `(toBoolean ⍞fn)¨ arg`).
+            Instr::DynamicRef { .. } => true,
             _ => false,
         }
     }
