@@ -462,6 +462,28 @@ impl<'a> Parser<'a> {
                             left_args.push(self.expand_macro(&m)?);
                             continue;
                         }
+                        // `declare(…)` structural special form — same rationale as the
+                        // legacy parse_primary arm: fn-valued members of an export list
+                        // must NOT be classified as trains (util.kap:6).
+                        if name == "declare"
+                            && self
+                                .toks
+                                .get(self.pos + 1)
+                                .map(|t| matches!(t.token, Token::OpenParen))
+                                == Some(true)
+                        {
+                            self.advance(); // consume 'declare'
+                            let arg = self.parse_declare_special()?;
+                            left_args.push(Instr::Apply {
+                                fn_expr: Box::new(Instr::Symbol {
+                                    name: "declare".to_string(),
+                                    namespace: None,
+                                }),
+                                left: None,
+                                right: Box::new(arg),
+                            });
+                            continue;
+                        }
                         // defsyntax/defsyntaxsub DEFINITIONS are keyword-forms only
                         // legacy parse_expr knows; bail to it from statement start
                         // BEFORE the name can strand as an operand.
@@ -3036,6 +3058,120 @@ impl<'a> Parser<'a> {
         )
     }
 
+    /// Structural `declare(…)` parser (Kotlin DeclareToken). Consumes
+    /// `declare ( <keyword> <target>? )` — already positioned AFTER the `declare`
+    /// symbol — and returns `Array[keyword, target]` exactly as `eval_declare`
+    /// expects. The target is a Symbol, a parenthesised list of Symbols (raw scan:
+    /// NO train/operator classification, so fn-valued names stay plain symbols),
+    /// or any other single token's primary (no-op per oracle tolerance).
+    fn parse_declare_special(&mut self) -> Result<Instr, AplError> {
+        self.skip_newlines();
+        self.expect(Token::OpenParen, "expected '(' after declare")?;
+        self.skip_newlines();
+        // Directive keyword: a :keyword-namespaced symbol (`:export`, `:const`, …).
+        let keyword = match self.peek() {
+            Some(t) => match &t.token {
+                Token::Literal(LiteralValue::Symbol { name, namespace }) => {
+                    let kw = name.clone();
+                    debug_assert!(namespace.as_deref() == Some("keyword") || !kw.is_empty());
+                    self.advance();
+                    kw
+                }
+                _ => {
+                    // `declare()` with no directive: consume through ')' as a no-op.
+                    self.skip_to_close_paren()?;
+                    return Ok(Instr::Array { elements: vec![] });
+                }
+            },
+            None => return Err(self.err("unexpected end of input in declare")),
+        };
+        self.skip_newlines();
+        // Target: either a bare Symbol or a `( name name … )` list scanned RAW.
+        let target = match self.peek().map(|t| &t.token) {
+            Some(Token::Literal(LiteralValue::Symbol { .. })) => {
+                let t = self.peek().unwrap().token.clone();
+                if let Token::Literal(LiteralValue::Symbol { name, namespace }) = t {
+                    self.advance();
+                    Instr::Symbol { name, namespace }
+                } else {
+                    unreachable!()
+                }
+            }
+            Some(Token::OpenParen) => {
+                self.advance(); // consume (
+                let mut names = Vec::new();
+                loop {
+                    self.skip_newlines();
+                    match self.peek() {
+                        Some(t) if matches!(t.token, Token::CloseParen) => {
+                            self.advance();
+                            break;
+                        }
+                        Some(t) => match &t.token {
+                            Token::Literal(LiteralValue::Symbol { name, namespace }) => {
+                                names.push(Instr::Symbol {
+                                    name: name.clone(),
+                                    namespace: namespace.clone(),
+                                });
+                                self.advance();
+                            }
+                            _ => {
+                                // Non-symbol member inside the list: skip the whole
+                                // group raw (oracle tolerance for odd shapes).
+                                self.skip_to_close_paren()?;
+                                break;
+                            }
+                        },
+                        None => return Err(self.err("unexpected end of input in declare list")),
+                    }
+                }
+                Instr::Array { elements: names }
+            }
+            _ => Instr::Empty,
+        };
+        self.skip_newlines();
+        self.expect(Token::CloseParen, "expected ')' after declare arguments")?;
+        Ok(Instr::Array {
+            elements: vec![
+                Instr::Symbol {
+                    name: keyword,
+                    namespace: Some("keyword".to_string()),
+                },
+                target,
+            ],
+        })
+    }
+
+    /// Skip tokens to the matching close paren of the CURRENT nesting level
+    /// (assumes the caller has consumed the opening paren of this level).
+    fn skip_to_close_paren(&mut self) -> Result<(), AplError> {
+        let mut depth = 1usize;
+        while depth > 0 {
+            match self.peek() {
+                Some(t) => match &t.token {
+                    Token::OpenParen => {
+                        depth += 1;
+                        self.advance();
+                    }
+                    Token::CloseParen => {
+                        depth -= 1;
+                        self.advance();
+                    }
+                    _ => {
+                        self.advance();
+                    }
+                },
+                None => return Err(self.err("unexpected end of input: missing ')'")),
+            }
+        }
+        Ok(())
+    }
+
+    /// Peek ahead `n` tokens without consuming.
+    fn peek_at(&self, n: usize) -> Option<&SpannedToken> {
+        self.toks.get(self.pos + n)
+    }
+
     /// primary := number | char | string | symbol | ( expr ) | [ elements ] | ⍬
     fn parse_primary(&mut self) -> Result<Instr, AplError> {
         let t = self.peek().ok_or_else(|| self.err("unexpected end of input"))?;
@@ -3051,6 +3187,25 @@ impl<'a> Parser<'a> {
                         let m = m.clone();
                         self.advance(); // consume the trigger symbol
                         return self.expand_macro(&m);
+                    }
+                    // `declare(…)` is a STRUCTURAL special form (Kotlin DeclareToken →
+                    // processExport): its argument is never evaluated and must NOT go
+                    // through the train/operator classifiers. Parsing it via the normal
+                    // apply path breaks on fn-valued members — `declare(:export (cols col))`
+                    // with `cols ⇐ …` turns the inner list into a 2-train (both names are
+                    // known functions), and the outer group then dies with "unexpected
+                    // token in primary". Scan the paren group RAW instead and build the
+                    // exact AST eval_declare expects: Array[keyword-symbol, target] where
+                    // target is Symbol / Array-of-Symbols. (Oracle: declare(:export (f))
+                    // → null.) Only fires when directly followed by '('.
+                    if name == "declare"
+                        && matches!(
+                            self.peek_at(1).map(|t| &t.token),
+                            Some(Token::OpenParen)
+                        )
+                    {
+                        self.advance(); // consume 'declare'
+                        return self.parse_declare_special();
                     }
                 }
                 self.advance();
