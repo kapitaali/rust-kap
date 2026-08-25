@@ -530,6 +530,19 @@ pub struct Environment {
     pub parent: Option<AplRef<Environment>>,
     /// Shared namespace registry (module-level symbol table + import/export metadata).
     pub ns_registry: Rc<NamespaceRegistry>,
+    /// The namespace this scope is *anchored* to (first non-None up the parent chain).
+    /// Set ONLY on the closure-wrapper scopes created for `⇐`/`∇` definitions made
+    /// while a `use(...)`d file's `namespace("…")` directive is in effect. A function
+    /// body's BARE symbol references must resolve against the DEFINING file's namespace
+    /// (Kotlin: a namespace directive scopes to the defining file), not whatever
+    /// namespace happens to be current when the function is later CALLED — `use()`
+    /// restores the caller's current namespace on return, so without this anchor,
+    /// exported fns cannot see their non-exported siblings ("unknown function: helper").
+    pub home_ns: RefCell<Option<String>>,
+    /// True for the per-file wrapper scope created by `eval_string_in_env_tolerant`.
+    /// Makes `define`/`assign` treat module-scope bare bindings exactly like the root
+    /// (route them into the namespace table) even though this scope has a parent.
+    pub acts_as_root: std::cell::Cell<bool>,
 }
 
 impl Environment {
@@ -539,6 +552,8 @@ impl Environment {
             symbols: RefCell::new(HashMap::new()),
             parent: Some(parent.clone()),
             ns_registry: parent.ns_registry.clone(),
+            home_ns: RefCell::new(None),
+            acts_as_root: std::cell::Cell::new(false),
         })
     }
 
@@ -563,10 +578,10 @@ impl Environment {
         env
     }
 
-    /// Is this the root (module-level) scope? Root scopes hold module bindings; child scopes
-    /// hold lexical (block-local) bindings.
+    /// Is this the root (module-level) scope — or a per-file wrapper acting as one?
+    /// Root scopes hold module bindings; child scopes hold lexical (block-local) ones.
     pub fn is_root(&self) -> bool {
-        self.parent.is_none()
+        self.parent.is_none() || self.acts_as_root.get()
     }
 
     /// Whether `name` is bound *lexically* (in this scope chain), before consulting the

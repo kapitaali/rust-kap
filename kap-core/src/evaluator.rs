@@ -80,10 +80,31 @@ impl Environment {
         }
         // 2. Module namespace table.
         let reg = &self.ns_registry;
-        match ns {
+        let direct = match ns {
             Some(nsname) => reg.ns_lookup(nsname, name),
             None => reg.resolve_bare(name),
+        };
+        if direct.is_some() {
+            return direct;
         }
+        // 3. HOME-NAMESPACE ANCHOR. A function defined inside a `use(...)`d file
+        // carries a closure env anchored to that file's namespace; after `use()`
+        // returns, the registry's current ns is restored to the CALLER's. A bare
+        // reference inside the fn body (`helper` from `class ⇐ {helper ⍵}`) must
+        // still resolve in the DEFINING namespace (Kotlin scopes a namespace()
+        // directive to its defining file). Walk up for the first anchor.
+        if ns.is_none() {
+            let mut anc: Option<&Environment> = Some(self);
+            while let Some(e) = anc {
+                if let Some(home) = e.home_ns.borrow().as_ref() {
+                    if let Some(v) = reg.ns_lookup(home, name) {
+                        return Some(v);
+                    }
+                }
+                anc = e.parent.as_deref();
+            }
+        }
+        None
     }
 
     /// Define a symbol. Routes to the namespace table when the binding is module-scoped
@@ -500,7 +521,17 @@ impl Engine {
         let toks = tokenise(src);
         let mut pos = 0;
         let mut last: AplRef<APLValue> = Rc::new(APLValue::Null);
+        // HOME-NAMESPACE ANCHOR for this file. All file statements evaluate in a
+        // wrapper scope anchored to the namespace that is current at each statement
+        // (updated by `namespace("…")` directives inside the file). Functions defined
+        // here capture this wrapper as their closure env, so their bodies resolve
+        // bare sibling names against the DEFINING namespace even after `use()`
+        // restores the caller's current namespace.
+        let anchor = Environment::child(env);
+        anchor.acts_as_root.set(true);
         loop {
+            let ns_now = env.ns_registry.current_ns();
+            *anchor.home_ns.borrow_mut() = Some(ns_now);
             let fn_names: Vec<String> = env.function_names();
             let op_names: Vec<String> = env.operator_names();
             let macros = self.macros.borrow().clone();
@@ -515,7 +546,7 @@ impl Engine {
             match p.parse_statements() {
                 Ok(Some(instr)) => {
                     pos = p.pos;
-                    match self.eval_instr(&instr, env) {
+                    match self.eval_instr(&instr, &anchor) {
                         Ok(v) => last = v,
                         Err(e) => {
                             eprintln!("warning: use(): statement failed: {}", e);
@@ -1161,6 +1192,9 @@ impl Engine {
                 return self.eval_declare(right, env);
             }
         }
+        // Closure env captured from a resolved UserFn symbol (see below). `None` for
+        // inline lambdas/blocks, which evaluate in the caller's scope.
+        let mut lambda_env: Option<AplRef<Environment>> = None;
         let lambda = match fn_expr {
             Instr::Lambda { params, body } => Some((
                 params.clone(),
@@ -1169,7 +1203,12 @@ impl Engine {
             )),
             Instr::Symbol { name, namespace } => match env.lookup(name, namespace) {
                 Some(v) if matches!(v.as_ref(), APLValue::UserFn { .. }) => {
-                    if let APLValue::UserFn { params, split, body, env: _fenv } = v.as_ref() {
+                    if let APLValue::UserFn { params, split, body, env: fenv } = v.as_ref() {
+                        // Capture the DEFINING environment (closure), not the caller's.
+                        // Kotlin evaluates a fn body in a scope chained to where the fn
+                        // was defined, so sibling names in the defining namespace resolve.
+                        // (Without this, `use()`d fns can't see non-exported siblings.)
+                        lambda_env = Some(fenv.clone());
                         Some((params.clone(), *split, Rc::new((**body).clone())))
                     } else {
                         None
@@ -1215,6 +1254,7 @@ impl Engine {
                             body.as_ref(),
                             left,
                             right,
+                            env,
                             fenv,
                             Some(name),
                         );
@@ -1251,7 +1291,11 @@ impl Engine {
             _ => None,
         };
         if let Some((params, split, body)) = lambda {
-            return self.apply_user_fn(&params, split, &body, left, right, env, fn_name.as_deref());
+            // Use the captured closure (defining) env when the fn came from a symbol
+            // lookup; inline lambdas/blocks keep the caller env for BOTH args and body
+            // (their defining env IS the caller's). Args always evaluate in `env`.
+            let cenv = lambda_env.as_ref().unwrap_or(env);
+            return self.apply_user_fn(&params, split, &body, left, right, env, cenv, fn_name.as_deref());
         }
         // --- Value-right-arg operators (e.g. `f⍤1` rank, `f⍣n`/`f⍣g` power) ---
         // Kotlin APLOperatorValueRightArg (engine.kt:494 RankOperator). The operand is
@@ -1453,6 +1497,7 @@ impl Engine {
                         body,
                         left,
                         right,
+                        env,
                         fenv,
                         Some(&name),
                     );
@@ -1466,6 +1511,7 @@ impl Engine {
                     body,
                     left,
                     right,
+                    env,
                     fenv,
                     Some(&name),
                 );
@@ -2503,15 +2549,18 @@ impl Engine {
         body: &Instr,
         left: &Option<Box<Instr>>,
         right: &Box<Instr>,
+        caller_env: &AplRef<Environment>,
         closure_env: &AplRef<Environment>,
         self_name: Option<&str>,
     ) -> Result<AplRef<APLValue>, AplError> {
         let child = Environment::child(&closure_env);
-        // Evaluate args in the *calling* env (Kap passes by value/sharing).
-        let right_val = self.eval_instr(right, closure_env)?.force(self)?;
+        // Evaluate args in the *calling* env (Kap passes by value/sharing). The body
+        // scope chains to the *defining* env (`closure_env`) so sibling names in the
+        // defining namespace resolve — Kotlin scopes a namespace() to its defining file.
+        let right_val = self.eval_instr(right, caller_env)?.force(self)?;
         // Bind named params: first `split` to the left arg, the rest to the right arg.
         let left_val = match left {
-            Some(l) => Some(self.eval_instr(l, closure_env)?.force(self)?),
+            Some(l) => Some(self.eval_instr(l, caller_env)?.force(self)?),
             None => None,
         };
         // Argument-count validation (Kap raises on arity mismatch). Only enforced when the
@@ -7557,6 +7606,7 @@ impl Engine {
                         body.as_ref(),
                         &Some(Box::new(self.apl_to_instr(next.as_ref())?)),
                         &Box::new(self.apl_to_instr(curr.as_ref())?),
+                        env,
                         fenv,
                         None,
                     )?;
