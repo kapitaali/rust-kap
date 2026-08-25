@@ -479,6 +479,24 @@ impl Engine {
         src: &str,
         env: &AplRef<Environment>,
     ) -> Result<AplRef<APLValue>, AplError> {
+        // Kotlin's `use()` restores the *caller's* current namespace when the
+        // included file finishes (a `namespace("…")` directive inside a stdlib
+        // file is scoped to that file). The port's `namespace()` builtin sets the
+        // registry's `current` globally, so without this save/restore an included
+        // file would permanently leak its namespace into the REPL — leaving the
+        // interactive top-level in `man` (fhelp.kap) instead of `default`, which
+        // then surfaces as wrong constant-error texts (`man:x` vs oracle `default:x`).
+        let saved_ns = env.ns_registry.current.borrow().clone();
+        let result = self.eval_string_in_env_tolerant_inner(src, env);
+        env.ns_registry.current.replace(saved_ns);
+        result
+    }
+
+    fn eval_string_in_env_tolerant_inner(
+        &self,
+        src: &str,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
         let toks = tokenise(src);
         let mut pos = 0;
         let mut last: AplRef<APLValue> = Rc::new(APLValue::Null);
@@ -10319,6 +10337,35 @@ mod tests {
         assert_eq!(eval("2r4"), "1/2");
         assert_eq!(eval("¯2r4"), "¯1/2");
         assert_eq!(eval("6r9"), "2/3");
+    }
+
+    #[test]
+    fn eval_quad_constants_p6() {
+        // Native quad constants (Kotlin repl-builder.kt assignConstantVariable).
+        // NOTE: the `eval()` helper renders via format_value (plain, no quotes),
+        // so char vectors appear without surrounding double-quotes.
+        assert_eq!(eval("⎕A"), "ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+        assert_eq!(eval("⍴⎕A"), "(26)");
+        assert_eq!(eval("⎕a"), "abcdefghijklmnopqrstuvwxyz");
+        assert_eq!(eval("⍴⎕a"), "(26)");
+        assert_eq!(eval("⎕d"), "0123456789");
+        assert_eq!(eval("⍴⎕d"), "(10)");
+        assert_eq!(eval("⎕A[0]"), "A");
+        assert_eq!(eval("⎕A[0 1 2]"), "(A B C)");
+    }
+
+    #[test]
+    fn eval_const_enforcement_p6() {
+        // declare(:const …) marks an existing variable read-only; reassignment errors.
+        assert_eq!(eval("x ← 5 ⋄ declare(:const x) ⋄ x"), "5");
+        let e = Engine::new();
+        assert!(e
+            .eval_string("x ← 5 ⋄ declare(:const x) ⋄ x ← 6")
+            .is_err());
+        // Native quad constants are read-only too.
+        assert!(e.eval_string("⎕A ← 5").is_err());
+        // A plain (non-const) variable can be reassigned.
+        assert_eq!(eval("y ← 5 ⋄ y ← 6 ⋄ y"), "6");
     }
 
 

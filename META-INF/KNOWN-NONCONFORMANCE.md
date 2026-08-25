@@ -334,7 +334,17 @@ Known residual deltas in this family:
   incomplete operator applications. Error-class parity holds; exact text is an ERRORS.md item
   (ROADMAP §0.3).
 - **Quad-constant class name**: `typeof ⎕A` → oracle `kap:array`, port `kap:string`. The
-  port models char vectors as `APLValue::Str`; value content is identical.
+  port models char vectors as `APLValue::Str` (a flat string type) rather than a
+  character **array**, so `typeof "abc"` also reports `kap:string` where the oracle
+  reports `kap:array`. This is the **`Str`-vs-char-array string-modeling gap** (a P2/P5
+  string-representation item), NOT a P6 gap. P6's concrete deliverables — native
+  `⎕A ⎕a ⎕d` constants (value + shape + indexing, oracle-exact) and `declare(:const …)`
+  read-only enforcement (error text `Assignment to constant variable: <ns>:<name>`,
+  oracle-exact) — are COMPLETE as of 2026-08-25. The `man` namespace leak that surfaced
+  during P6 (the REPL's auto `use()` of stdlib left `current=man` from fhelp.kap, so the
+  const error read `man:x` instead of oracle `default:x`) was fixed by saving/restoring
+  the caller's namespace around `eval_string_in_env_tolerant` (Kotlin `use()` scoping).
+
 
 ---
 

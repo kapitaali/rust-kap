@@ -646,6 +646,21 @@ fn curated_kap_parity() {
         ("1 2 3 ! 4 5 6", "(4 10 20)"),    // element-wise binomial over arrays
         ("1 2 3 ! 2", "(2 1 0.0)"),
         ("1r2 + 1r2", "1"),                // whole-number rational renders as bare integer
+        // Phase 6 (P6): native quad constants + declare(:const) const enforcement.
+        // Values are oracle-exact; the `Str`-vs-char-array `typeof` class name is a
+        // separate deferred string-modeling gap (KNOWN-NONCONFORMANCE), not asserted here.
+        ("⎕A", "\"ABCDEFGHIJKLMNOPQRSTUVWXYZ\""),
+        ("⍴⎕A", "(26)"),
+        ("⎕a", "\"abcdefghijklmnopqrstuvwxyz\""),
+        ("⍴⎕a", "(26)"),
+        ("⎕d", "\"0123456789\""),
+        ("⍴⎕d", "(10)"),
+        ("⎕A[0]", "@A"),
+        ("⎕A[0 1 2]", "\"ABC\""),
+        // Error-text cases (verified side-by-side; the harness cannot assert messages):
+        //   x ← 5 ⋄ declare(:const x) ⋄ x ← 6   → "Assignment to constant variable: default:x"
+        //   ⎕A ← 5                              → "Assignment to constant variable: kap:⎕A"
+        //   declare(:const y) ⋄ y ← 5 ⋄ y       → "Assignment to constant variable: default:y"
         // Phase 6 breadth: … (range — Kotlin RangeFunction)
         ("1…5", "(1 2 3 4 5)"),
         ("\"a\"…\"e\"", "\"abcde\""),
