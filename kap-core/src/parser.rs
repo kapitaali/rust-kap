@@ -746,6 +746,37 @@ impl<'a> Parser<'a> {
                     continue;
                 }
             }
+            // Compose `∘` / reverse-compose `⍛` (Kotlin parseOperator :1290 —
+            // these are native two-arg operators, not symbols, so they need
+            // dedicated token arms). Binds after a FUNCTION: left = cur, right =
+            // parseFunctionForOperatorRightArg (SINGLE fn, op.kt:31).
+            if Self::is_function_expr(&cur) {
+                match self.peek().map(|t| t.token.clone()) {
+                    Some(Token::ComposeToken) => {
+                        self.advance();
+                        self.skip_newlines();
+                        let r = self.parse_function_atom()?;
+                        cur = Instr::Train {
+                            funcs: vec![cur, r],
+                            reverse: false,
+                            compose: true,
+                        };
+                        continue;
+                    }
+                    Some(Token::ReverseComposeToken) => {
+                        self.advance();
+                        self.skip_newlines();
+                        let r = self.parse_function_atom()?;
+                        cur = Instr::Train {
+                            funcs: vec![cur, r],
+                            reverse: true,
+                            compose: true,
+                        };
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
             // parseAxis (:1321): `f[axis]` wraps into AxisApplied.
             if let Some(t) = self.peek() {
                 if matches!(t.token, Token::OpenBracket) {
@@ -1788,6 +1819,50 @@ impl<'a> Parser<'a> {
                         right_fn,
                     };
                 }
+            }
+        }
+        // Compose `∘` / reverse-compose `⍛` after a function atom (legacy
+        // parse_apply path — bind_operators_kotlin handles these in the
+        // Kotlin path). `⍛` binds `first` as left, parses ONE fn as right,
+        // then chains the result as the new `first` for further application.
+        if Self::is_function_expr(&first) {
+            match self.peek().map(|t| t.token.clone()) {
+                Some(Token::ComposeToken) => {
+                    self.advance();
+                    self.skip_newlines();
+                    let r = self.parse_function_atom()?;
+                    first = Instr::Train {
+                        funcs: vec![first, r],
+                        reverse: false,
+                        compose: true,
+                    };
+                }
+                Some(Token::ReverseComposeToken) => {
+                    self.advance();
+                    self.skip_newlines();
+                    let r = self.parse_function_atom()?;
+                    first = Instr::Train {
+                        funcs: vec![first, r],
+                        reverse: true,
+                        compose: true,
+                    };
+                    // Trailing fn after compose: chain as 2-train atop
+                    // (e.g. `(…)⍛⊇ ∧` → `∧` chains on the compose result).
+                    let trailing = match self.peek().map(|t| &t.token) {
+                        Some(Token::Literal(LiteralValue::Symbol { name, .. })) => Self::is_primitive_op(name),
+                        Some(Token::OpenParen) | Some(Token::LambdaToken) | Some(Token::ApplyToken) | Some(Token::LeftForkToken) => true,
+                        _ => false,
+                    };
+                    if trailing {
+                        let next = self.parse_function_atom()?;
+                        first = Instr::Train {
+                            funcs: vec![first, next],
+                            reverse: false,
+                            compose: false,
+                        };
+                    }
+                }
+                _ => {}
             }
         }
         // A function atom followed by an adverb (`(f g)¨ xs`, `λ…/ ys`): bind the
