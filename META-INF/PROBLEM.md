@@ -1,171 +1,243 @@
-# PROBLEM.md — OPEN problems (rewritten 2026-08-25)
+# PROBLEM.md — OPEN problems (rewritten 2026-08-27 at `cd2b6bf`)
 
-*Problems 1–3 of the previous revision are CLOSED and moved out (see
-`PROGRESS-20260825.md` for their resolutions):*
+Every item below was **re-probed fresh on 2026-08-27** against the port and the
+oracle. Nothing here is carried over on trust. Probe form used throughout:
 
-- **P7c paren-group/nested-fn-group + `declare(:export …)`** — RESOLVED
-  (commits 6441a30, a996a24, 15ab3a7).
-- **Bound-constant commute `2÷⍨` (bare AND paren forms)** — RESOLVED:
-  `(2÷⍨≢) 8 → 1/2`, `f ⇐ 1 2+≢ ⋄ f 5 → (2 3)` oracle-exact (commit 7fc3db2).
-- **stat:median last mile (`⇐` RHS `⍛` binding)** — RESOLVED: inline,
-  unparenthesised, and `use("stat.kap")` forms all give `5/2` oracle-exact
-  (commits 49f1286, 21123ee, 004100f). The `⍛`/`∘` dedicated-token arms exist
-  in BOTH parser paths (bind_operators_kotlin ~:748 and parse_apply ~:1824);
-  `declare()` returns statement-complete instead of stranding into the next
-  ∇ definition.
+```bash
+# port
+printf 'EXPR\n' | ./target/debug/kap --no-standard-lib 2>&1 | grep -aE '>>> .|error|parse'
+# oracle
+printf 'EXPR\n' | ~/Apps/array/kap-jvm-text/bin/kap-jvm-text \
+  --lib-path=$HOME/Apps/array/kap-jvm-text/standard-lib 2>/dev/null | grep -aE '⊢ .|Error'
+```
 
-All gates green throughout: lib 96/0 · curated parity 1/0.
-No debug `eprintln!` lines left in the tree (working tree clean at 004100f
-plus an uncommitted ROADMAP P7-table status edit).
+State at time of writing: gates GREEN (lib **96/0**, curated **1/0**); working tree
+clean; `main == strings == feature/wheres-extra == origin/*` == `cd2b6bf`.
+
+## CLOSED since the previous revision (2026-08-25) — do NOT reopen
+
+Confirmed by fresh probe, not by memory:
+
+| old item | probe | port | oracle |
+|---|---|---|---|
+| OPEN-1 adjacent symbol literals | `'a 'b 'c` | `(a b c)` | `⟨default:a default:b default:c⟩` |
+| OPEN-2 destructuring in defsyntax | `use("structure.kap")` | CLEAN | — |
+| OPEN-3 `∙` inner product | `1 2 3 +∙× 1 2 3` | `14` | `14` |
+| OPEN-4 `throw` | `throw "x"` | `error: throw: x` | `Error at: 1:1: throw: x` |
+| OPEN-6 autoload noise | startup warnings | **6** (was 136) | — |
+
+OPEN-1 and OPEN-4 differ ONLY in display glyphs / error prefix (`⟨⟩` vs `()`,
+`default:` qualification, `Error at: L:C:`) — those are the tracked P8 renderer
+items, not value defects. `util.kap`, `stat.kap`, `structure.kap`, `io.kap`,
+`standard-lib.kap`, `thread.kap` all load **CLEAN**.
 
 ---
 
-# OPEN-1 — Adjacent symbol literals strand wrongly (blocks stat.kap `classify`, map.kap)
+# OPEN-A — `output3.kap:118`: axis-applied fn inside a fork tine (TWO gaps)
 
-## Symptom (oracle-vs-port, both captured)
+**Highest-value item.** This is the last blocker on `output3.kap`, which improved
+90/123 → **53/88** failures at `cd2b6bf` but still stops at the same line.
+
+```kap
+kap-stdlib/std/output3.kap:118
+    ((⌈arrayMaxWidth[0]÷⍺)↑[¯1+≢⍴⍵])«,»((-⌈arrayMaxWidth[1]÷⍺)↑[¯1+≢⍴⍵]) ⍵
 ```
-port : 'a 'b 'c   →  c            (only the LAST symbol survives)
-oracle: 'a 'b 'c  →  ⟨default:a default:b default:c⟩   (a proper 3-strand)
-port : 'a 1 2     →  (a 1 2)      (symbol + values strands fine)
+
+## Symptom — two SEPARATE defects, both isolated
+
 ```
-A leading symbol literal followed by MORE symbol literals loses all but the
-last one. Value-stranding after one symbol works.
+A1 (parse)      ⌽«,»(2↑[0]) ⍳6
+                port : parse error at 1:11: unexpected token in primary
+                oracle: ⟨5 4 3 2 1 0 0 1⟩
 
-## Where it bites
-- `stat.kap:21` `if (∧/ (typeof¨ ⍵) ∊ 'kap:integer 'kap:float 'kap:rational)`
-  → port: `parse error at 21:36: expected ')' after if condition`
-- `map.kap:13` same shape inside `'kap:map ≡ typeof m or 'kap:IllegalArgumentException int:throwNative …`
+A2 (evaluator)  (2↑[0])«,»((-2)↑[0]) ⍳6
+                port : error: unsupported axis operator: ↑
+                oracle: ⟨0 1 4 5⟩
+```
 
-## Evidence / ruled out
-- NOT the lexer swallowing whitespace: a single symbol parses; symbol-then-
-  numbers strand correctly; only symbol-followed-by-symbol collapses.
-- Suspect: `is_strand_operand` / the Kotlin-path accumulator treats a second
-  adjacent `Symbol` token as an OPERATOR position (or the first symbol as a
-  fn atom), so the strand loop never collects them.
+## Crucially — the constituents ALREADY WORK
+
+This is what makes it a combination bug, not missing axis support:
+
+```
+(2↑[0]) 1 2 3      → port (1 2)   oracle ⟨1 2⟩   ✓
+((-2)↑[0]) ⍳6      → port (4 5)   oracle ⟨4 5⟩   ✓
+((1+1)↑[0]) ⍳6     → port (0 1)   oracle ⟨0 1⟩   ✓
+2↑[¯1+1] 1 2 3     → port (1 2)   oracle ⟨1 2⟩   ✓
+(2↑)«,»((-2)↑) ⍳6  → port (0 1 4 5) oracle ⟨0 1 4 5⟩ ✓  (fixed in cd2b6bf)
+```
+
+So: axis-applied take works standalone; forks with left-bound tines work; **only
+axis + fork-tine together fails.**
+
+## Where to look
+
+- **A1** is a parse gap. Every fork site parses its members with
+  `parse_function_atom` (`parser.rs` fork arms at ~:715, ~:783, ~:2173, ~:2287,
+  ~:3350). The `f[axis]` → `Instr::AxisApplied` wrap lives on a different path
+  (`parser.rs` ~:884 allowlist) and is evidently not reached from the tine route.
+  Apply the session's own lesson: **position-dependent failure ⇒ diff the ROUTES**,
+  and TRACE which branch the tine takes before editing.
+- **A2** is an evaluator gap: `unsupported axis operator: ↑` comes from the
+  axis-operator dispatch (`evaluator.rs` ~:1122 `AxisApplied` arm region). The
+  two-gate pattern for axis support applies (`parser.rs` allowlist ~:884 AND the
+  evaluator dispatch arm) — see the skill's note that a function missing from the
+  allowlist STRANDS the axis and returns a silently wrong value.
 
 ## Open question
-Which gate misclassifies the SECOND adjacent symbol literal —
-`parse_value_kotlin`'s Symbol arm (it pushes ONE symbol per iteration but a
-following Symbol hits the operator-without-left-function check?) or the
-legacy strand loop's operand predicate?
+
+Does the fork-tine route build an `AxisApplied` node at all (then A2 is the only
+real gap and A1 is a missing token in a guard list), or does it never reach the axis
+wrap? **Dump the built instr at the fork member site first** — do not edit either
+guard speculatively. Three speculative parser edits were already burned in this area
+this session (`PROGRESS-20260826i.md`).
 
 ---
 
-# OPEN-2 — Destructuring assignment inside defsyntax bodies fails (blocks `when`/`unwindProtect`)
+# OPEN-B — `(n↑)`: a VARIABLE as a left-bind value
 
-## Symptom (minimal repro, port-only; oracle has no equivalent probe because
-its own structure.kap loads fine)
 ```
-defsyntax mywhen (… :repeat (entryList wInner) …) {
-  …
-  (cond fn) ← ↑entryList[i]        ← FAILS HERE
-  (⍞cond ⍬) and (res ← ⍞fn ⍬ ⋄ cont ← 0)
-  …
-}
-mywhen { (1){42} }
-→ error: destructuring assignment expected 2 values, got 1
+n ← 2 ⋄ (n↑) ⍳6
+port : error: unknown function: n
+oracle: ⟨0 1⟩
 ```
 
-## Evidence / ruled out
-- Top-level destructuring works: `(q0 r0) ← QR a0` shapes elsewhere in the
-  stdlib parse (math-kap uses them; those files get past this line).
-- `declare (:local a)` + plain assign INSIDE a defsyntax body works
-  (util.kap filter repro passes: `filt (1 2 3 4) {0=2|⍵}` → `(2 4)`).
-- So the failing piece is specifically DESTRUCTURING where the RHS is an
-  INDEXED expression `↑entryList[i]` evaluated inside macro-expansion scope —
-  either the `[i]` index suffix binds differently inside the macro body, or
-  `↑` (First) returns the element UNWRAPPED so destructure sees 1 value.
+Deliberate consequence of `6395485`. `is_value` (evaluator.rs) was widened to
+`Literal|Array|Empty|Apply|Index|BooleanOp|Value` but **`Symbol` was intentionally
+EXCLUDED**, because a bare symbol in a train is normally a FUNCTION reference and
+admitting it breaks plain 2-trains `(f g)`.
 
-## Open question
-Does `↑entryList[i]` evaluate to a 2-element array at that point (then the
-destructure arm has a bug), or does the index suffix mis-bind (returning the
-whole list = 1 value)? Probe `e ← ((1){2})((0){3}) ⋄ (c f) ← ↑e[0]` standalone.
-
-## Why it matters
-structure.kap defines `when` and `unwindProtect` for the whole stdlib; until
-this lands, every file that CALLS `when {…}` fails
-(`unknown function: kap:when` / destructuring error), which is the single
-largest source of the 136 startup warnings under the standard-lib autoload.
+So this cannot be fixed by widening `is_value` further — the parser must decide,
+at parse time, whether the symbol names a value or a function (Kotlin resolves this
+via the environment / `known_functions` seeding). Likely parser-side, in the same
+family as the `function_names()`/`operator_names()` sync rule already documented in
+the skill.
 
 ---
 
-# OPEN-3 — `∙` inner product unregistered (`undefined symbol: ∙`)
+# OPEN-C — `map.kap:13`: member-deref lambda + `@.≠`
 
 ```
-port : 1 2 3 +∙× 1 2 3  →  error: undefined symbol: ∙
-oracle: 1 2 3 +∙× 1 2 3  →  ⊢ 14
+use("map.kap") → parse error at 13:6  (18/24 statements fail)
+kap-stdlib/std/map.kap:13:   {⍺.(⍵)}/ m , (@.≠)⍛⊂ p
 ```
-Kotlin anchor: `engine.kt` registers the inner-product operator (grep
-`registerNativeOperator` for the bullet glyph); semantics = reduce of the
-LEFT fn over the outer product built by the RIGHT fn (`+.×` = matrix product).
-Needs TWO-GATE registration (`is_primitive_name` + `is_primitive_op`) plus an
-evaluator arm that builds the outer product then reduces. math-kap.kap uses
-`+∙×` (QR decomposition, lines 20–21).
 
-Note: `.×` (ASCII dot) is NOT the syntax — the oracle rejects `+.` with
-"Member dereference without argument". The glyph is U+2219 `∙`.
+Both constituents probed standalone:
+
+```
+{⍺.(⍵)}        port: parse error at 1:3: unexpected token in primary
+               oracle: Error at: 1:1: No arguments specified for function
+                       (i.e. the oracle PARSES it, then objects to zero args)
+
+(@.≠)          port: error: ≠ requires numbers
+               oracle: Error at: 1:2: No arguments specified for function
+
+@.≠ 1          port: error: ≠ requires numbers      oracle: 1
+(@.≠)⍛⊂ 1 2 3  port: error: ≠ requires numbers      oracle: ⟨⟨1 2 3⟩⟩
+```
+
+Two distinct problems:
+1. **`⍺.(⍵)` member dereference** — the port cannot parse the `.` postfix on `⍺`
+   (fails at col 3, i.e. at the `.`). The oracle parses it fine. Kotlin: the
+   MemberDereferenceToken `.` postfix rule in `parser.kt`.
+2. **`@.` is a CHAR LITERAL, not a dereference.** `@.` is the character `.`, so
+   `@.≠` is "char `.` left-bound to `≠`" — a left-bind of a CHAR. The port's
+   `≠ requires numbers` shows it is comparing numerically instead of accepting a
+   char operand. Note `cmp2_elements` was already fixed for char-vs-char (see
+   PROGRESS 2026-08-26); this path evidently does not reach it. **Verify which
+   compare path `@.≠ 1` takes before editing** — the operand here is char-vs-NUMBER,
+   which the oracle answers `1` (not equal), so the fix is "chars compare unequal to
+   numbers", not "chars compare as codepoints".
 
 ---
 
-# OPEN-4 — `throw` / native-exception surface unimplemented
+# OPEN-D — structural under: dyadic + pick-based
 
 ```
-port : throw "x"  →  error: undefined symbol: throw
-oracle: throw "x" →  Error at: 1:1: throw: x
+3 {⍵}⍢⌽ 1 2 3
+port : error: under not supported for function
+oracle: ⟨1 2 3⟩
 ```
-Blocks:
-- `stat.kap:20` `1≡≢⍴⍵ or throw "classify is only valid…"` (the whole
-  `classify` export),
-- `util.kap` filter's argument-validation branch,
-- `map.kap` `int:throwNative` calls (same family).
 
-Kotlin anchor: `throw` is a keyword-form (parser.kt processThrow /
-ThrowException); `int:throwNative` wraps a native exception class symbol.
-Open question: how much of the catch side (`catch`/`int:unwindProtect`)
-exists already — `int:unwindProtect` IS implemented (structure.kap's
-defsyntax expands to it); verify `catch` before scoping.
+The OVERLAY family for monadic `↑`/`↓` wrappers landed in `2426014`. Still missing:
+- **Dyadic under** — Kotlin `evalWithStructuralUnder2Arg` +
+  `inversibleStructuralUnder2Arg` via `evalInverse2ArgB` (functions.kt:273);
+  overlay 2-arg at drop.kt:96 / :360.
+- **Pick-based under** — lookup.kt:232. `overlay_replacement` (evaluator.rs) is
+  already written and reusable for it.
+
+Relevant port sites: `apply_under_op` (~:7859 region), `overlay_replacement`,
+`under_take_drop_spec`.
 
 ---
 
-# OPEN-5 — map-type surface (map.kap): member-dereference `⍺.(⍵)` + `(@.≠)⍛⊂`
+# OPEN-E — `typeof "hi"` type name
 
 ```
-use("map.kap") → parse error at 13:6: unexpected token in primary
-map.kap:13:   {⍺.(⍵)}/ m , (@.≠)⍛⊂ p
+typeof "hi"
+port : kap:string
+oracle: kap:array
 ```
-Two constructs, neither probed standalone yet (probe FIRST, don't assume):
-1. `⍺.(⍵)` dynamic member dereference (Kotlin `MemberDeref`…) — also seen in
-   the oracle's own error text "Member dereference without argument", so the
-   construct exists upstream; check `parser.kt` for the `.` postfix rule on
-   symbols.
-2. `(@.≠)⍛⊂` — derived-op paren group as LEFT of reverse-compose. The P1
-   compose work made `(fn)⍛fn` work generally; whether `@.≠` (bitwise-not
-   derived op, itself P4 scope) parses inside the paren is unknown.
-Per ROADMAP P7: consult the Kotlin map module before scoping; may be its own
-mini-phase.
+
+A Kap string IS a char array, so the oracle reports `kap:array`. The port has a
+distinct `Str` representation and names it `kap:string`. Pre-existing and unrelated
+to the `≡`/namespace work (`'kap:array ≡ typeof 1 2 3` → `1` in BOTH). Fixing it may
+mean either renaming the class for `Str` or unifying the representation — the latter
+is a large change; scope before touching.
 
 ---
 
-# OPEN-6 — startup autoload noise (cosmetic but masks real output)
+# OPEN-F — `fhelp.kap`: `⟦` unimplemented
 
-Every REPL launch evaluates `use("standard-lib.kap")` (kap-cli/src/main.rs:73–76
-unless `--no-standard-lib`), which currently emits **136 warning lines**
-(OPEN-1..OPEN-5 cascading through the chain). Two consequences:
-1. Probes must grep carefully or pass `--no-standard-lib`;
-2. It hides NEW regressions inside the noise floor.
+```
+fhelp.kap → 3/7 statements failed: error: undefined symbol: ⟦
+port : ⟦  →  error: undefined symbol: ⟦
+oracle: ⟦  →  Error at: 1:1: Unexpected token: FunctionCallOpenParen
+```
 
-This ties into ROADMAP §P0.2 (`use()` abort-vs-tolerate policy — still
-undecided): Kotlin aborts the included file at the FIRST failing statement;
-the port warns-and-continues by design (`eval_string_in_env_tolerant`,
-evaluator.rs:10156). Whichever policy wins, the stdlib chain should load
-CLEAN once OPEN-1..OPEN-5 close; revisit the count after they do.
+Note the oracle ALSO rejects a bare `⟦` (it is not a standalone value) — so the
+probe above does not prove the glyph is unimplemented, only that bare use fails in
+both. `⟦` is a function-call bracket form upstream. **Scope this by reading the
+Kotlin tokeniser for `⟦` and by finding fhelp.kap's actual usage line**, not from
+the bare-glyph probe.
 
 ---
 
-# Pre-existing, documented elsewhere (NOT re-opened here)
-- `⟨⟩` vs `()` display glyphs and box frames — P8 renderer decision, value-
-  exact everywhere; tracked in ROADMAP §P8.
-- `util.kap:19–21` `@\s` regex literals — beyond-oracle scope, documented in
-  KNOWN-NONCONFORMANCE.md.
-- dfn `{…}` block interiors still parse via legacy `parse_block` (P1 known
+# OPEN-G — `http.kap:21` and `graph.kap:43`
+
+```
+http.kap  → 7/14 failed @ 21:23
+http.kap:21:   (code;data;headers) ← get url      ← multi-target destructure with ';'
+
+graph.kap → 12/29 failed @ 43:24
+graph.kap:43:  matrixToList ⇐ (⍸¨ ⊂[1])           ← axis-applied ⊂ inside a paren group
+```
+
+`graph.kap:43` looks like a sibling of **OPEN-A** (axis-applied function inside a
+paren/derived group) and may fall out of that fix — retest it immediately after
+OPEN-A lands before scoping separately.
+
+Both files were previously logged out-of-scope per ROADMAP §10 (networking /
+graphing). Keep them out of scope for correctness work, but the two parse errors
+above are ordinary parser gaps worth noting.
+
+---
+
+# Pre-existing, tracked elsewhere (NOT re-opened here)
+
+- **P8 renderer:** `⟨⟩` vs `()`, `default:`-qualified symbol display, box frames for
+  rank≥2, and the `Error at: L:C:` error prefix. Value-exact everywhere; ROADMAP §P8.
+- **`math:pi`** — `math.kap` 1/9 `Assignment to constant variable: math:pi` is
+  **ORACLE-CONSISTENT** (oracle errors identically). Do NOT "fix" it.
+- **Nested-vector representation gap** — the port generalises
+  `((1 2 3)(4 5 6)(7 8 9))` into a true `(3 3)` array where Real Kap keeps it rank-1;
+  documented in KNOWN-NONCONFORMANCE.md.
+- **dfn `{…}` block interiors** still parse via legacy `parse_block` (P1 known
   divergence; no current symptom).
+- **`run_kotlin_conformance`** stays `#[ignore]`d — it HANGS on incomplete builtins.
+  The real gate is `curated_kap_parity`.
+
+# Debug instrumentation left in tree
+
+**None.** Verified: `grep -rn 'KAP_TRACE_FA\|KAP_TRACE_PAREN' kap-core/src/` returns
+nothing; `git status --short` clean at `cd2b6bf`.
