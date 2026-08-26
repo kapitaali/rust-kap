@@ -162,7 +162,7 @@ impl<'a> Parser<'a> {
                                     | "toUpper" | "toNames" | "enc" | "dec"
                             ))
                         || (ns == "s" && matches!(base, "trimLeft" | "trimRight" | "trim"))
-                        || (ns == "int" && matches!(base, "intern" | "symbolName" | "throwNative" | "unwindProtect" | "formatRational"))
+                        || (ns == "int" && matches!(base, "intern" | "symbolName" | "throwNative" | "unwindProtect" | "formatRational" | "libInitialised"))
                         // `int:proto v` is a native VALUE-RIGHT-ARG OPERATOR
                         // (engine.kt:505 registerNativeOperator("proto", ProtoOp(), "int")):
                         // it must parse as a function so `f int:proto v` builds the

@@ -1759,6 +1759,11 @@ impl Engine {
                     ]),
                 )))))
             }
+            // `int:libInitialised` (div_functions.kt LibInitialisedFunction): monadic.
+            // Flushes pending `declare(:initialise …)` lib-init hooks, returns `⍬`.
+            // The Kap text-mode build has no pending initialisers, so this is a no-op
+            // that returns null — matching `int:libInitialised 0` → `⍬` on the oracle.
+            "int:libInitialised" => Ok(Rc::new(APLValue::Null)),
             // `sysparam` (div_functions.kt SystemParameterFunction + custom-renderer.kt):
             // monadic lookup, dyadic update. The parameter name is a SYMBOL VALUE
             // (`'kap:altVectorOutput`, i.e. Symbol{name, namespace:"kap"}); keyword-form
@@ -2853,6 +2858,7 @@ impl Engine {
                 | "sysparam"
                 | "⍣"
                 | "throw"
+                | "int:libInitialised"
 )
  }
 
