@@ -2043,6 +2043,18 @@ impl Engine {
                 };
                 Err(AplError::runtime(rendered))
             }
+            // `throw` (monadic + dyadic) — Kotlin `ThrowFunction` (engine.kt:411,
+            // div_functions.kt:254). Monadic `throw x` ⇒ TagCatch(key=error, data=x);
+            // dyadic `a throw b` ⇒ TagCatch(key=a, data=b). The REPL renders any
+            // TagCatch as `<fn-name>: <data.formatted(PLAIN)>`, so both forms surface
+            // as `throw: <data>` (the tag key is NOT shown). Oracle: `throw "x"` →
+            // `Error at: 1:1: throw: x`; `99 throw "msg"` → `Error at: 1:4: throw: msg`.
+            "throw" => {
+                let data = right_val.force(self)?;
+                // PLAIN rendering: strings drop their quotes (matching the oracle).
+                let rendered = format!("throw: {}", data.format_value());
+                Err(AplError::runtime(rendered))
+            }
             // `typeof` (monadic): returns a *symbol* naming the Kap class of the
             // argument (Kotlin `TypeofFunction` → `classManager.nameForClass`).
             // e.g. `typeof 10` → INTEGER, `typeof "x"` → STRING. The port renders
@@ -2825,7 +2837,8 @@ impl Engine {
                 // this eval-time late-gate must also know them (two-gate rule).
                 | "sysparam"
                 | "⍣"
- )
+                | "throw"
+)
  }
 
     /// Apply a user-defined lambda. `split` = number of leading params that are bound to

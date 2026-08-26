@@ -2744,6 +2744,7 @@ impl<'a> Parser<'a> {
                 | "⊆" | "⊇" | "→" | "≬" | "toList" | "fromList" | "⫇" | "group"
                 | "⍕" | "format" | "⍎" | "execute" | "typeof"
                 | "namespace" | "import" | "declare" | "use" | "isLocallyBound"
+                | "throw"
         )
     }
 
