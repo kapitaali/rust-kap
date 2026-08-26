@@ -449,6 +449,26 @@ fn exp_suffix(s: &str) -> bool {
 }
 
 impl KapNumber {
+    /// Reduce an exact-integer rational to an integer, mirroring Kotlin's
+    /// `makeAPLNumberWithReduction()` (used by the rational branches of `⌊`/`⌈` —
+    /// math_functions.kt:1278/:1341). A `BigRational` with denominator 1 becomes a
+    /// `Long` when it fits, else a `BigInt`; anything else stays `Rational`.
+    /// Without this, `⌈3÷2` was typed `kap:rational` where the oracle says
+    /// `kap:integer`, which broke integer-requiring consumers such as
+    /// `(⌈3÷2)↑ ⍳6` ("↑/↓ counts must be integers").
+    pub fn reduce_rational(v: BigRational) -> KapNumber {
+        use KapNumber::*;
+        if *v.denom() == num_bigint::BigInt::from(1) {
+            let n = v.numer().clone();
+            match n.to_string().parse::<i64>() {
+                Ok(l) => Long(l),
+                Err(_) => BigInt(n),
+            }
+        } else {
+            Rational(v)
+        }
+    }
+
     pub fn ceil(&self) -> KapNumber {
         use KapNumber::*;
         match self {
@@ -467,7 +487,13 @@ impl KapNumber {
             Rational(v) => {
                 // ceil of a/b = -floor(-a/b)
                 let c = (-v).floor();
-                Rational(-c)
+                // Kotlin uses `makeAPLNumberWithReduction()` for the rational branch
+                // (math_functions.kt:1341), which REDUCES an exact-integer rational to
+                // an integer. Returning a bare `Rational` here left `⌈3÷2` typed
+                // `kap:rational` while the oracle says `kap:integer`, which then broke
+                // consumers that require an integer (`(⌈3÷2)↑ ⍳6` → "↑/↓ counts must
+                // be integers"). Mirrors the whole-Double normalisation above.
+                Self::reduce_rational(-c)
             }
             Complex(r, i) => Complex(r.ceil(), i.ceil()),
         }
@@ -488,7 +514,8 @@ impl KapNumber {
                 }
             }
             BigInt(v) => BigInt(v.clone()),
-            Rational(v) => Rational(v.floor()),
+            // Kotlin's rational branch also reduces (math_functions.kt:1278).
+            Rational(v) => Self::reduce_rational(v.floor()),
             Complex(r, i) => Complex(r.floor(), i.floor()),
         }
     }

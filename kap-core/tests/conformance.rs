@@ -709,6 +709,16 @@ fn curated_kap_parity() {
         //   `↑[0] ⍳6`    -> "↑: Function does not support axis specifier"
         //   `2 3↑[0] ⍳6` -> "↑: When given an explicit axis, the left argument must
         //                    be a single integer"
+        // Left-bind whose bound VALUE is an expression, not a literal. Kotlin's
+        // makeLeftBindFunction (parser.kt:486) binds the whole accumulated leftArgs
+        // list, so any value instruction qualifies. The parser already built
+        // `Train[Apply{…}, ↑]` correctly; the evaluator's `is_value` only accepted
+        // Literal/Array/Empty, so these missed the left-bind arm of apply_train, fell
+        // through to ATOP, and failed with "only symbol/lambda functions supported yet".
+        ("((-2)↑) ⍳6", "(4 5)"),
+        ("((1+1)↑) ⍳6", "(0 1)"),
+        ("((-2)+) 5", "3"),
+        ("((⌈3÷2)↑) ⍳6", "(0 1)"),
         // Phase 7 (OPEN-3): inner/outer product `f1 ∙ f2` (Kotlin OuterInnerJoinOp,
         // engine.kt:489). `∘∙f` => outer product (NullFunction sentinel); `f1∙f2` =>
         // inner join (normalize/error/reduce ladder, outer_join.kt:176-266).

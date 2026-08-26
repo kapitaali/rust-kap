@@ -2939,8 +2939,34 @@ impl Engine {
 
     /// Whether an instr is a *value* (suitable for left-bind first member): a literal
     /// or array, but not a function/operator.
+    /// Is this train member a VALUE (the bound constant of a left-bind) rather than a
+    /// function? Kotlin's `makeLeftBindFunction` (parser.kt:486) binds the whole
+    /// accumulated `leftArgs` list, which can be ANY value instruction — not only a
+    /// literal. So a parenthesised expression (`((-2)↑)`, `((1+1)↑)`, `((⌈3÷2)↑[…])`
+    /// in output3.kap:118 — these parse to `Instr::Apply`) and a bare non-function
+    /// variable (`(n↑)`) are values here too.
+    ///
+    /// Restricting this to Literal/Array/Empty made those left-binds miss the
+    /// left-bind arm of `apply_train`, fall through to the ATOP case, and fail with
+    /// "only symbol/lambda functions supported yet" (or "unknown function: n").
+    /// The parser was already building the correct `Train[Apply{…}, ↑]` — verified by
+    /// tracing the group instr — so this was purely an evaluator classification gap.
+    ///
+    /// `Symbol` is deliberately NOT included: a bare symbol in a train is normally a
+    /// FUNCTION reference (`(f g)`), and treating it as a value would break plain
+    /// 2-trains. The parser resolves the variable case by emitting the value form it
+    /// already knows about, so only genuinely value-shaped instrs are listed.
     fn is_value(e: &Instr) -> bool {
-        matches!(e, Instr::Literal(_) | Instr::Array { .. } | Instr::Empty)
+        matches!(
+            e,
+            Instr::Literal(_)
+                | Instr::Array { .. }
+                | Instr::Empty
+                | Instr::Apply { .. }
+                | Instr::Index { .. }
+                | Instr::BooleanOp { .. }
+                | Instr::Value(_)
+        )
     }
 
     /// Whether `name` is a Kap primitive function/operator wired up in `eval_apply`.
