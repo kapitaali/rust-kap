@@ -4194,29 +4194,30 @@ impl Engine {
         for i in 0..n {
             let li = if l_len == 1 { 0 } else { i };
             let ri = if r_len == 1 { 0 } else { i };
-            // Resolve left/right cells from array elements, string chars, or the scalar.
-            let l_cell = l_str.as_ref().map(|v| v[li]);
-            let r_cell = r_str.as_ref().map(|v| v[ri]);
-            let lx: &APLValue = match (&l_elems, l_cell) {
-                (Some(v), _) => v[li].as_ref(),
-                (None, Some(c)) => {
-                    out.push(if pred(c.cmp(&r_cell.unwrap()).into()) { 1 } else { 0 });
-                    continue;
-                }
-                _ => la,
+            // Resolve each side to a concrete cell: array element, string char, or the
+            // scalar. A string-derived char becomes `APLValue::Char` so char-vs-char
+            // comparisons (e.g. `@\s≠ "abc"` = `' ' ≠ "abc"`) compare by codepoint
+            // like Kotlin, instead of erroring with "requires numbers". The incompatible
+            // cases (number-vs-char) still fall through to `cmp_cells` returning `None`,
+            // which emits the same Kotlin-class error below.
+            // Resolve each side to a concrete cell. A string operand contributes its
+            // i-th char as `APLValue::Char`; an array contributes its i-th element;
+            // otherwise the operand is a scalar (already a Char/Number/...).
+            let lx: APLValue = if let Some(v) = &l_elems {
+                v[li].as_ref().clone()
+            } else if let Some(s) = &l_str {
+                APLValue::Char(s[li])
+            } else {
+                la.clone()
             };
-            let rx: &APLValue = match (&r_elems, r_cell) {
-                (Some(v), _) => v[ri].as_ref(),
-                (None, Some(c)) => {
-                    // Left was a non-string scalar; compare it against this char.
-                    return Err(AplError::runtime(format!(
-                        "{} requires numbers",
-                        sym
-                    )));
-                }
-                _ => ra,
+            let rx: APLValue = if let Some(v) = &r_elems {
+                v[ri].as_ref().clone()
+            } else if let Some(s) = &r_str {
+                APLValue::Char(s[ri])
+            } else {
+                ra.clone()
             };
-            match cmp_cells(lx, rx) {
+            match cmp_cells(&lx, &rx) {
                 Some(b) => out.push(if b { 1 } else { 0 }),
                 None => {
                     return Err(AplError::runtime(format!(

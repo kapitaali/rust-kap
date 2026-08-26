@@ -955,6 +955,16 @@ impl<'a> Parser<'a> {
     /// - right value & left n      → FunctionCall2Arg, ⍺ = the SINGLE left arg or a
     ///   strand of several (makeResultList semantics, :474)
     fn finish_fn_call(&mut self, fn_instr: Instr, left_args: &mut Vec<Instr>) -> Result<Instr, AplError> {
+        // M5: capture whether a NEWLINE immediately follows the function BEFORE
+        // `bind_operators_kotlin` (which begins with `skip_newlines()`) can swallow it.
+        // In Kap a newline terminates a statement (no operator/axis binds across it),
+        // so a trailing newline means "fn value, no right arg" — even if the NEXT
+        // statement's first token happens to be a known function. Without this,
+        // `trim ⇐ a b\n declare(...)` merged into `trimLeft declare(...)` and eagerly
+        // applied trimLeft's body with no right arg. Fork/operator binding on the SAME
+        // line (no intervening newline) is unaffected because there is no newline to
+        // record here.
+        let newline_before_right = matches!(self.peek().map(|t| &t.token), Some(Token::Newline));
         // parseOperator FIRST (parser.kt:437): bind axis / adverbs / user operators.
         let fn_instr = self.bind_operators_kotlin(fn_instr)?;
         self.skip_newlines();
@@ -965,13 +975,15 @@ impl<'a> Parser<'a> {
             if self.kotlin_close_stack.last().map(|c| {
                 std::mem::discriminant(c) == std::mem::discriminant(t)
             }) == Some(true));
-        let has_right = !at_close
+        let has_right = !newline_before_right
+            && !at_close
             && !self.at_statement_boundary()
             && !matches!(
                 self.peek().map(|t| &t.token),
                 Some(Token::StatementSeparator) | Some(Token::EndOfFile)
             );
         if !has_right {
+
             // parser.kt:459–466: empty right + empty left ⇒ fn ITSELF (ambivalent fn
             // value); empty right + non-empty left ⇒ makeLeftBindFunctionParseResult
             // (:462) — LeftAssignedFunction (functions.kt:628): binds strand(leftArgs)
