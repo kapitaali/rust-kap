@@ -413,6 +413,47 @@ impl<'a> Parser<'a> {
                     }
                     return self.finish_fn_call(lam, &mut left_args);
                 }
+                // `⍞name`: a *dynamic* function reference. Like a bare symbol or brace
+                // dfn, it is FUNCTION-SHAPED (Kotlin routes the DynamicRef through
+                // processFn), so it must flow through `finish_fn_call` — otherwise it
+                // falls through to the legacy fallback, which cannot parse `⍞` inside a
+                // parenthesised group and dies with "unexpected token in primary". This
+                // is what breaks `util.kap` `((toBoolean ⍞fn)¨ arg) / arg` and any
+                // `(f ⍞g)` train member. (util.kap handled fine by the oracle.)
+                Token::ApplyToken => {
+                    self.advance(); // consume ⍞
+                    self.skip_newlines();
+                    let tok = self
+                        .peek()
+                        .ok_or_else(|| self.err("expected a symbol after ⍞"))?;
+                    let (name, namespace) = match &tok.token {
+                        Token::Literal(LiteralValue::Symbol { name, namespace }) => {
+                            (name.clone(), namespace.clone())
+                        }
+                        _ => return Err(self.err("expected a symbol after ⍞")),
+                    };
+                    self.advance();
+                    let dr = Instr::DynamicRef { name, namespace };
+                    // A trailing adverb binds the dynamic ref as the derived
+                    // function's operand: `⍞fn¨ arr` = each over ⍞fn.
+                    if let Some(Token::Literal(LiteralValue::Symbol { name: adv, .. })) =
+                        self.peek().map(|t| &t.token)
+                    {
+                        if Self::is_adverb(adv) {
+                            let adv = adv.clone();
+                            self.advance();
+                            let dr = Instr::Derived {
+                                func: Box::new(dr),
+                                op: Box::new(Instr::Symbol {
+                                    name: adv,
+                                    namespace: None,
+                                }),
+                            };
+                            return self.finish_fn_call(dr, &mut left_args);
+                        }
+                    }
+                    return self.finish_fn_call(dr, &mut left_args);
+                }
                 Token::OpenParen => {
                     // parser.kt:977 parseExprToplevel(CloseParen): M5 parses the group
                     // CONTENT with this same accumulator loop under a close-token stack,
@@ -568,7 +609,20 @@ impl<'a> Parser<'a> {
                     // loop is invalid — Kotlin throws InvalidOperatorArgument here
                     // (parser.kt:970). Operators are consumed only inside parseOperator,
                     // bound to a function BEFORE any data operand (`data ⌸ fn`).
-                    if namespace.is_none()
+                    //
+                    // DUAL-NATURE EXCEPTION: `/ ⌿ \ ⍀` are registered in Kotlin as BOTH
+                    // a native function (SelectElements/Expand — value-left replicate/
+                    // compress/expand) AND a native operator (reduce/scan — function-left).
+                    // When a VALUE operand precedes them in the accumulator the name is the
+                    // FUNCTION form and must flow through `finish_fn_call` (which strands
+                    // the value-left and dispatches to eval's `replicate`/`expand`); the
+                    // operator/reduce form is reached only via bind_operators_kotlin when a
+                    // FUNCTION left operand binds first (e.g. `+/`). Without this exception
+                    // `1 0 1 / 1 2 3` wrongly hits the "Operator without left function"
+                    // guard. `known_ops` is left intact so `+/` still binds as reduce.
+                    let is_dual_nature = matches!(name.as_str(), "/" | "⌿" | "\\" | "⍀");
+                    if !is_dual_nature
+                        && namespace.is_none()
                         && (Self::is_adverb(&name) || self.known_ops.iter().any(|n| n == &name))
                     {
                         return Err(self.err(&format!("Operator without left function: {}", name)));
@@ -2738,7 +2792,7 @@ impl<'a> Parser<'a> {
             name,
             "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"
                 | "↑" | "↓" | "⊂" | "⌷" | "reveal" | "disclose"
-                | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
+                | "+" | "-" | "*" | "×" | "÷" | "/" | "⌿" | "\\" | "⍀" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⍪" | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥" | "⍸" | "⍒" | "⍲" | "⍱" | "∼"
                 | "⊢" | "⊣" | "≡" | "⍓" | "∪" | "∩" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair"
                 | "⊆" | "⊇" | "→" | "≬" | "toList" | "fromList" | "⫇" | "group"

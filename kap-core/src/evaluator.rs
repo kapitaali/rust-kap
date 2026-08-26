@@ -2154,13 +2154,26 @@ impl Engine {
                 None => self.scalar1(right_val, |x| x.recip(), "÷"),
                 Some(_) => self.num2(left_val, right_val, |a, b| a.div(b), "÷"),
             },
-            // Dyadic `/` with an integer left arg is REPLICATE (Kotlin
-            // ReplicateAPLFunction): `3/7 → ⟨7 7 7⟩`, `1 0 1 2/10 20 30 40 →
-            // ⟨10 30 40 40⟩`.
-            "/" => match left_val {
-                None => self.scalar1(right_val, |x| x.recip(), "/"),
-                Some(_) => self.replicate(left_val, right_val),
-            },
+            // DUAL-NATURE `/ ⌿ \ ⍀`: Kotlin registers each as BOTH a native function
+            // (value-left select/expand) AND a native operator (reduce/scan). The
+            // operator half is handled by the adverb-reduce/scan path; here we only
+            // reach the FUNCTION half when a VALUE left arg precedes the name (the
+            // parser routes value-left `/ ⌿ \ ⍀` through `finish_fn_call`). `/ ⌿`
+            // select (replicate/compress), `\ ⍀` expand, last vs first axis per the
+            // name. Monadic form is invalid (Kotlin: "Function cannot be called with
+            // one argument").
+            "/" | "⌿" | "\\" | "⍀" => {
+                let last_axis = matches!(name.as_str(), "/" | "\\");
+                let is_expand = matches!(name.as_str(), "\\" | "⍀");
+                match left_val {
+                    None => Err(AplError::runtime(format!(
+                        "{}: Function cannot be called with one argument",
+                        name
+                    ))),
+                    Some(_) if is_expand => self.expand(left_val, right_val, last_axis),
+                    Some(_) => self.select_elements(left_val, right_val, last_axis),
+                }
+            }
             "=" => match left_val {
                 // Monadic `=` (self-classify, Kotlin EqualsAPLFunction.eval1Arg): for each
                 // major cell of the ravelled argument, the index (in first-occurrence
@@ -8765,51 +8778,261 @@ impl Engine {
         }
     }
 
-    /// Dyadic replicate `A / B` (Kotlin ReplicateAPLFunction): each element of B is
-    /// repeated according to the corresponding integer in A (0 drops, negative is an
-    /// error). Scalar A extends. Result is the flattened repetition (rank 1 for a
-    /// vector B; per-axis replication of higher ranks is out of scope here).
+    /// Collect the integer contents of a scalar/vector value (used by `/ ⌿ \ ⍀`).
+    fn collect_ints(v: AplRef<APLValue>, sym: &str) -> Result<Vec<i64>, AplError> {
+        match v.as_ref() {
+            APLValue::Array(a) => {
+                let mut out = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    match e.as_ref() {
+                        APLValue::Number(n) => out.push(n.as_long().map_err(AplError::runtime)?),
+                        _ => return Err(AplError::runtime(format!("{}: left argument must be integers", sym))),
+                    }
+                }
+                Ok(out)
+            }
+            APLValue::Number(n) => Ok(vec![n.as_long().map_err(AplError::runtime)?]),
+            other => Err(AplError::runtime(format!(
+                "{}: left argument must be integers, got {}",
+                sym,
+                other.class_name()
+            ))),
+        }
+    }
+
+    /// Flat-index → coordinate (row-major) for a given shape.
+    fn coord_of(shape: &[usize], flat: usize) -> Vec<usize> {
+        let mut coord = vec![0usize; shape.len().max(1)];
+        let mut rem = flat;
+        for i in (0..shape.len()).rev() {
+            let d = shape[i].max(1);
+            coord[i] = rem % d;
+            rem /= d;
+        }
+        coord
+    }
+
+    /// Coordinate → flat-index for a given shape.
+    fn flat_of(shape: &[usize], coord: &[usize]) -> usize {
+        let mut flat = 0usize;
+        for i in 0..shape.len() {
+            flat = flat * shape[i].max(1) + coord[i];
+        }
+        flat
+    }
+
+    /// Replicate/compress `b` along `axis`: element `i` of `b` along that axis is
+    /// repeated `counts[i]` times (0 drops). Returns the flat list of result
+    /// elements (row-major over the new shape).
+    fn repeat_along_axis(
+        b: &APLValue,
+        b_dims: &[usize],
+        axis: usize,
+        counts: &[i64],
+    ) -> Result<Vec<AplRef<APLValue>>, AplError> {
+        let elems = b.elements();
+        if b_dims.is_empty() {
+            // Scalar B: treated as a single cell, replicated `sum(counts)` times.
+            let total: usize = counts.iter().map(|c| (*c).max(0) as usize).sum();
+            return Ok(vec![Rc::new(b.clone()); total]);
+        }
+        let mut out: Vec<AplRef<APLValue>> = Vec::new();
+        // Iterate over every flat index of B; for the selected axis, expand.
+        let total_cells = b_dims.iter().product::<usize>();
+        for p in 0..total_cells {
+            let coord = Self::coord_of(b_dims, p);
+            let a = coord[axis];
+            let c = if counts.is_empty() {
+                1
+            } else if counts.len() == 1 {
+                counts[0]
+            } else {
+                counts[a]
+            };
+            for _ in 0..c.max(0) {
+                out.push(elems[p].clone());
+            }
+        }
+        Ok(out)
+    }
+
+    /// Expand `b` along `axis` by `counts` (see `expand` doc). Returns the flat
+    /// list of result elements; zeros (count<=0) emit `Null`.
+    fn expand_along_axis(
+        b: &APLValue,
+        b_dims: &[usize],
+        axis: usize,
+        counts: &[i64],
+    ) -> Result<Vec<AplRef<APLValue>>, AplError> {
+        let elems = b.elements();
+        if b_dims.is_empty() {
+            // Scalar B: expand emits count cells (B or Null).
+            let mut out = Vec::with_capacity(counts.len());
+            for &c in counts {
+                if c > 0 {
+                    out.push(Rc::new(b.clone()));
+                } else {
+                    out.push(Rc::new(APLValue::Null));
+                }
+            }
+            return Ok(out);
+        }
+        // Number of B major-cells consumed by positive counts.
+        let mut b_cell = 0usize;
+        let total_cells = b_dims.iter().product::<usize>();
+        let mut out: Vec<AplRef<APLValue>> = Vec::new();
+        // Walk B flat indices, but only advance the B-cell pointer on positive counts.
+        // We instead iterate by coordinate and map each output A-index to a B index.
+        // Build an index map `out_pos[axis] -> b_pos[axis]` (or -1 for zero).
+        let mut b_for_a: Vec<isize> = Vec::with_capacity(counts.len());
+        let mut bi = 0usize;
+        for &c in counts {
+            if c > 0 {
+                b_for_a.push(bi as isize);
+                bi += 1; // consumed one B cell (for multi-copy we still advance once)
+                // but Kotlin repeats the SAME B cell `c` times; we must not advance again
+                // for repeats — handle by pushing same `bi-1` for each repeat below.
+            } else {
+                b_for_a.push(-1);
+            }
+        }
+        // Recompute properly: for positive c, push `bi` c times, then advance bi once.
+        b_for_a.clear();
+        bi = 0;
+        for &c in counts {
+            if c > 0 {
+                for _ in 0..c {
+                    b_for_a.push(bi as isize);
+                }
+                bi += 1;
+            } else {
+                let zeros = if c == 0 { 1 } else { (-c) as usize };
+                for _ in 0..zeros {
+                    b_for_a.push(-1);
+                }
+            }
+        }
+        for p in 0..total_cells {
+            let coord = Self::coord_of(b_dims, p);
+            let a = coord[axis];
+            let bpos = b_for_a[a];
+            if bpos < 0 {
+                // zero cell
+                out.push(Rc::new(APLValue::Null));
+            } else {
+                let mut c2 = coord.clone();
+                c2[axis] = bpos as usize;
+                out.push(elems[Self::flat_of(b_dims, &c2)].clone());
+            }
+        }
+        Ok(out)
+    }
+
+
+    /// (`SelectElementsFirstAxisFunction`): replicate/compress `B` along the LAST
+    /// (`/`) or FIRST (`⌿`) axis, repeating element `i` of `B` along that axis
+    /// `A[i]` times (0 drops, negative is an error). `A` must be a scalar or a
+    /// 1-D array whose length equals `B`'s size along the selected axis. Vector `B`
+    /// → vector result; higher-rank `B` replicates along the selected axis only
+    /// (e.g. `(1 0) / (2 2⍴⍳4)` → shape `⟨2 1⟩`). Scalar `A` extends.
+    fn select_elements(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+        last_axis: bool,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let l = left_val.ok_or_else(|| AplError::runtime("/ needs two args".into()))?;
+        let counts: Vec<i64> = Self::collect_ints(l.force(self)?, "/")?;
+        // `B` is treated uniformly (str/array/scalar) via `.elements()`/`.dimensions()`.
+        let b = right_val.force(self)?;
+        let b_dims = b.dimensions();
+        let axis = if last_axis {
+            b_dims.len().wrapping_sub(1)
+        } else {
+            0
+        };
+        // Validate A's size against B's size along the selected axis. A scalar A
+        // (`3`) broadcasts to every cell of B (Kotlin: IntArray(bDim[axis]) { v }).
+        if !(counts.is_empty()
+            || counts.len() == 1
+            || counts.len() == b_dims.get(axis).copied().unwrap_or(0))
+        {
+            return Err(AplError::runtime(
+                "A must be a single-dimensional array of the same size as the dimension of B along the selected axis.".into(),
+            ));
+        }
+        if counts.iter().any(|&c| c < 0) {
+            return Err(AplError::runtime("Selection index is negative".into()));
+        }
+        // Repeat each B-major-cell along `axis` per `counts`.
+        let out_elems = Self::repeat_along_axis(&b, &b_dims, axis, &counts)?;
+        // Result shape: B's shape with axis replaced by the sum of counts.
+        let total: usize = counts.iter().map(|c| *c as usize).sum();
+        let mut shape = b_dims.clone();
+        if !shape.is_empty() {
+            shape[axis] = total;
+        } else if total != 0 {
+            shape = vec![total];
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            shape,
+            ArrayData::Nested(out_elems),
+        )))))
+    }
+
+    /// Value-left `A \ B` (Kotlin `ExpandLastAxisFunction`) and `A ⍀ B`
+    /// (`ExpandFirstAxisFunction`): insert zeros into `B` along the LAST (`\`) or
+    /// FIRST (`⍀`) axis. `A` is a 1-D array of integers; a positive `A[i]` copies
+    /// major-cell `i` of `B` `A[i]` times, `0` inserts one zero, negative `A[i]`
+    /// inserts `|A[i]|` zeros. The size of `B` along the selected axis must equal
+    /// the number of *selected* (positive) entries in `A`, else Kotlin throws
+    /// "Size of selection dimension in B must match the number of selected values
+    /// in A". Result shape: B with the selected axis replaced by `A.len()`.
+    fn expand(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+        last_axis: bool,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let l = left_val.ok_or_else(|| AplError::runtime("\\ needs two args".into()))?;
+        let counts: Vec<i64> = Self::collect_ints(l.force(self)?, "\\")?;
+        let b = right_val.force(self)?;
+        let b_dims = b.dimensions();
+        let axis = if last_axis {
+            b_dims.len().wrapping_sub(1)
+        } else {
+            0
+        };
+        let dim_along = b_dims.get(axis).copied().unwrap_or(0);
+        // Selected (positive) entries consume one B major-cell each.
+        let selected: usize = counts.iter().filter(|&&c| c > 0).count();
+        if dim_along != selected && dim_along != 1 {
+            return Err(AplError::runtime(
+                "Size of selection dimension in B must match the number of selected values in A".into(),
+            ));
+        }
+        // Walk B's major-cells in order along `axis`, emitting them per `counts`.
+        let out_elems = Self::expand_along_axis(&b, &b_dims, axis, &counts)?;
+        let mut shape = b_dims.clone();
+        if !shape.is_empty() {
+            shape[axis] = counts.len();
+        } else {
+            shape = vec![counts.len()];
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            shape,
+            ArrayData::Nested(out_elems),
+        )))))
+    }
+
+    /// Legacy name for `select_elements(..., last_axis=true)` — kept so existing
+    /// callers/`replicate` semantics (vector flattening) are preserved.
     fn replicate(
         &self,
         left_val: Option<AplRef<APLValue>>,
         right_val: AplRef<APLValue>,
     ) -> Result<AplRef<APLValue>, AplError> {
-        let l = left_val.ok_or_else(|| AplError::runtime("/ needs two args".into()))?;
-        let counts: Vec<i64> = match l.force(self)?.as_ref() {
-            APLValue::Array(a) => {
-                let mut v = Vec::with_capacity(a.element_count());
-                for e in a.elements() {
-                    match e.as_ref() {
-                        APLValue::Number(n) => v.push(n.as_long().map_err(|e| AplError::runtime(e))?),
-                        _ => return Err(AplError::runtime("/: left argument must be integers".into())),
-                    }
-                }
-                v
-            }
-            APLValue::Number(n) => vec![n.as_long().map_err(|e| AplError::runtime(e))?],
-            _ => return Err(AplError::runtime("/: left argument must be integers".into())),
-        };
-        if counts.iter().any(|&c| c < 0) {
-            return Err(AplError::runtime("Negative number of copies requested".into()));
-        }
-        let items: Vec<AplRef<APLValue>> = match right_val.as_ref() {
-            APLValue::Array(a) => a.elements(),
-            other => vec![Rc::new(other.clone())],
-        };
-        // Scalar right extends to the length of counts.
-        let n = counts.len().max(items.len());
-        let mut out: Vec<AplRef<APLValue>> = Vec::new();
-        for i in 0..n {
-            let c = if counts.len() == 1 { counts[0] } else { counts[i] };
-            let item = if items.len() == 1 { items[0].clone() } else { items[i].clone() };
-            for _ in 0..c {
-                out.push(item.clone());
-            }
-        }
-        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-            vec![out.len()],
-            ArrayData::Nested(out),
-        )))))
+        self.select_elements(left_val, right_val, true)
     }
 
     /// `⌻` outer product (Kotlin outer_join.kt OuterJoinOp / OuterJoinResult):
