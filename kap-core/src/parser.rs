@@ -1049,6 +1049,22 @@ impl<'a> Parser<'a> {
             r
         };
         if left_args.is_empty() {
+            // parser.kt:479–484 FnParseResult branch: when the right argument is a
+            // FUNCTION, Kotlin forms Chain2(parsedFn, holder.fn) — a 2-train ATOP
+            // `(f g) x = f(g(x))` (instr.kt:588) — rather than applying f to g. The
+            // port's apply_train already implements this (evaluator.rs:2731). This
+            // is how `trim ⇐ trimRight trimLeft` becomes the derived fn
+            // `(trimRight trimLeft)`, NOT `Apply{trimRight, trimLeft}` (which would
+            // evaluate the right arg with no ⍵ and fail "undefined symbol: ⍺").
+            // Value right-args (numbers, arrays, strings, variables) still apply
+            // normally via FunctionCall1Arg below.
+            if self.nested_right_is_fn_result(&right) {
+                return Ok(Instr::Train {
+                    funcs: vec![fn_instr, right],
+                    reverse: false,
+                    compose: false,
+                });
+            }
             // FunctionCall1Arg (parser.kt:468): monadic, ⍵ = right.
             return Ok(Instr::Apply {
                 fn_expr: Box::new(fn_instr),
@@ -3625,7 +3641,9 @@ impl<'a> Parser<'a> {
                     // Fall through: check for a trailing fn-atom 2-train (e.g. `∧`).
                     if let Some(t) = self.peek() {
                         let next_is_fn_atom = match &t.token {
-                            Token::Literal(LiteralValue::Symbol { name, .. }) => Self::is_primitive_op(name),
+                            Token::Literal(LiteralValue::Symbol { name, namespace }) => {
+                                self.is_fn_atom_name(name, namespace)
+                            }
                             Token::OpenParen | Token::LambdaToken | Token::ApplyToken | Token::LeftForkToken => true,
                             _ => false,
                         };
@@ -3766,7 +3784,9 @@ impl<'a> Parser<'a> {
             }
             if let Some(t) = self.peek() {
                 let next_is_fn_atom = match &t.token {
-                    Token::Literal(LiteralValue::Symbol { name, .. }) => Self::is_primitive_op(name),
+                    Token::Literal(LiteralValue::Symbol { name, namespace }) => {
+                        self.is_fn_atom_name(name, namespace)
+                    }
                     Token::OpenParen | Token::LambdaToken | Token::ApplyToken
                     | Token::LeftForkToken => true,
                     _ => false,
@@ -4087,6 +4107,22 @@ impl<'a> Parser<'a> {
                 // processFn); required for `{2×⍵}¨ 1 2 3` to bind the each-adverb.
                 | Instr::Block { .. }
         )
+    }
+
+    /// Whether a symbol NAME is a function atom for train/atop formation. A bare
+    /// symbol is a function atom only if it is a primitive operator OR a
+    /// user-defined / namespaced function known at parse time (e.g. `f ⇐ +`
+    /// followed by `g ⇐ f h` — both `f` and `h` are functions, so `f h` is a
+    /// 2-train ATOP, not `Apply{f, h}`). A plain *value* variable (e.g. `x` in
+    /// `foo x`) is NOT a function atom and must stay a normal right-argument
+    /// application (Kotlin's parseValue() returns InstrParseResult for variables,
+    /// FnParseResult only for functions — parser.kt:479). `:keyword` symbols
+    /// (`:export`, `:const`) are values, never functions.
+    fn is_fn_atom_name(&self, name: &str, namespace: &Option<String>) -> bool {
+        if namespace.as_deref() == Some("keyword") {
+            return false;
+        }
+        Self::is_primitive_op(name) || self.is_known_fn(name, namespace)
     }
 
     /// Structural `declare(…)` parser (Kotlin DeclareToken). Consumes

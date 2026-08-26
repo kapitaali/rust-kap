@@ -934,12 +934,14 @@ impl Engine {
                     // definition time (e.g. `foo ⇐ ×-` would run `×(-)` and fail). Component
                     // primitives (×, -, ⊢, ⊣, …) resolve at apply time via `eval_apply`'s
                     // `fn_name` dispatch, which is ambivalent (monadic vs dyadic).
-                    Instr::Derived { .. } | Instr::Train { .. } => Rc::new(APLValue::UserFn {
-                        params: vec![],
-                        split: 0,
-                        body: Rc::new(*value.clone()),
-                        env: env.clone(),
-                    }),
+                    Instr::Derived { .. } | Instr::Train { .. } | Instr::ValueOp { .. } => {
+                        Rc::new(APLValue::UserFn {
+                            params: vec![],
+                            split: 0,
+                            body: Rc::new(*value.clone()),
+                            env: env.clone(),
+                        })
+                    }
                     // Bare symbol RHS:
                     //  * a primitive (`foo ⇐ -`) — store the symbol directly as the body;
                     //    `apply_user_fn` routes it through `eval_apply`, which dispatches
@@ -2957,7 +2959,7 @@ impl Engine {
         // catches it here and returns `v`. If it escapes uncaught (top level), `eval_string_in_env`
         // converts it to the Real-Kap message "Call to return without a function call".
         let result = match body {
-            Instr::Derived { .. } | Instr::Train { .. } | Instr::Symbol { .. } => {
+            Instr::Derived { .. } | Instr::Train { .. } | Instr::ValueOp { .. } | Instr::Symbol { .. } => {
                 self.eval_apply(body, left, right, &child)
             }
             _ => self.eval_instr(body, &child),
