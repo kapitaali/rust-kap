@@ -7837,26 +7837,153 @@ impl Engine {
         }
     }
 
-    /// Power operator `f⍣n` / `f⍣g` (Kotlin PowerAPLOperator, operator.kt:7-65).
+    /// Overlay `replacement` into `src` at `offset`, mirroring Kotlin
+    /// `OverlayReplacementValue` (array_functions.kt:126). `src_replacement_dims`
+    /// is the shape the wrapper function SELECTED out of `src` (e.g. the shape of
+    /// `3↑x`); `replacement` is what the base function returned for that region.
     ///
-    /// Two modes, decided by the operand's parse shape (Kotlin distinguishes at
-    /// combine time: fn+expr ⇒ PowerAPLFunctionWithValueDescriptor = iterate,
-    /// fn+fn ⇒ PowerAPLFunctionDescriptor = until-loop). The port stores one
-    /// ValueOp; the operand `Instr` kind plays the same role:
-    ///
-    /// - **Iterate** (`f⍣n`, operand is a value expr): evaluate the operand to a
+    /// Result shape (array_functions.kt:158): per axis
+    /// `src[i] - src_replacement[i] + replacement[i]`, so a base function that
+    /// changes the selected region's size resizes that axis. `valueAt`
+    /// (array_functions.kt:204) reads from the replacement inside the offset
+    /// window and from `src` outside it, shifting the outside coordinates by the
+    /// size delta.
+    fn overlay_replacement(
+        &self,
+        src: &AplRef<APLValue>,
+        src_replacement_dims: &[usize],
+        replacement: &AplRef<APLValue>,
+        offset: &[usize],
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let src_dims = Self::value_dims(src);
+        let mut repl_dims = Self::value_dims(replacement);
+        let repl_flat = self.flat_elements(replacement);
+        // `⍬` is `APLValue::Null` in the port but a rank-1 LENGTH-0 array in
+        // Kotlin, so `value_dims` reports rank 0 for it and the scalar-resize
+        // branch below would wrongly splice a literal `⍬` into every cell of the
+        // selected region. Treat it as the empty array of the source's rank, so an
+        // empty replacement SHRINKS the axis (oracle: `{⍬}⍢(1↑) ⍳4` → `⟨1 2 3⟩`,
+        // `{⍬}⍢(2↓) ⍳4` → `⟨0 1⟩`).
+        if matches!(replacement.as_ref(), APLValue::Null) && !src_dims.is_empty() {
+            repl_dims = vec![0; src_dims.len()];
+        }
+        // Kotlin init (:143): a SCALAR replacement against a non-scalar source is
+        // resized to fill the selected region.
+        if !src_dims.is_empty() && repl_dims.is_empty() {
+            repl_dims = src_replacement_dims.to_vec();
+        }
+        if repl_dims.len() != src_dims.len() {
+            return Err(AplError::runtime(format!(
+                "Replacement value must have the same rank as the original data. Got rank={}, original={}",
+                repl_dims.len(),
+                src_dims.len()
+            )));
+        }
+        let rank = src_dims.len();
+        // Result shape per axis (array_functions.kt:158).
+        let mut out_dims = Vec::with_capacity(rank);
+        for i in 0..rank {
+            let grown = src_dims[i] + repl_dims[i];
+            if grown < src_replacement_dims[i] {
+                return Err(AplError::runtime(
+                    "replacement array size overflows".to_string(),
+                ));
+            }
+            out_dims.push(grown - src_replacement_dims[i]);
+        }
+        for i in 0..rank {
+            if out_dims[i] < offset[i] + repl_dims[i] {
+                return Err(AplError::runtime(format!(
+                    "replacement array size overflows at index {}",
+                    i
+                )));
+            }
+        }
+        let src_flat = self.flat_elements(src);
+        let total: usize = out_dims.iter().product();
+        if total > 100_000_000 {
+            return Err(AplError::runtime("under result too large".into()));
+        }
+        // Repeated scalar fill for the resized-region case.
+        let repl_total: usize = repl_dims.iter().product();
+        let repl_get = |idx: usize| -> AplRef<APLValue> {
+            if repl_flat.len() == 1 {
+                repl_flat[0].clone()
+            } else {
+                repl_flat
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_else(|| Rc::new(APLValue::Number(KapNumber::Long(0))))
+            }
+        };
+        let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(total);
+        let mut coord = vec![0usize; rank];
+        for _ in 0..total {
+            // isWithinReplacement (array_functions.kt:222)
+            let inside = (0..rank)
+                .all(|i| coord[i] >= offset[i] && coord[i] < repl_dims[i] + offset[i]);
+            if inside {
+                let mut idx = 0usize;
+                for i in 0..rank {
+                    idx = idx * repl_dims[i] + (coord[i] - offset[i]);
+                }
+                out.push(if repl_total == 0 {
+                    Rc::new(APLValue::Number(KapNumber::Long(0)))
+                } else {
+                    repl_get(idx)
+                });
+            } else {
+                // Outside: shift by the per-axis size delta (array_functions.kt:210).
+                let mut idx = 0usize;
+                for i in 0..rank {
+                    let p = coord[i];
+                    let mapped = if p < offset[i] {
+                        p
+                    } else {
+                        p + src_replacement_dims[i] - repl_dims[i]
+                    };
+                    idx = idx * src_dims[i] + mapped;
+                }
+                out.push(
+                    src_flat
+                        .get(idx)
+                        .cloned()
+                        .unwrap_or_else(|| Rc::new(APLValue::Number(KapNumber::Long(0)))),
+                );
+            }
+            // odometer
+            for i in (0..rank).rev() {
+                coord[i] += 1;
+                if coord[i] < out_dims[i] {
+                    break;
+                }
+                coord[i] = 0;
+            }
+        }
+        self.build_nested(&out, &out_dims)
+    }
+
     /// `base ⍢ wrapper` (Kotlin StructuralUnderOp → StructuralUnderDerivedFunction,
     /// operator.kt:387). NOTE the operand order: combineFunction(fn0=LEFT,
     /// fn1=RIGHT) stores baseFn=fns[0], wrapperFn=fns[1], and eval1Arg delegates
-    /// to `wrapperFn.evalWithStructuralUnder1Arg(baseFn, …)` =
-    /// inversibleStructuralUnder1Arg (functions.kt:267):
-    ///     v    = wrapper(a)
-    ///     res' = base(v)
-    ///     res  = wrapper⁻¹(res')
-    /// Wrappers whose evalInverse1Arg is themselves (⌽ reverse, - negate)
-    /// are supported here; others error with Kotlin's
-    /// StructuralUnderNotSupported text "under not supported for function"
-    /// (common.kt:155). Dyadic under reports the same unsupported error for now.
+    /// to `wrapperFn.evalWithStructuralUnder1Arg(baseFn, …)` (operator.kt:396).
+    ///
+    /// `evalWithStructuralUnder1Arg` is a PER-FUNCTION override, not one generic
+    /// rule (functions.kt:241 is only the unsupported default). Two families:
+    ///
+    /// 1. **Inverse-based** — math functions (`-`, `÷`, `⋆`…), `⍉`, `⍨`:
+    ///    `inversibleStructuralUnder1Arg` (functions.kt:267) =
+    ///    `wrapper⁻¹(base(wrapper(a)))`.
+    /// 2. **Overlay-based** — `↑` (drop.kt:84), `↓` (drop.kt:351), pick
+    ///    (lookup.kt:232): the wrapper SELECTS a region, base transforms it, and
+    ///    the result is written BACK into the original via `replaceForUnder` →
+    ///    `OverlayReplacementValue`. Oracle: `↓⍢(10↓) ⍳20` →
+    ///    `⟨0…9 11…19⟩` (the dropped tail is transformed and spliced back), and
+    ///    `⌽⍢(3↑) ⍳10` → `⟨2 1 0 3 4 5 6 7 8 9⟩`.
+    ///
+    /// The port previously implemented ONLY the inverse rule for every wrapper, so
+    /// every take/drop wrapper failed with "˝: inverse not supported for this
+    /// function". Take/drop now route through the overlay path.
     fn apply_under_op(
         &self,
         base: &Instr,
@@ -7875,10 +8002,49 @@ impl Engine {
         let wa = self.eval_apply(wrapper, &None, right, env)?;
         // res' = base(v)
         let bwa = self.eval_apply(base, &None, &Box::new(Instr::Value(wa.clone())), env)?;
-        // res = wrapper⁻¹(res'). Reuse the port's generic inverse machinery (the
-        // same evalInverse* dispatch that the `˝` adverb uses): evaluating
-        // Derived{wrapper, "˝"} applies wrapper's inverse to bwa. Wrappers with
-        // no inverse surface Kotlin's unsupported error.
+
+        // OVERLAY family: if the wrapper is a take/drop, splice `bwa` back into the
+        // original argument instead of applying an inverse (drop.kt:84/:351).
+        if let Some((is_take, counts)) = self.under_take_drop_spec(wrapper, env)? {
+            let a = self.eval_instr(right, env)?.force(self)?;
+            let src_dims = Self::value_dims(&a);
+            if src_dims.is_empty() {
+                return Err(unsupported());
+            }
+            let rank = src_dims.len();
+            // Selected-region shape + its offset in the source. Mirrors
+            // TakeArrayValue/DropArrayValue.replaceForUnder (drop.kt:174/:260):
+            // a POSITIVE take selects from the front (offset 0); a NEGATIVE take
+            // selects the tail (offset = n + count). For drop it is inverted — a
+            // positive drop leaves the tail (offset = count).
+            let mut sel_dims = Vec::with_capacity(rank);
+            let mut offset = Vec::with_capacity(rank);
+            for i in 0..rank {
+                let n = src_dims[i];
+                let c = counts.get(i).copied();
+                match c {
+                    None => {
+                        sel_dims.push(n);
+                        offset.push(0);
+                    }
+                    Some(c) if is_take => {
+                        let keep = (c.unsigned_abs() as usize).min(n);
+                        sel_dims.push(keep);
+                        offset.push(if c >= 0 { 0 } else { n - keep });
+                    }
+                    Some(c) => {
+                        let d = (c.unsigned_abs() as usize).min(n);
+                        sel_dims.push(n - d);
+                        offset.push(if c >= 0 { d } else { 0 });
+                    }
+                }
+            }
+            return self.overlay_replacement(&a, &sel_dims, &bwa, &offset);
+        }
+
+        // INVERSE family: res = wrapper⁻¹(res'). Reuse the port's generic inverse
+        // machinery (the same evalInverse* dispatch the `˝` adverb uses), which
+        // covers the math/⍉/⍨ wrappers that call inversibleStructuralUnder1Arg.
         let inv_wrapper = Instr::Derived {
             func: Box::new(wrapper.clone()),
             op: Box::new(Instr::Symbol {
@@ -7889,6 +8055,57 @@ impl Engine {
         self.eval_apply(&inv_wrapper, &None, &Box::new(Instr::Value(bwa)), env)
     }
 
+    /// If `wrapper` is a take/drop derived function (`3↑`, `10↓`, bare `↑`/`↓`),
+    /// return `(is_take, counts)` so `apply_under_op` can use the OVERLAY rule
+    /// (drop.kt:84/:351) instead of an inverse. Returns `None` for any other
+    /// wrapper, which then takes the inverse path.
+    fn under_take_drop_spec(
+        &self,
+        wrapper: &Instr,
+        env: &AplRef<Environment>,
+    ) -> Result<Option<(bool, Vec<i64>)>, AplError> {
+        // Unwrap a parenthesised left-bind train `Train[value, fn]` — this is how
+        // `(10↓)` and `(¯1↑)` parse (the value binds as the fn's left argument).
+        match wrapper {
+            Instr::Symbol { name, namespace: None } if name == "↑" || name == "↓" => {
+                // Bare monadic `↑`/`↓`: Kotlin's monadic drop removes 1 along the
+                // leading axis; monadic take is "first" and is NOT the overlay
+                // form, so only `↓` qualifies here.
+                if name == "↓" {
+                    Ok(Some((false, vec![1])))
+                } else {
+                    Ok(None)
+                }
+            }
+            Instr::Train { funcs, reverse: false, compose: false } if funcs.len() == 2 => {
+                let fname = match &funcs[1] {
+                    Instr::Symbol { name, namespace: None } => name.as_str(),
+                    _ => return Ok(None),
+                };
+                let is_take = match fname {
+                    "↑" => true,
+                    "↓" => false,
+                    _ => return Ok(None),
+                };
+                // The bound left value is the count vector.
+                let v = self.eval_instr(&funcs[0], env)?.force(self)?;
+                match self.count_vector(v) {
+                    Ok(counts) => Ok(Some((is_take, counts))),
+                    Err(_) => Ok(None),
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Power operator `f⍣n` / `f⍣g` (Kotlin PowerAPLOperator, operator.kt:7-65).
+    ///
+    /// Two modes, decided by the operand's parse shape (Kotlin distinguishes at
+    /// combine time: fn+expr ⇒ PowerAPLFunctionWithValueDescriptor = iterate,
+    /// fn+fn ⇒ PowerAPLFunctionDescriptor = until-loop). The port stores one
+    /// ValueOp; the operand `Instr` kind plays the same role:
+    ///
+    /// - **Iterate** (`f⍣n`, operand is a value expr): evaluate the operand to a
     ///   number and apply `fn` to the argument exactly n times. Negative n →
     ///   Kotlin text "Argument to power is negative: N". Monadic only.
     /// - **Until** (`f⍣g`, operand parses as a function atom): repeatedly apply

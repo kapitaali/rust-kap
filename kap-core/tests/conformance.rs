@@ -663,6 +663,32 @@ fn curated_kap_parity() {
         ("(-⍢-) 5", "¯5"),
         ("(-⍢⌽) 1 2 3", "(¯1 ¯2 ¯3)"),
         ("(⌽⍢-) 5", "5"),
+        // Structural-under OVERLAY family (2026-08-26). `evalWithStructuralUnder1Arg`
+        // is a PER-FUNCTION override, not one generic rule: math/⍉/⍨ wrappers use
+        // `inversibleStructuralUnder1Arg` (functions.kt:267, the inverse rule above),
+        // while `↑`/`↓` (drop.kt:84/:351) SELECT a region, let base transform it, and
+        // splice the result back via `replaceForUnder` → `OverlayReplacementValue`
+        // (array_functions.kt:126). All rows oracle-verified against kap-jvm-text.
+        ("↓⍢(10↓) ⍳20", "(0 1 2 3 4 5 6 7 8 9 11 12 13 14 15 16 17 18 19)"),
+        ("⌽⍢(3↑) ⍳10", "(2 1 0 3 4 5 6 7 8 9)"),
+        ("{100}⍢(2↑) ⍳6", "(100 100 2 3 4 5)"),
+        ("{1000+⍵}⍢(3↓) ⍳6", "(0 1 2 1003 1004 1005)"),
+        ("{99}⍢(¯2↓) ⍳6", "(99 99 99 99 4 5)"),
+        ("{⍵}⍢(¯2↑) ⍳6", "(0 1 2 3 4 5)"),
+        // A base fn that RESIZES the selected region resizes that axis
+        // (array_functions.kt:158); an empty replacement shrinks it away.
+        ("{,1 2}⍢(1↑) ⍳4", "(1 2 1 2 3)"),
+        ("{⍬}⍢(1↑) ⍳4", "(1 2 3)"),
+        ("{⍬}⍢(2↓) ⍳4", "(0 1)"),
+        // Rank-2 overlay: the selected sub-block is replaced in place.
+        ("⌽⍢(2↑) 2 3⍴⍳6", "((2 1 0) (5 4 3))"),
+        // Hex/binary literals normalise to Long, so integer-count builtins accept
+        // them (`⍳0x20` errored "⍳ needs an integer count" before 2026-08-26).
+        ("⍳0b101", "(0 1 2 3 4)"),
+        // `⍢` binds on an assignment RHS and on a chained fn atom (Kotlin
+        // processAssignment parses the RHS with parseValue, parser.kt:529).
+        ("x ← ⌽⍢⌽ ⍳5 ⋄ x", "(4 3 2 1 0)"),
+        ("{⍵+1} ⌽⍢⌽ ⍳5", "(5 4 3 2 1)"),
         // Phase 7 (OPEN-3): inner/outer product `f1 ∙ f2` (Kotlin OuterInnerJoinOp,
         // engine.kt:489). `∘∙f` => outer product (NullFunction sentinel); `f1∙f2` =>
         // inner join (normalize/error/reduce ladder, outer_join.kt:176-266).
