@@ -783,6 +783,26 @@ impl<'a> Parser<'a> {
                         };
                         continue;
                     }
+                    // Inner/outer product `f ∙ g` (Kotlin parseOperator →
+                    // OuterInnerJoinOp, engine.kt:489). `∙` is U+2219, emitted as a
+                    // plain Symbol token by the lexer. Binds after a FUNCTION: left
+                    // fn = cur, right fn = ONE function atom (op.kt:31 shape). A
+                    // leading `∘∙f` parses as ComposeToken(∘) then this arm with
+                    // cur=Symbol("∘") — the NullFunction sentinel at eval.
+                    Some(Token::Literal(LiteralValue::Symbol { ref name, .. }))
+                        if name == "∙" && Self::is_function_expr(&cur) =>
+                    {
+                        self.advance();
+                        self.skip_newlines();
+                        let is_null_left =
+                            matches!(&cur, Instr::Symbol { name, .. } if name == "∘");
+                        let r = self.parse_function_atom()?;
+                        cur = Instr::InnerProduct {
+                            left_fn: if is_null_left { None } else { Some(Box::new(cur)) },
+                            right_fn: Box::new(r),
+                        };
+                        continue;
+                    }
                     _ => {}
                 }
             }
@@ -1871,6 +1891,22 @@ impl<'a> Parser<'a> {
                         };
                     }
                 }
+                // Inner/outer product after a function atom (legacy parse_apply
+                // path — mirrors the bind_operators_kotlin arm). `∘∙f` arrives
+                // here as ComposeToken then this arm with first=Symbol("∘").
+                Some(Token::Literal(LiteralValue::Symbol { ref name, .. }))
+                    if name == "∙" && Self::is_function_expr(&first) =>
+                {
+                    let is_null_left =
+                        matches!(&first, Instr::Symbol { name, .. } if name == "∘");
+                    self.advance();
+                    self.skip_newlines();
+                    let r = self.parse_function_atom()?;
+                    first = Instr::InnerProduct {
+                        left_fn: if is_null_left { None } else { Some(Box::new(first)) },
+                        right_fn: Box::new(r),
+                    };
+                }
                 _ => {}
             }
         }
@@ -2399,6 +2435,33 @@ impl<'a> Parser<'a> {
                 break;
             }
             let paren_op = self.next_is_paren_operator();
+            // Outer product `A ∘∙f B` (ComposeToken + Symbol("∙")): a dyadic
+            // application of the null-left inner-product derived function.
+            // Must be checked BEFORE the strand loop breaks / dyadic is_operator
+            // test, neither of which knows the ComposeToken+∙ shape.
+            if let Some(t) = self.peek() {
+                if matches!(t.token, Token::ComposeToken) {
+                    if let Some(t2) = self.peek_at(1).map(|t| &t.token) {
+                        if matches!(t2, Token::Literal(LiteralValue::Symbol { name, .. }) if name == "∙")
+                        {
+                            self.advance(); // consume ∘
+                            self.advance(); // consume ∙
+                            self.skip_newlines();
+                            let rfn = self.parse_function_atom()?;
+                            let right = self.parse_apply()?;
+                            left = Instr::Apply {
+                                fn_expr: Box::new(Instr::InnerProduct {
+                                    left_fn: None,
+                                    right_fn: Box::new(rfn),
+                                }),
+                                left: Some(Box::new(left)),
+                                right: Box::new(right),
+                            };
+                            continue;
+                        }
+                    }
+                }
+            }
             let is_operator = match self.peek() {
                 Some(t) => match &t.token {
                     // A bare symbol is an operator only if it's a primitive or a
@@ -3440,6 +3503,14 @@ impl<'a> Parser<'a> {
             match &t.token {
                 Token::ComposeToken => {
                     self.advance();
+                    // `∘∙f` (outer product): ∘ then the InnerProduct operator.
+                    if let Some(t) = self.peek() {
+                        if matches!(&t.token, Token::Literal(LiteralValue::Symbol { name, .. }) if name == "∙") {
+                            self.advance();
+                            let right = self.parse_function_atom()?;
+                            return Ok(Instr::InnerProduct { left_fn: None, right_fn: Box::new(right) });
+                        }
+                    }
                     let right = self.parse_function_atom()?;
                     return Ok(Instr::Train { funcs: vec![left, right], reverse: false, compose: true });
                 }
@@ -3759,12 +3830,28 @@ impl<'a> Parser<'a> {
                             match &t.token {
                                 Token::ComposeToken => {
                                     self.advance();
-                                    let r = self.parse_function_atom()?;
-                                    member = Instr::Train {
-                                        funcs: vec![member, r],
-                                        reverse: false,
-                                        compose: true,
-                                    };
+                                    // `∘∙f` (outer product) inside a train member.
+                                    if let Some(t2) = self.peek() {
+                                        if matches!(&t2.token, Token::Literal(LiteralValue::Symbol { name, .. }) if name == "∙") {
+                                            self.advance();
+                                            let r = self.parse_function_atom()?;
+                                            member = Instr::InnerProduct { left_fn: None, right_fn: Box::new(r) };
+                                        } else {
+                                            let r = self.parse_function_atom()?;
+                                            member = Instr::Train {
+                                                funcs: vec![member, r],
+                                                reverse: false,
+                                                compose: true,
+                                            };
+                                        }
+                                    } else {
+                                        let r = self.parse_function_atom()?;
+                                        member = Instr::Train {
+                                            funcs: vec![member, r],
+                                            reverse: false,
+                                            compose: true,
+                                        };
+                                    }
                                 }
                                 Token::ReverseComposeToken => {
                                     self.advance();
@@ -3885,6 +3972,22 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.parse_block()
             }
+            Token::ComposeToken => {
+                // `∘∙f` — the OUTER product surface form (Kotlin NullFunction left
+                // operand of OuterInnerJoinOp, engine.kt:489). `∘` alone is also a
+                // valid compose; only treat it as the null-fn sentinel when `∙`
+                // follows immediately.
+                self.advance(); // consume ∘
+                if let Some(t) = self.peek() {
+                    if matches!(&t.token, Token::Literal(LiteralValue::Symbol { name, .. }) if name == "∙") {
+                        self.advance(); // consume ∙
+                        let r = self.parse_function_atom()?;
+                        return Ok(Instr::InnerProduct { left_fn: None, right_fn: Box::new(r) });
+                    }
+                }
+                let r = self.parse_function_atom()?;
+                Ok(Instr::Train { funcs: vec![Instr::symbol("∘"), r], reverse: false, compose: true })
+            }
             _ => Err(self.err("expected a function in train")),
         }
     }
@@ -3904,6 +4007,7 @@ impl<'a> Parser<'a> {
             Instr::Symbol { .. }
                 | Instr::Derived { .. }
                 | Instr::OpCall { .. }
+                | Instr::InnerProduct { .. }
                 | Instr::Lambda { .. }
                 | Instr::Train { .. }
                 | Instr::ValueOp { .. }
@@ -4036,6 +4140,23 @@ impl<'a> Parser<'a> {
     fn parse_primary(&mut self) -> Result<Instr, AplError> {
         let t = self.peek().ok_or_else(|| self.err("unexpected end of input"))?;
         match &t.token {
+            // `∘∙f` at PRIMARY position (outer product, e.g. `1 2 3 ∘∙× 3 4`):
+            // Kotlin parses `∘` as NullFunction then binds OuterInnerJoinOp. Only
+            // when `∙` immediately follows; otherwise fall through to the normal
+            // symbol path (plain compose).
+            Token::ComposeToken => {
+                if let Some(t2) = self.peek_at(1).map(|t| &t.token) {
+                    if matches!(t2, Token::Literal(LiteralValue::Symbol { name, .. }) if name == "∙") {
+                        self.advance(); // consume ∘
+                        self.advance(); // consume ∙
+                        let r = self.parse_function_atom()?;
+                        return Ok(Instr::InnerProduct { left_fn: None, right_fn: Box::new(r) });
+                    }
+                }
+                // Not followed by ∙ — plain compose symbol; handled by the general path.
+                self.advance();
+                return Ok(Instr::symbol("∘"));
+            }
             Token::Literal(LiteralValue::Symbol { name, namespace }) => {
                 let name = name.clone();
                 let namespace = namespace.clone();

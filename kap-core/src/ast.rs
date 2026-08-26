@@ -122,6 +122,15 @@ pub enum Instr {
         left_fn: Box<Instr>,
         right_fn: Option<Box<Instr>>,
     },
+    /// Inner/outer product `f₁ ∙ f₂` (Kotlin OuterInnerJoinOp, engine.kt:489).
+    /// ONE operator covers BOTH products (outer_join.kt:176): `left_fn == None`
+    /// ⇒ OUTER product (`∘.f` equivalent, e.g. `1 2 ∘∙× 3 4`); else INNER join
+    /// (`A +∙× B`). The result is a function applied to the data arguments.
+    /// `∙` is U+2219 (BULLET OPERATOR) — NOT `.` (MemberDereferenceToken).
+    InnerProduct {
+        left_fn: Option<Box<Instr>>,
+        right_fn: Box<Instr>,
+    },
     /// A function with an explicit axis specifier: `f[axis]` (e.g. `+[0]`). Mirrors
     /// Kotlin's `AxisValAssignedFunctionDirect`, created by `parseOperator` when a
     /// `[axis]` follows the function. `eval_apply` unwraps it and threads the axis into

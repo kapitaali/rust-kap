@@ -628,6 +628,14 @@ impl Engine {
                 }))
             }
             Instr::Empty => Ok(Rc::new(APLValue::Null)),
+            // An inner/outer product is a FUNCTION value; a bare occurrence routes
+            // through eval_apply so its guard produces the proper arity error.
+            Instr::InnerProduct { left_fn, right_fn } => self.eval_apply(
+                &Instr::InnerProduct { left_fn: left_fn.clone(), right_fn: right_fn.clone() },
+                &None,
+                &Box::new(Instr::Empty),
+                env,
+            ),
             Instr::Symbol { name, namespace } => {
                 // A keyword-namespace symbol (`:UTF16`, `:pretty`, …) is a *value*
                 // symbol (interned, renders `:utf16`), not a lookup in the ordinary
@@ -1497,6 +1505,10 @@ impl Engine {
         if let Instr::Train { funcs, reverse, compose } = fn_expr {
             return self.apply_train(funcs, *reverse, *compose, left, right, env);
         }
+        // --- Inner/outer product `f₁ ∙ f₂` (Kotlin OuterInnerJoinOp) ---
+        if let Instr::InnerProduct { left_fn, right_fn } = fn_expr {
+            return self.apply_inner_product(left_fn, right_fn, left, right, env);
+        }
         // --- User-defined / native operators called with explicit data args ---
         // e.g. `10 +foo 2` parses as `Apply{fn: OpCall{op:foo, left_fn:+}, left:10, right:2}`.
         if let Instr::OpCall { op, left_fn, right_fn } = fn_expr {
@@ -1540,6 +1552,10 @@ impl Engine {
                     Some(&name),
                 );
             }
+        }
+        // --- Inner/outer product `f₁ ∙ f₂` (Kotlin OuterInnerJoinOp) ---
+        if let Instr::InnerProduct { left_fn, right_fn } = fn_expr {
+            return self.apply_inner_product(left_fn, right_fn, left, right, env);
         }
         // For dyadic, force left then right; for monadic, only right.
         let right_val = self.eval_instr(right, env)?.force(self)?;
@@ -2382,6 +2398,256 @@ impl Engine {
     ///     monadic `(A y) B (C y)`;  dyadic `(x A y) B (x C y)`.
     /// - Left-bind `[value, fn]` (2-train, first member a value): `(c f) y` = `f(c, y)`
     ///   (the outer left arg is ignored).
+    /// Inner/outer product (Kotlin outer_join.kt OuterInnerJoinOp, :176–266).
+    ///
+    /// ONE operator covers BOTH products:
+    ///  * `left_fn == None` (surface form `∘∙f`) ⇒ OUTER product: result dims =
+    ///    concat(a_dims, b_dims); scalar sides disclosed once (:186–215).
+    ///  * else INNER join (`A f₁∙f₂ B`): normalize scalar-or-1-el-vector A against
+    ///    non-scalar B as constant-broadcast along B's first axis (:232–241);
+    ///    error when last axis of A ≠ first axis of B (:244–251, exact Kotlin
+    ///    text preserved); rank-1 × rank-1 fast path = reduce(fn₀, fn₁(A,B))
+    ///    (:252–254); higher rank = frame-of-cells (:256) — for each index over
+    ///    A's non-last axes × B's non-first axes, reduce fn₀ over fn₁ applied to
+    ///    the matching cells.
+    fn apply_inner_product(
+        &self,
+        left_fn: &Option<Box<Instr>>,
+        right_fn: &Box<Instr>,
+        left: &Option<Box<Instr>>,
+        right: &Box<Instr>,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let a_val = match left {
+            Some(l) => self.eval_instr(l, env)?.force(self)?,
+            None => Rc::new(APLValue::Null),
+        };
+        let b_val = self.eval_instr(right, env)?.force(self)?;
+        // --- OUTER product (`∘∙f`, NullFunction sentinel) ---
+        let Some(lfn) = left_fn else {
+            return self.apply_outer_product(&a_val, &b_val, right_fn, env);
+        };
+        // --- INNER join ---
+        // Normalize: scalar / 1-element vector A with non-scalar B ⇒ broadcast A
+        // along B's first axis; vice versa (:232–241). `5 +∙× 1 2 3` → each row
+        // [5] folds against B's rows.
+        let mut a_dims = Self::value_dims(&a_val);
+        let mut b_dims = Self::value_dims(&b_val);
+        let mut a = a_val;
+        let mut b = b_val;
+        if !Self::is_non_scalar(&a) {
+            if Self::is_non_scalar(&b) {
+                a = self.broadcast_along_first_axis(&a, *b_dims.first().unwrap_or(&1))?;
+                a_dims.clear();
+                a_dims.extend(Self::value_dims(&a));
+            }
+        } else if !Self::is_non_scalar(&b) {
+            let last = *a_dims.last().unwrap_or(&1);
+            b = self.broadcast_along_first_axis(&b, last)?;
+            b_dims.clear();
+            b_dims.extend(Self::value_dims(&b));
+        }
+        // Axis compatibility: last axis of A must equal first axis of B (:244–251).
+        let ak = a_dims.last().copied().unwrap_or(1);
+        let bk = b_dims.first().copied().unwrap_or(1);
+        if ak != bk && !(a_dims.len() <= 1 && b_dims.len() <= 1) {
+            return Err(AplError::runtime(format!(
+                "∙: Dimensions of A and B are incompatible. Dimensions of A: {:?}, Dimensions of B: {:?}. The size of the last axis of A has to be the same as the first axis of B.",
+                a_dims, b_dims
+            )));
+        }
+        // Rank-1 × rank-1 fast path: reduce(fn₀, fn₁(A,B)) (:252–254).
+        if a_dims.len() <= 1 && b_dims.len() <= 1 {
+            let ae = self.flat_elements(&a);
+            let be = self.flat_elements(&b);
+            if ae.len() != be.len() {
+                return Err(AplError::runtime(format!(
+                    "∙: Dimensions of A and B are incompatible. Dimensions of A: {:?}, Dimensions of B: {:?}. The size of the last axis of A has to be the same as the first axis of B.",
+                    a_dims, b_dims
+                )));
+            }
+            let mut acc: Option<AplRef<APLValue>> = None;
+            for i in 0..ae.len() {
+                let cell = self.apply_fn_instr(right_fn, Some(&ae[i]), &be[i], env)?;
+                acc = Some(match acc {
+                    None => cell,
+                    Some(prev) => {
+                        self.apply_fn_instr(lfn, Some(&prev), &cell, env)?
+                    }
+                });
+            }
+            return Ok(acc.unwrap_or_else(|| Rc::new(APLValue::Null)));
+        }
+        // Higher-rank: frame-of-cells. For each index (i…, j…) over A's leading
+        // axes × B's trailing axes, fold fn₁ over the inner axis then reduce fn₀.
+        let a_frame: Vec<usize> = a_dims[..a_dims.len() - 1].to_vec();
+        let b_frame: Vec<usize> = b_dims[1..].to_vec();
+        let a_cells = self.frame_cells(&a, &a_frame)?;
+        let b_cells = self.frame_cells(&b, &b_frame)?;
+        let mut out_rows: Vec<AplRef<APLValue>> = Vec::with_capacity(a_cells.len());
+        for ac in &a_cells {
+            let mut row: Vec<AplRef<APLValue>> = Vec::with_capacity(b_cells.len());
+            for bc in &b_cells {
+                // Fold fn₁ dyadically over the shared inner axis, then fn₀-reduce.
+                let ce = self.flat_elements(ac);
+                let de = self.flat_elements(bc);
+                if ce.len() != de.len() {
+                    return Err(AplError::runtime(format!(
+                        "∙: Dimensions of A and B are incompatible. Dimensions of A: {:?}, Dimensions of B: {:?}. The size of the last axis of A has to be the same as the first axis of B.",
+                        a_dims, b_dims
+                    )));
+                }
+                let mut acc: Option<AplRef<APLValue>> = None;
+                for i in 0..ce.len() {
+                    let cell = self.apply_fn_instr(right_fn, Some(&ce[i]), &de[i], env)?;
+                    acc = Some(match acc {
+                        None => cell,
+                        Some(prev) => self.apply_fn_instr(lfn, Some(&prev), &cell, env)?,
+                    });
+                }
+                row.push(acc.unwrap_or_else(|| Rc::new(APLValue::Null)));
+            }
+            out_rows.push(self.vec_to_value(row)?);
+        }
+        self.nest_rows(out_rows, &b_frame)
+    }
+
+    /// Outer product helper: result shape concat(a,b), every (i,j) pair via fn.
+    fn apply_outer_product(
+        &self,
+        a: &AplRef<APLValue>,
+        b: &AplRef<APLValue>,
+        right_fn: &Instr,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let a_dims = Self::value_dims(a);
+        let b_dims = Self::value_dims(b);
+        let a_scalar = !Self::is_non_scalar(a);
+        let b_scalar = !Self::is_non_scalar(b);
+        let ae = self.flat_elements(a);
+        let be = self.flat_elements(b);
+        // Disclose scalars exactly once (outer_join.kt :190–193 aScalar/bScalar).
+        let (ae, be): (Vec<_>, Vec<_>) = if a_scalar && b_scalar {
+            let x = ae[0].clone();
+            let y = be[0].clone();
+            (vec![x], vec![y])
+        } else if a_scalar {
+            (vec![ae[0].clone()], be)
+        } else if b_scalar {
+            (ae, vec![be[0].clone()])
+        } else {
+            (ae, be)
+        };
+        let eff_a_dims: Vec<usize> = if a_scalar { vec![] } else { a_dims.clone() };
+        let eff_b_dims: Vec<usize> = if b_scalar { vec![] } else { b_dims.clone() };
+        let mut flat: Vec<AplRef<APLValue>> = Vec::with_capacity(ae.len() * be.len());
+        for x in &ae {
+            for y in &be {
+                flat.push(self.apply_fn_instr(right_fn, Some(x), y, env)?);
+            }
+        }
+        let mut dims = eff_a_dims;
+        dims.extend(eff_b_dims.iter().copied());
+        self.build_nested(&flat, &dims)
+    }
+
+    /// Shape of an array value (scalars have empty shape).
+    fn value_dims(v: &APLValue) -> Vec<usize> {
+        match v {
+            APLValue::Array(arr) => arr.dimensions.clone(),
+            _ => vec![],
+        }
+    }
+
+    /// True when the value is a Kap array of rank ≥ 1 (incl. strings/char vectors).
+    fn is_non_scalar(v: &APLValue) -> bool {
+        matches!(v, APLValue::Array(_))
+    }
+
+    /// Broadcast a scalar/1-element value along `n` copies of the first axis.
+    fn broadcast_along_first_axis(
+        &self,
+        v: &AplRef<APLValue>,
+        n: usize,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let one = self.flat_elements(v);
+        let e = one.into_iter().next().unwrap_or_else(|| Rc::new(APLValue::Null));
+        let flat: Vec<AplRef<APLValue>> = (0..n).map(|_| e.clone()).collect();
+        self.build_nested(&flat, &[n])
+    }
+
+    /// Split `v` into cells framed by `frame`: leading dims = frame, cell dims =
+    /// the remaining dims. Returns frame-product cells in row-major order.
+    fn frame_cells(
+        &self,
+        v: &AplRef<APLValue>,
+        frame: &[usize],
+    ) -> Result<Vec<AplRef<APLValue>>, AplError> {
+        let dims = Self::value_dims(v);
+        if frame.is_empty() {
+            return Ok(vec![Rc::new(v.as_ref().clone())]);
+        }
+        let nframes: usize = frame.iter().product();
+        let cell_len: usize = dims[frame.len()..].iter().product::<usize>().max(1);
+        let elems = match v.as_ref() {
+            APLValue::Array(arr) => arr.elements(),
+            other => vec![Rc::new(other.clone())],
+        };
+        let mut cells = Vec::with_capacity(nframes);
+        for k in 0..nframes {
+            let slice = &elems[k * cell_len..(k + 1) * cell_len];
+            let cell_dims = dims[frame.len()..].to_vec();
+            cells.push(self.build_nested(slice, &cell_dims)?);
+        }
+        Ok(cells)
+    }
+
+    /// Assemble a flat element list into a nested array with the given shape.
+    /// Rank 1 → plain array; higher rank → Nested data of arrays per row.
+    fn build_nested(
+        &self,
+        flat: &[AplRef<APLValue>],
+        dims: &[usize],
+    ) -> Result<AplRef<APLValue>, AplError> {
+        if dims.len() <= 1 {
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                dims.to_vec(),
+                ArrayData::Nested(flat.to_vec()),
+            )))));
+        }
+        // Higher rank: recursively build rows along the first axis.
+        let rows = dims[0];
+        let inner: usize = dims[1..].iter().product();
+        let mut row_arrays: Vec<AplRef<APLValue>> = Vec::with_capacity(rows);
+        for r in 0..rows {
+            let slice = &flat[r * inner..(r + 1) * inner];
+            row_arrays.push(self.build_nested(slice, &dims[1..])?);
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            dims.to_vec(),
+            ArrayData::Nested(row_arrays),
+        )))))
+    }
+
+    fn nest_rows(
+        &self,
+        rows: Vec<AplRef<APLValue>>,
+        _inner_dims: &[usize],
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let outer = rows.len();
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![outer],
+            ArrayData::Nested(rows),
+        )))))
+    }
+
+    fn vec_to_value(&self, row: Vec<AplRef<APLValue>>) -> Result<AplRef<APLValue>, AplError> {
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![row.len()],
+            ArrayData::Nested(row),
+        )))))
+    }
+
     fn apply_train(
         &self,
         funcs: &[Instr],

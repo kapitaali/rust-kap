@@ -663,6 +663,18 @@ fn curated_kap_parity() {
         ("(-⍢-) 5", "¯5"),
         ("(-⍢⌽) 1 2 3", "(¯1 ¯2 ¯3)"),
         ("(⌽⍢-) 5", "5"),
+        // Phase 7 (OPEN-3): inner/outer product `f1 ∙ f2` (Kotlin OuterInnerJoinOp,
+        // engine.kt:489). `∘∙f` => outer product (NullFunction sentinel); `f1∙f2` =>
+        // inner join (normalize/error/reduce ladder, outer_join.kt:176-266).
+        ("1 2 3 +∙× 1 2 3", "14"),
+        ("(2 2⍴1 2 3 4) +∙× (2 2⍴1 2 3 4)", "((5 11) (11 25))"),
+        ("5 +∙× 1 2 3", "30"),
+        ("1 2 3 +∙× 3 4 5", "26"),
+        ("f ⇐ ∘∙× ⋄ (1 2 3) f (3 4)", "((3 4) (6 8) (9 12))"),
+        ("1 2 3 ∘∙× 3 4", "((3 4) (6 8) (9 12))"),
+        ("1 2 ∘∙× (2 2⍴3 4 5 6)", "(((3 4) (5 6)) ((6 8) (10 12)))"),
+        // Error text (verified side-by-side; harness cannot assert messages):
+        //   1 2 3 +∙× 4 5  ->  "∙: Dimensions of A and B are incompatible. ..." (Kotlin details field)
         // Phase 6 (P6): native quad constants + declare(:const) const enforcement.
         // Values are oracle-exact; the `Str`-vs-char-array `typeof` class name is a
         // separate deferred string-modeling gap (KNOWN-NONCONFORMANCE), not asserted here.
