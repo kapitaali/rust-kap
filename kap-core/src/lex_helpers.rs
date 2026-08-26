@@ -158,6 +158,14 @@ pub fn lex_number(chars: &[char], i: usize) -> Result<(KapNumber, usize), String
         let v = BigInt::parse_bytes(digits.as_bytes(), radix)
             .ok_or_else(|| "invalid integer literal".to_string())?;
         // negative? handled by leading ¯ already consumed? Here `0x..` is non-negative.
+        // Normalise to `Long` when it fits, exactly as the DECIMAL path below does
+        // (see the tail of `parse_kap_number`). Without this, `0x20` stayed a
+        // `BigInt` while `32` was a `Long`, so integer-count builtins that match
+        // on `KapNumber::Long` rejected it — `⍳0x20` errored "⍳ needs an integer
+        // count" while `⍳32` worked (output3.kap:38).
+        if let Ok(l) = v.to_string().parse::<i64>() {
+            return Ok((KapNumber::Long(l), j));
+        }
         return Ok((KapNumber::BigInt(v), j));
     }
 
@@ -334,8 +342,11 @@ mod tests {
 
     #[test]
     fn lex_hex_and_binary() {
-        assert_eq!(number_of("0x12"), KapNumber::BigInt(num_bigint::BigInt::from(0x12)));
-        assert_eq!(number_of("0b1100110"), KapNumber::BigInt(num_bigint::BigInt::from(0b1100110)));
+        // Hex/binary literals normalise to `Long` when they fit, exactly like
+        // decimal literals — `0x20` must be indistinguishable from `32` so that
+        // integer-count builtins (`⍳`) accept it (oracle: `⍳0x20` → ⟨0…31⟩).
+        assert_eq!(number_of("0x12"), KapNumber::Long(0x12));
+        assert_eq!(number_of("0b1100110"), KapNumber::Long(0b1100110));
     }
 
     #[test]

@@ -549,6 +549,10 @@ impl Engine {
                 macros,
                 kotlin_close_stack: Vec::new(),
             };
+            if std::env::var("KAP_DEBUG_USE").is_ok() {
+                let at = toks.get(pos).map(|t| format!("{}:{}", t.line, t.col)).unwrap_or_else(|| "EOF".into());
+                eprintln!("DEBUG-USE[{}] LOOP stmt#{} parse-start @tok{}", file_label, total + 1, at);
+            }
             match p.parse_statements() {
                 Ok(Some(instr)) => {
                     pos = p.pos;
@@ -559,6 +563,14 @@ impl Engine {
                             failed += 1;
                             if first_err.is_none() {
                                 first_err = Some(e.to_string());
+                            }
+                            if std::env::var("KAP_DEBUG_USE").is_ok() {
+                                let at = toks.get(pos).map(|t| format!("{}:{}", t.line, t.col)).unwrap_or_else(|| "EOF".into());
+                                let tok = toks.get(pos).map(|t| format!("{:?}", t.token)).unwrap_or_else(|| "EOF".into());
+                                eprintln!(
+                                    "DEBUG-USE[{}] EVAL-FAIL stmt#{} @tok{}: {} | next-tok={}",
+                                    file_label, total + 1, at, e, tok
+                                );
                             }
                         }
                     }
@@ -571,6 +583,14 @@ impl Engine {
                     failed += 1;
                     if first_err.is_none() {
                         first_err = Some(format!("parse: {}", e));
+                    }
+                    if std::env::var("KAP_DEBUG_USE").is_ok() {
+                        let at = toks.get(pos).map(|t| format!("{}:{}", t.line, t.col)).unwrap_or_else(|| "EOF".into());
+                        let tok = toks.get(pos).map(|t| format!("{:?}", t.token)).unwrap_or_else(|| "EOF".into());
+                        eprintln!(
+                            "DEBUG-USE[{}] PARSE-FAIL stmt#{} @tok{}: {} | next-tok={}",
+                            file_label, total, at, e, tok
+                        );
                     }
                     let mut skipped = false;
                     while pos < toks.len() {
@@ -613,18 +633,20 @@ impl Engine {
             Instr::Literal(LiteralValue::Char(c)) => Ok(Rc::new(APLValue::Char(*c))),
             Instr::Literal(LiteralValue::Str(s)) => Ok(Rc::new(APLValue::Str(s.clone()))),
             Instr::Literal(LiteralValue::Symbol { .. }) => Err(AplError::runtime("lone symbol literal".into())),
-            Instr::Literal(LiteralValue::SymbolValue { name }) => {
+            Instr::Literal(LiteralValue::SymbolValue { name, namespace }) => {
                 // A `'name` symbol literal (Kotlin QuotePrefix → LiteralSymbol):
-                // evaluates to the interned symbol VALUE itself.
+                // evaluates to the interned symbol VALUE itself. `namespace` is
+                // preserved (e.g. `'kap:array` → Symbol{name:"array", ns:"kap"})
+                // so it matches `typeof`-returned symbols under `≡`.
                 Ok(Rc::new(APLValue::Symbol {
                     name: name.clone(),
-                    namespace: None,
+                    namespace: namespace.clone(),
                 }))
             }
-            Instr::SymbolValue { name } => {
+            Instr::SymbolValue { name, namespace } => {
                 Ok(Rc::new(APLValue::Symbol {
                     name: name.clone(),
-                    namespace: None,
+                    namespace: namespace.clone(),
                 }))
             }
             Instr::Empty => Ok(Rc::new(APLValue::Null)),
@@ -7255,6 +7277,7 @@ impl Engine {
             APLValue::Str(s) => Ok(Instr::Literal(LiteralValue::Str(s.clone()))),
             APLValue::Symbol { name, namespace } => Ok(Instr::SymbolValue {
                 name: name.clone(),
+                namespace: namespace.clone(),
             }),
             APLValue::Array(a) => {
                 let mut elems = Vec::with_capacity(a.element_count());

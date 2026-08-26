@@ -503,7 +503,22 @@ impl<'a> Parser<'a> {
                         None => return Err(self.err("assignment without a target")),
                     };
                     self.advance(); // consume ←
-                    let value = self.parse_expr()?;
+                    // Kotlin `processAssignment` (parser.kt:529) parses the RHS with
+                    // `parseValue()` — the SAME accumulator loop we are in, NOT a
+                    // separate legacy path. Recursing here is what lets operators the
+                    // accumulator owns (`⍢` structural-under, `⍣` power, `«»` forks)
+                    // appear on an assignment RHS: `x ← ⌽⍢⌽ ⍳5`. Calling the legacy
+                    // `parse_expr` instead made `⍢` fall through to a bare symbol
+                    // lookup → `undefined symbol: ⍢` (output3.kap:38 and friends).
+                    // Legacy remains the fallback for the value-operator sentinel.
+                    let value = match self.parse_value_kotlin() {
+                        Ok(v) => v,
+                        Err(crate::AplError::Runtime(m)) if m.contains("__KOTLIN_FALLBACK__") => {
+                            self.pos = start;
+                            return self.parse_expr();
+                        }
+                        Err(e) => return Err(e),
+                    };
                     if let Instr::Array { elements } = &target {
                         if elements.iter().all(|e| matches!(e, Instr::Symbol { .. })) {
                             let names = elements
@@ -1937,6 +1952,12 @@ impl<'a> Parser<'a> {
         // Kotlin path). `⍛` binds `first` as left, parses ONE fn as right,
         // then chains the result as the new `first` for further application.
         if Self::is_function_expr(&first) {
+            // `⍢`/`⍣` bind a function atom the same way `∘`/`⍛` do, but they are
+            // lexed as plain `Symbol`s so the token arms below never see them.
+            // Needed because finish_fn_call routes a monadic right argument through
+            // this legacy path (parser.rs:1027), which is how `{⍵} ⌽⍢⌽ ⍳5` and
+            // `{…} ↓⍢(10↓) ⍳0x20` (output3.kap:38) arrive here.
+            first = self.fold_value_ops_on_atom(first)?;
             match self.peek().map(|t| t.token.clone()) {
                 Some(Token::ComposeToken) => {
                     self.advance();
@@ -2032,6 +2053,11 @@ impl<'a> Parser<'a> {
                 | Instr::Block { .. }
                 | Instr::OpCall { .. }
                 | Instr::DynamicRef { .. }
+                // A `⍢`/`⍣`/`⍤` derived function (ValueOp) is just as much a
+                // function value as a Derived adverb — without this arm a leading
+                // `⌽⍢⌽ ⍳5` fell through to the bare-symbol heuristic and STRANDED
+                // the derived fn beside its argument instead of applying it.
+                | Instr::ValueOp { .. }
         ) {
             // A statement boundary ends the expression: the function stands alone.
             if self.at_statement_boundary() {
@@ -2864,6 +2890,37 @@ impl<'a> Parser<'a> {
     /// `/` reduce, `\` scan, `¨` each.
     fn is_adverb(name: &str) -> bool {
         matches!(name, "/" | "reduce" | "\\" | "scan" | "⌿" | "⍀" | "¨" | "each" | "⍨" | "commute" | "∵" | "bitwise" | "⌸" | "key" | "⌻" | "˝" | "inverse")
+    }
+
+    /// Fold the *value-right-arg* operators `⍢` (structural-under) and `⍣` (power)
+    /// onto a just-parsed function ATOM, mirroring Kotlin `parseOperator`
+    /// (parser.kt:1273), which runs per-function rather than on an accumulated
+    /// train. Both are lexed as plain `Symbol`s (there is no `UnderToken`), so
+    /// unlike `∘`/`⍛` they are invisible to the token-matched compose arms and
+    /// unlike `/`/`⍨` they are not in `is_adverb` — without this fold a chained
+    /// form such as `{⍵} ⌽⍢⌽` left the `⍢` dangling and it fell through to a bare
+    /// symbol lookup → `undefined symbol: ⍢` (output3.kap:38 and friends).
+    /// Loops so `f⍢g⍣2` binds left-to-right like the Kotlin operator loop.
+    fn fold_value_ops_on_atom(&mut self, mut atom: Instr) -> Result<Instr, AplError> {
+        loop {
+            let op = match self.peek().map(|t| &t.token) {
+                Some(Token::Literal(LiteralValue::Symbol { name, namespace: None }))
+                    if name == "⍢" || name == "⍣" =>
+                {
+                    name.clone()
+                }
+                _ => break,
+            };
+            self.advance(); // consume ⍢ / ⍣
+            self.skip_newlines();
+            let operand = self.parse_function_atom()?;
+            atom = Instr::ValueOp {
+                func: Box::new(atom),
+                op_name: op,
+                operand: Box::new(operand),
+            };
+        }
+        Ok(atom)
     }
 
     /// Try to parse a *train*: a parenthesised sequence of >=2 function expressions,
@@ -3734,6 +3791,13 @@ impl<'a> Parser<'a> {
                     self.peek().map(|t| &t.token),
                     Some(Token::Literal(LiteralValue::Symbol { name, .. })) if Self::is_primitive_op(name)
                 );
+                // A user/known fn can also start the chain continuation (e.g.
+                // `'kap:array f UserFn`); widen via is_fn_atom_name below when
+                // the left run has more than one element.
+                let is_chain_start = matches!(
+                    self.peek().map(|t| &t.token),
+                    Some(Token::Literal(LiteralValue::Symbol { name, namespace })) if self.is_fn_atom_name(name, namespace)
+                );
                 if vals.len() > 1 && is_chain_start {
                     // Kotlin `parseExpr` returns at the FIRST FnParseResult, so a
                     // `⇐` RHS / train value+fn chain is built by processFn's
@@ -3812,6 +3876,9 @@ impl<'a> Parser<'a> {
                     // the accumulated train) as its left — Kotlin parseOperator
                     // runs on each function individually (parser.kt:1273).
                     // `F (…)⍛⊇ ∧` ⇒ `⍛` binds `(…)`, not `F (…)`.
+                    // `⍢`/`⍣` bind the same way but are plain Symbols, so they
+                    // need their own fold (see fold_value_ops_on_atom).
+                    right = self.fold_value_ops_on_atom(right)?;
                     if let Some(t) = self.peek() {
                         match &t.token {
                             Token::ComposeToken => {
@@ -3884,8 +3951,8 @@ impl<'a> Parser<'a> {
                     };
                     loop {
                         let more = match self.peek().map(|t| &t.token) {
-                            Some(Token::Literal(LiteralValue::Symbol { name, .. })) => {
-                                Self::is_primitive_op(name)
+                            Some(Token::Literal(LiteralValue::Symbol { name, namespace })) => {
+                                self.is_fn_atom_name(name, namespace)
                             }
                             Some(Token::OpenParen) | Some(Token::LambdaToken)
                             | Some(Token::ApplyToken) | Some(Token::LeftForkToken) => true,
@@ -3913,6 +3980,8 @@ impl<'a> Parser<'a> {
                         // Compose/reverse-compose binds the JUST-PARSED atom
                         // (NOT the accumulated `cur`) as its left — Kotlin
                         // parseOperator runs per-function (parser.kt:1273).
+                        // Same for `⍢`/`⍣`, which are plain Symbols.
+                        member = self.fold_value_ops_on_atom(member)?;
                         if let Some(t) = self.peek() {
                             match &t.token {
                                 Token::ComposeToken => {
@@ -4021,10 +4090,48 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Instr::Symbol { name, namespace })
             }
-            Token::Literal(LiteralValue::SymbolValue { name }) => {
+            Token::Literal(LiteralValue::SymbolValue { name, namespace }) => {
+                // A `'name` symbol *value* literal already lexed as a Literal
+                // (e.g. the `'kap:array` in `f ⇐ 'kap:array≡typeof`). It is a
+                // VALUE operand (like a Number), so wrap it in `Instr::Literal`
+                // to participate in value-strand left-bind trains. `namespace`
+                // is preserved so it matches `typeof`-returned symbols under `≡`.
                 let name = name.clone();
+                let namespace = namespace.clone();
                 self.advance();
-                Ok(Instr::SymbolValue { name })
+                Ok(Instr::Literal(LiteralValue::SymbolValue { name, namespace }))
+            }
+            Token::QuotePrefix => {
+                // `'name` — a *symbol literal* (Kotlin QuotePrefix +
+                // parser.kt:1003 `LiteralSymbol`). Consume the following symbol
+                // token (namespace-qualified allowed) and yield a `Literal`
+                // value operand, so `'kap:array ≡ typeof` strands like a Number
+                // would (`1 2 + ≢`). Without this the `'` falls through to the
+                // `expected a function in train` error.
+                //
+                // The symbol's namespace is preserved as a SEPARATE `namespace`
+                // field (NOT flattened into the name): Kotlin's `LiteralSymbol`
+                // stores `APLSymbol{name, namespace}`, and `typeof` returns
+                // `Symbol{name:"array", ns:"kap"}` — so `'kap:array` must yield
+                // `SymbolValue{name:"array", namespace:"kap"}` to match it under
+                // `≡`. Flattening to `name:"kap:array", ns:None` would break
+                // `'kap:array ≡ (typeof 1 2 3)` (→ 0 instead of 1).
+                self.advance();
+                match self.peek() {
+                    Some(t) if matches!(t.token, Token::Literal(LiteralValue::Symbol { .. })) => {
+                        let tok = t.token.clone();
+                        self.advance();
+                        if let Token::Literal(LiteralValue::Symbol { name, namespace }) = tok {
+                            Ok(Instr::Literal(LiteralValue::SymbolValue {
+                                name,
+                                namespace,
+                            }))
+                        } else {
+                            unreachable!()
+                        }
+                    }
+                    _ => Err(self.err("expected a symbol after '")),
+                }
             }
             Token::OpenParen => {
                 // Nested train or group of functions.
@@ -4295,16 +4402,22 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Instr::Symbol { name, namespace })
             }
-            Token::Literal(LiteralValue::SymbolValue { name }) => {
+            Token::Literal(LiteralValue::SymbolValue { name, namespace }) => {
+                // Pass the symbol value through as an `Instr::SymbolValue`, preserving
+                // its namespace (so a `'kap:array` resolves with the `kap` namespace).
                 let name = name.clone();
+                let namespace = namespace.clone();
                 self.advance();
-                Ok(Instr::SymbolValue { name })
+                Ok(Instr::SymbolValue { name, namespace })
             }
             Token::QuotePrefix => {
                 // `'name` — a *symbol literal* (Kotlin QuotePrefix +
                 // parser.kt:1003: `LiteralSymbol(nameToSymbol(tokeniser.nextTokenWithType()))`).
                 // Consume the following symbol token (which may be namespace-qualified)
                 // and yield a SymbolValue that evaluates to `APLValue::Symbol`.
+                // `namespace` is preserved as a SEPARATE field (not flattened into the
+                // name) so `'kap:array` matches `typeof`-returned `Symbol{array, kap}`
+                // under `≡`.
                 self.advance();
                 match self.peek() {
                     Some(t) if matches!(
@@ -4315,10 +4428,8 @@ impl<'a> Parser<'a> {
                         self.advance();
                         if let Token::Literal(LiteralValue::Symbol { name, namespace }) = tok {
                             Ok(Instr::Literal(LiteralValue::SymbolValue {
-                                name: match namespace {
-                                    Some(ns) => format!("{}:{}", ns, name),
-                                    None => name,
-                                },
+                                name,
+                                namespace,
                             }))
                         } else {
                             unreachable!()
