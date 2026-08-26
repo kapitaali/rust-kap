@@ -2961,6 +2961,19 @@ impl<'a> Parser<'a> {
             | Some(Token::Literal(LiteralValue::SymbolValue { .. })) => true,
             Some(Token::OpenBracket)
             | Some(Token::QuotePrefix) => true,
+            // A NESTED PAREN GROUP is value-leading too: `((-2)↑)` — the inner
+            // `(-2)` is a value EXPRESSION (function-glyph-initial, so
+            // `try_parse_train` cannot parse it), and the group as a whole is a
+            // left-bind of that value to `↑`. Kotlin's inner `parseExpr`
+            // (parser.kt:939) makes no distinction — a `(` simply recurses into
+            // the same accumulator, which returns either a Value or an Fn holder.
+            // Routing these to `try_parse_train` (fn-members-only) instead made
+            // `((-2)↑)` parse ONLY in left-tine position, while as a fork's RIGHT
+            // tine (`⌽«,»((-2)↑)`) it failed with "unexpected token in primary" at
+            // the inner group's `)`. `parse_paren_accum`'s catch-all arm already
+            // routes a nested `(` through `parse_function_atom`, so the accumulator
+            // handles this shape; only this dispatch guard excluded it.
+            Some(Token::OpenParen) => true,
             _ => false,
         };
         if first_is_value {
@@ -3087,6 +3100,97 @@ impl<'a> Parser<'a> {
                             continue;
                         }
                         ParenHolder::Malformed => return ParenHolder::Malformed,
+                    }
+                }
+                // A NESTED PAREN GROUP. It must be parsed as a SELF-CONTAINED,
+                // balanced unit — recursing straight into `parse_paren_accum` here is
+                // wrong, because that accumulator returns at the FIRST `)` it meets,
+                // so for `((-2)↑)` the inner recursion parsing `-`'s argument ate the
+                // `)` that closes the inner group and then ran on past it.
+                //
+                // The group may be either a FUNCTION (`(+ ×)` → a train) or a VALUE
+                // (`(-2)` → a monadic-negate application). `parse_function_atom`
+                // handles the balanced group correctly but classifies nothing, so use
+                // `is_function_expr` on its result as the discriminator: a real
+                // function continues like the symbol-function arm, while anything else
+                // (`Array[-, 2]`, the mis-stranding this arm exists to avoid) is
+                // re-parsed as a value with `parse_primary`.
+                Some(Token::OpenParen) => {
+                    let save = self.pos;
+                    let as_fn = self.parse_function_atom().ok().filter(Self::is_function_expr);
+                    match as_fn {
+                        Some(f) => {
+                            // Function group: identical continuation to the symbol arm
+                            // below (Kotlin parser.kt:457–491).
+                            match self.parse_paren_accum() {
+                                ParenHolder::Empty => {
+                                    return if left_args.is_empty() {
+                                        ParenHolder::Fn(f)
+                                    } else {
+                                        let v = strand_instrs(left_args);
+                                        ParenHolder::Fn(Instr::Train {
+                                            funcs: vec![v, f],
+                                            reverse: false,
+                                            compose: false,
+                                        })
+                                    };
+                                }
+                                ParenHolder::Fn(g) => {
+                                    return if left_args.is_empty() {
+                                        ParenHolder::Fn(Instr::Train {
+                                            funcs: vec![f, g],
+                                            reverse: false,
+                                            compose: false,
+                                        })
+                                    } else {
+                                        let v = strand_instrs(left_args);
+                                        ParenHolder::Fn(Instr::Train {
+                                            funcs: vec![
+                                                Instr::Train {
+                                                    funcs: vec![v, f],
+                                                    reverse: false,
+                                                    compose: false,
+                                                },
+                                                g,
+                                            ],
+                                            reverse: false,
+                                            compose: false,
+                                        })
+                                    };
+                                }
+                                ParenHolder::Value(v) => {
+                                    let app = if left_args.is_empty() {
+                                        Instr::Apply {
+                                            fn_expr: Box::new(f),
+                                            left: None,
+                                            right: Box::new(v),
+                                        }
+                                    } else {
+                                        let l = strand_instrs(std::mem::take(&mut left_args));
+                                        Instr::Apply {
+                                            fn_expr: Box::new(f),
+                                            left: Some(Box::new(l)),
+                                            right: Box::new(v),
+                                        }
+                                    };
+                                    left_args.push(app);
+                                    continue;
+                                }
+                                ParenHolder::Malformed => return ParenHolder::Malformed,
+                            }
+                        }
+                        None => {
+                            // Value group: re-parse as a value primary and strand it,
+                            // so `((-2)↑)` becomes left-bind Train[Apply{-,2}, ↑].
+                            self.pos = save;
+                            match self.parse_primary() {
+                                Ok(v) => {
+                                    left_args.push(v);
+                                    continue;
+                                }
+                                Err(_) => return ParenHolder::Malformed,
+                            }
+                        }
                     }
                 }
                 // Plain value atom: strand it (parser.kt:991–1003 addLeftArg).

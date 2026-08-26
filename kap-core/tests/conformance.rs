@@ -716,6 +716,15 @@ fn curated_kap_parity() {
         // Literal/Array/Empty, so these missed the left-bind arm of apply_train, fell
         // through to ATOP, and failed with "only symbol/lambda functions supported yet".
         ("((-2)↑) ⍳6", "(4 5)"),
+        // A paren-group VALUE as a left-bind inside a FORK TINE. `((-2)↑)` parsed
+        // only in left-tine position; as a right tine the nested group was routed to
+        // the fn-members-only `try_parse_train`, which stranded it as `Array[-, 2]`
+        // (→ "unexpected token in primary", then "No arguments specified for
+        // function"). All four positions are now oracle-exact.
+        ("⌽«,»((-2)↑) ⍳6", "(5 4 3 2 1 0 4 5)"),
+        ("(2↑)«,»((-2)↑) ⍳6", "(0 1 4 5)"),
+        ("((-2)↑)«,»(2↑) ⍳6", "(4 5 0 1)"),
+        ("⌽«,»((-2)+) 5", "(5 3)"),
         ("((1+1)↑) ⍳6", "(0 1)"),
         ("((-2)+) 5", "3"),
         ("((⌈3÷2)↑) ⍳6", "(0 1)"),
