@@ -1207,6 +1207,85 @@ impl Engine {
                     // An EXPLICIT axis replaces the default (last for ⌽, first for ⊖).
                     self.reverse_axis(left_v, right_v, Some(axis_as_long), true)
                 }
+                // `↑[k]`/`↓[k]`: take/drop along axis k (Kotlin drop.kt:335 — with an
+                // explicit axis the left argument must be a SINGLE integer, which is
+                // placed at axis k with every other axis 0, validated by
+                // ensureValidAxis). Monadic + axis is rejected (drop.kt:309
+                // AxisNotSupported). Before this arm existed the parser did not even
+                // build an AxisApplied for `↑`/`↓` (see the axis_ok allowlist in
+                // parser.rs) so `2↑[0] ⍳6` silently stranded the axis.
+                "↑" | "↓" => {
+                    let is_take = fn_name == "↑";
+                    let left_v = match left_v {
+                        Some(l) => l,
+                        None => {
+                            return Err(AplError::runtime(format!(
+                                "{}: Function does not support axis specifier",
+                                fn_name
+                            )))
+                        }
+                    };
+                    // The left argument must be a single integer (drop.kt:339-343).
+                    let count = match left_v.as_ref() {
+                        APLValue::Number(n) => n.as_long().map_err(|e| AplError::runtime(e))?,
+                        APLValue::Array(a) if a.element_count() == 1 => {
+                            match a.elements().first().map(|e| e.as_ref().clone()) {
+                                Some(APLValue::Number(n)) => {
+                                    n.as_long().map_err(|e| AplError::runtime(e))?
+                                }
+                                _ => {
+                                    return Err(AplError::runtime(format!(
+                                        "{}: When given an explicit axis, the left argument must be a single integer",
+                                        fn_name
+                                    )))
+                                }
+                            }
+                        }
+                        _ => {
+                            return Err(AplError::runtime(format!(
+                                "{}: When given an explicit axis, the left argument must be a single integer",
+                                fn_name
+                            )))
+                        }
+                    };
+                    // ensureValidAxis against the RIGHT argument's rank; a rank-0
+                    // scalar arrayifies to rank 1 (drop.kt:317 `b.arrayify()`).
+                    let rank = {
+                        let r = right_v.dimensions().len();
+                        if r == 0 {
+                            1
+                        } else {
+                            r
+                        }
+                    };
+                    let axis_i64 = axis_number.as_long().map_err(|e| AplError::runtime(e))?;
+                    if axis_i64 < 0 || axis_i64 as usize >= rank {
+                        return Err(AplError::runtime(format!(
+                            "{}: Axis {} is not valid. Expected: {}",
+                            fn_name, axis_i64, rank
+                        )));
+                    }
+                    // Per-axis selection: `count` at the chosen axis, every other axis
+                    // left WHOLE (drop.kt:346 builds an IntArray with 0 elsewhere,
+                    // which for Kotlin's DropArrayValue/TakeArrayValue selection means
+                    // "no change on this axis"). The port's `take_or_drop` expresses
+                    // "whole axis" as `None`, NOT as 0 — for TAKE a literal 0 means
+                    // "take zero elements" and would empty the result (`2↑[1] 2 3⍴⍳6`
+                    // → `()` instead of the 2×2 block). For DROP, 0 already means
+                    // "drop nothing", so both encodings agree there.
+                    let counts_opt: Vec<Option<i64>> = (0..rank)
+                        .map(|i| {
+                            if i == axis_i64 as usize {
+                                Some(count)
+                            } else if is_take {
+                                None
+                            } else {
+                                Some(0)
+                            }
+                        })
+                        .collect();
+                    self.take_or_drop_opt(is_take, &counts_opt, right_v)
+                }
                 _ => {
                     // Not a scalar-arithmetic fn: the wrapper is likely
                     // `(f[axis])/` — the axis belongs to the ADVERB inside.
@@ -5903,6 +5982,26 @@ impl Engine {
         counts: &[i64],
         right_val: AplRef<APLValue>,
     ) -> Result<AplRef<APLValue>, AplError> {
+        let opts: Vec<Option<i64>> = counts.iter().map(|c| Some(*c)).collect();
+        self.take_or_drop_opt(take, &opts, right_val)
+    }
+
+    /// Like `take_or_drop` but each axis may be `None` = "leave this axis whole".
+    /// Needed by the explicit-axis form `↑[k]`/`↓[k]`, where only axis `k` is
+    /// selected and the others must pass through untouched — a literal `0` there
+    /// would mean "take zero elements" and empty the result.
+    fn take_or_drop_opt(
+        &self,
+        take: bool,
+        counts: &[Option<i64>],
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        // Scalar/Null/Str paths only ever see a single leading count; collapse the
+        // option list to the plain vector they expect (None ⇒ "whole", i.e. 0 taken
+        // from the front for a scalar, which matches the previous behaviour).
+        let counts_plain: Vec<i64> = counts.iter().map(|c| c.unwrap_or(0)).collect();
+        let counts = counts;
+        let counts_ref: &[i64] = &counts_plain;
         let right = right_val.force(self)?;
         match right.as_ref() {
             APLValue::Null => {
@@ -5919,7 +6018,7 @@ impl Engine {
                 // padding with 0; an all-zero count yields the empty value (null).
                 // Drop: dropping from a scalar removes it entirely — any non-zero
                 // count empties it (null); a zero count keeps `(right)`.
-                let all_zero = counts.iter().all(|c| *c == 0);
+                let all_zero = counts_ref.iter().all(|c| *c == 0);
                 if !take && !all_zero {
                     return Ok(Rc::new(APLValue::Null));
                 }
@@ -5930,7 +6029,7 @@ impl Engine {
                         ArrayData::Nested(vec![right.clone()]),
                     )))));
                 }
-                let dims: Vec<usize> = counts.iter().map(|c| c.unsigned_abs() as usize).collect();
+                let dims: Vec<usize> = counts_ref.iter().map(|c| c.unsigned_abs() as usize).collect();
                 let total: usize = dims.iter().product();
                 if take && total == 0 {
                     return Ok(Rc::new(APLValue::Null));
@@ -5961,7 +6060,7 @@ impl Engine {
                 // take that can be ~1e12 elements, which aborts the process.
                 let mut final_dims = dims.clone();
                 for axis in 0..rank {
-                    let spec = counts.get(axis).copied();
+                    let spec = counts.get(axis).copied().flatten();
                     let n = dims[axis];
                     final_dims[axis] = match spec {
                         None => n,
@@ -5975,7 +6074,7 @@ impl Engine {
                 }
                 let mut flat = a.elements();
                 for axis in 0..rank {
-                    let spec = counts.get(axis).copied();
+                    let spec = counts.get(axis).copied().flatten();
                     let (new_flat, new_dims) = self.slice_axis(&flat, &dims, axis, take, spec)?;
                     flat = new_flat;
                     dims = new_dims;
@@ -5991,7 +6090,7 @@ impl Engine {
                 let chars: Vec<char> = s.chars().collect();
                 let n = chars.len();
                 // Take/drop is monadic (single count) on a vector.
-                let c = counts.first().copied().unwrap_or(0);
+                let c = counts_ref.first().copied().unwrap_or(0);
                 let (keep, start) = if take {
                     let k = (c.unsigned_abs() as usize).min(n);
                     (k, 0)

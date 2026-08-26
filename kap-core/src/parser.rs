@@ -881,7 +881,14 @@ impl<'a> Parser<'a> {
                     let axis_ok = matches!(
                         &cur,
                         Instr::Symbol { name, .. }
-                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖")
+                            // `↑`/`↓` are axis-aware in Kotlin too (TakeAPLFunctionImpl /
+                            // DropAPLFunctionImpl extend plain `APLFunction`, not
+                            // `NoAxisAPLFunction`, and their eval2Arg has an explicit
+                            // `axis != null` branch — drop.kt:8/:307/:335). Omitting them
+                            // here made `2↑[0] ⍳6` STRAND the axis beside the argument
+                            // (`2↑[0] "abcdef"` → `((0) "abcdef")`) instead of applying
+                            // take — a silently WRONG VALUE, not a parse error.
+                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖" | "↑" | "↓")
                     );
                     if axis_ok {
                         self.advance();

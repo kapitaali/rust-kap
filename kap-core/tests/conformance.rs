@@ -689,6 +689,26 @@ fn curated_kap_parity() {
         // processAssignment parses the RHS with parseValue, parser.kt:529).
         ("x ← ⌽⍢⌽ ⍳5 ⋄ x", "(4 3 2 1 0)"),
         ("{⍵+1} ⌽⍢⌽ ⍳5", "(5 4 3 2 1)"),
+        // Axis-applied take/drop `↑[k]`/`↓[k]` (Kotlin drop.kt:335: with an explicit
+        // axis the left arg must be a SINGLE integer, placed at axis k with every
+        // other axis untouched, validated by ensureValidAxis). `↑`/`↓` were missing
+        // from the parser's axis allowlist, so `2↑[0] ⍳6` STRANDED the axis and
+        // returned a silently wrong value (`(1)`) instead of applying take.
+        ("2↑[0] ⍳6", "(0 1)"),
+        ("2↓[0] ⍳6", "(2 3 4 5)"),
+        ("(-2)↑[0] ⍳6", "(4 5)"),
+        // Non-selected axes must pass through WHOLE, not as "take 0" (which emptied
+        // the result); shapes checked via a variable since `⍴ 2↑[1] …` hits an
+        // unrelated pre-existing ⍴-precedence quirk.
+        ("x ← 2↑[1] 2 3⍴⍳6 ⋄ ⍴x", "(2 2)"),
+        ("x ← 2↑[0] 2 3⍴⍳6 ⋄ ⍴x", "(2 3)"),
+        ("x ← 1↓[1] 2 3⍴⍳6 ⋄ ⍴x", "(2 2)"),
+        ("x ← 1↓[0] 2 3⍴⍳6 ⋄ ⍴x", "(1 3)"),
+        // Error rows (harness cannot assert error text — verified by hand vs oracle):
+        //   `2↑[9] ⍳6`   -> "↑: Axis 9 is not valid. Expected: 1"
+        //   `↑[0] ⍳6`    -> "↑: Function does not support axis specifier"
+        //   `2 3↑[0] ⍳6` -> "↑: When given an explicit axis, the left argument must
+        //                    be a single integer"
         // Phase 7 (OPEN-3): inner/outer product `f1 ∙ f2` (Kotlin OuterInnerJoinOp,
         // engine.kt:489). `∘∙f` => outer product (NullFunction sentinel); `f1∙f2` =>
         // inner join (normalize/error/reduce ladder, outer_join.kt:176-266).
