@@ -1178,11 +1178,17 @@ impl Engine {
             // Kotlin `MathCombineAPLFunction.eval2Arg` short-circuits scalar+scalar BEFORE
             // any axis handling: `if (a0 is APLSingleValue && b0 is APLSingleValue)
             // return combine2Arg(a0, b0)`. The axis is silently ignored for two scalars,
-            // so `2 +[0] 3` -> `5`, NOT "A or B has to be rank 1".
-            if let (Some(l), APLValue::Number(b)) = (left_v.as_ref(), right_v.as_ref()) {
-                if let APLValue::Number(a) = l.as_ref() {
-                    let res = self.apply_op(fn_name, a, b)?;
-                    return Ok(Rc::new(APLValue::Number(res)));
+            // so `2 +[0] 3` -> `5`, NOT "A or B has to be rank 1". Only the scalar
+            // arithmetic functions take this short-circuit; axis-aware ops (`↑`/`↓`)
+            // MUST fall through to their dedicated arm below (otherwise `apply_op`
+            // raises "unsupported axis operator: ↑" for the fork-tine take at
+            // output3.kap:118).
+            if matches!(fn_name, "+" | "-" | "×" | "÷" | "*") {
+                if let (Some(l), APLValue::Number(b)) = (left_v.as_ref(), right_v.as_ref()) {
+                    if let APLValue::Number(a) = l.as_ref() {
+                        let res = self.apply_op(fn_name, a, b)?;
+                        return Ok(Rc::new(APLValue::Number(res)));
+                    }
                 }
             }
             return match fn_name {

@@ -2175,11 +2175,17 @@ impl<'a> Parser<'a> {
             // following token as an operand.
             if matches!(next, Some(Token::LeftForkToken)) {
                 self.advance();
-                let b = self.parse_function_atom()?;
+                // Parse the fork tines with `parse_primary` (not `parse_function_atom`)
+                // so a parenthesised tine like `(-⌈3÷2)↑[0]` is bound through the full
+                // `parse_apply` -> `bind_operators_kotlin` path, converting `↑[0]`/`↓[k]`
+                // `↑[0]`/`↓[k]` into `AxisApplied` (output3.kap:118 P10/P11/P12). `parse_function_atom`
+                // alone routes the group through `parse_function_expr`, which leaves the
+                // `↑[0]` unbound and errors with "unexpected token in primary".
+                let b = self.parse_primary()?;
                 self.skip_newlines();
                 self.expect(Token::RightForkToken, "expected » in fork")?;
                 self.skip_newlines();
-                let c = self.parse_function_atom()?;
+                let c = self.parse_primary()?;
                 return Ok(Instr::Train {
                     funcs: vec![first, b, c],
                     reverse: false,
@@ -2290,11 +2296,13 @@ impl<'a> Parser<'a> {
                     if matches!(self.peek().map(|t| &t.token), Some(Token::LeftForkToken)) {
                         self.advance(); // consume «
                         self.skip_newlines();
-                        let b = self.parse_function_atom()?;
+                        // Use `parse_primary` for the tines so paren groups bind
+                        // `↑[k]`/`↓[k]` via `bind_operators_kotlin` (see 2177 note).
+                        let b = self.parse_primary()?;
                         self.skip_newlines();
                         self.expect(Token::RightForkToken, "expected » in fork")?;
                         self.skip_newlines();
-                        let c = self.parse_function_atom()?;
+                        let c = self.parse_primary()?;
                         return Ok(Instr::Train {
                             funcs: vec![
                                 Instr::Derived {
@@ -2974,6 +2982,15 @@ impl<'a> Parser<'a> {
             // routes a nested `(` through `parse_function_atom`, so the accumulator
             // handles this shape; only this dispatch guard excluded it.
             Some(Token::OpenParen) => true,
+            // A `-`-leading group is a NEGATED VALUE expression, not a function
+            // train: `(-⌈3÷2)` ≡ `-(⌈(3÷2))`, and `(-f)` is still parsed as a
+            // function train by `parse_paren_accum` (Chain2). `try_parse_train`
+            // (the fn-members-only fallback) mishandles `(-⌈…)` — it fails on the
+            // value-shaped tail — which broke the 2nd tine of output3.kap:118
+            // P12 (`((⌈a÷2)↑[k])«,»((-⌈b÷2)↑[k])`). Route these to the
+            // value-leading accumulator, exactly like the nested-`(` arm above.
+            Some(Token::Literal(LiteralValue::Symbol { name, namespace }))
+                if namespace.is_none() && name == "-" => true,
             _ => false,
         };
         if first_is_value {
@@ -3028,20 +3045,54 @@ impl<'a> Parser<'a> {
                     let is_fn = Self::is_primitive_op(name)
                         || self.is_known_fn(name, namespace);
                     if !is_fn {
-                        // A value variable: strand it.
+                        // A value variable: strand it. Mirror `parse_primary` and
+                        // consume any trailing index selector `[…]` (Kotlin
+                        // `parseExpr` → `parseIndexFromPosition`, parser.kt:1003)
+                        // so `a[0]` inside a paren group becomes `Index{a,[0]}` and
+                        // not a bare `a` that leaves the `[0]` dangling for the
+                        // fallback `parse_function_atom` to reject as "unexpected
+                        // token in primary" (output3.kap:118 fork tine
+                        // `((⌈arrayMaxWidth[0]÷2)↑[k])`).
                         let t = self.peek().map(|t| t.token.clone()).unwrap();
                         self.advance();
                         if let Token::Literal(lv) = t {
-                            left_args.push(Instr::Literal(lv));
+                            // A `Symbol`/`SymbolValue` token is a VARIABLE reference:
+                            // emit `Instr::Symbol` (lookup form), NOT `Instr::Literal`,
+                            // otherwise eval rejects it as "lone symbol literal". Only
+                            // non-symbol literals (numbers, strings, chars…) become
+                            // `Instr::Literal`. Then fold any trailing `[…]` index
+                            // selector the same way `parse_primary` does.
+                            let v = match lv {
+                                LiteralValue::Symbol { name, namespace } => {
+                                    Instr::Symbol { name, namespace }
+                                }
+                                LiteralValue::SymbolValue { name, namespace } => {
+                                    Instr::Literal(LiteralValue::SymbolValue { name, namespace })
+                                }
+                                other => Instr::Literal(other),
+                            };
+                            match self.parse_index_suffix(v) {
+                                Ok(v) => left_args.push(v),
+                                Err(_) => return ParenHolder::Malformed,
+                            }
                         }
                         continue;
                     }
-                    // Parse the function WITH a trailing adverb folded (`÷⍨`).
+                    // Parse the function WITH a trailing axis/adverb/operator folded
+                    // (e.g. `↑[0]`, `÷⍨`, `+/`): `bind_operators_kotlin` is a superset of
+                    // `fold_trailing_adverb` and additionally binds the axis specifier
+                    // `[k]` (which `fold_trailing_adverb` silently drops — that is the
+                    // P10/P11/P12 bug: `2↑[0]` became `Train[2, ↑]` with axis lost). Fall
+                    // back to `fold_trailing_adverb` only if it errors, to stay safe for
+                    // the existing adverb cases.
                     let f0 = match self.parse_function_atom() {
                         Ok(a) => a,
                         Err(_) => return ParenHolder::Malformed,
                     };
-                    let f = self.fold_trailing_adverb(f0);
+                    let f = match self.bind_operators_kotlin(f0.clone()) {
+                        Ok(f) => f,
+                        Err(_) => self.fold_trailing_adverb(f0),
+                    };
                     // Recurse for everything after the function (Kotlin parseValue at :457).
                     match self.parse_paren_accum() {
                         ParenHolder::Empty => {
@@ -3116,10 +3167,26 @@ impl<'a> Parser<'a> {
                 // (`Array[-, 2]`, the mis-stranding this arm exists to avoid) is
                 // re-parsed as a value with `parse_primary`.
                 Some(Token::OpenParen) => {
-                    let save = self.pos;
-                    let as_fn = self.parse_function_atom().ok().filter(Self::is_function_expr);
-                    match as_fn {
-                        Some(f) => {
+                    // A NESTED PAREN GROUP. Consume the `(` and recurse into the SAME
+                    // accumulator — `parse_paren_accum` is the faithful port of Kotlin's
+                    // inner `parseExpr` and returns a `ParenHolder` that distinguishes a
+                    // VALUE result (e.g. `(⌈3÷2)` -> 2) from a FUNCTION result (e.g. `(+ ×)`
+                    // -> a train). The previous code called `parse_function_atom` on the
+                    // inner group, which for `(⌈3÷2)` returned the bare primitive `⌈`,
+                    // DROPPING the `3÷2` tail and turning `((⌈3÷2)↑[0])` into `⌈ ∘ ↑[0]`
+                    // (a function that ignores its left arg). That is the P12 fork-tine
+                    // regression: `↑[0]` then has no integer count and errors
+                    // "not an integer: 5/2". Recursing `parse_paren_accum` keeps the value,
+                    // so `((⌈3÷2)↑[0])` correctly binds `↑[0]` to the VALUE 2.
+                    self.advance(); // consume the inner '('
+                    match self.parse_paren_accum() {
+                        ParenHolder::Value(v) => {
+                            // Value group: strand it and keep accumulating
+                            // (so `((⌈3÷2)↑[0])` binds `↑[0]` to the value 2).
+                            left_args.push(v);
+                            continue;
+                        }
+                        ParenHolder::Fn(f) => {
                             // Function group: identical continuation to the symbol arm
                             // below (Kotlin parser.kt:457–491).
                             match self.parse_paren_accum() {
@@ -3179,18 +3246,12 @@ impl<'a> Parser<'a> {
                                 ParenHolder::Malformed => return ParenHolder::Malformed,
                             }
                         }
-                        None => {
-                            // Value group: re-parse as a value primary and strand it,
-                            // so `((-2)↑)` becomes left-bind Train[Apply{-,2}, ↑].
-                            self.pos = save;
-                            match self.parse_primary() {
-                                Ok(v) => {
-                                    left_args.push(v);
-                                    continue;
-                                }
-                                Err(_) => return ParenHolder::Malformed,
-                            }
+                        ParenHolder::Empty => {
+                            // Inner `()` — niladic/empty group. Strand as Empty and continue.
+                            left_args.push(Instr::Empty);
+                            continue;
                         }
+                        ParenHolder::Malformed => return ParenHolder::Malformed,
                     }
                 }
                 // Plain value atom: strand it (parser.kt:991–1003 addLeftArg).
@@ -3456,7 +3517,9 @@ impl<'a> Parser<'a> {
                     // is a 2-train (atop) `[a, b]`; `a « b » c` is a 3-fork.
                     if let Some(Token::LeftForkToken) = self.peek().map(|t| &t.token) {
                         self.advance();
-                        let b = match self.parse_function_atom() {
+                        // Use `parse_primary` so paren-group tines bind `↑[k]`/`↓[k]`
+                        // via `bind_operators_kotlin` (see note at 2177).
+                        let b = match self.parse_primary() {
                             Ok(b) => b,
                             Err(_) => return None,
                         };
@@ -3472,7 +3535,7 @@ impl<'a> Parser<'a> {
                             _ => false,
                         };
                         if is_func_start {
-                            let c = match self.parse_function_atom() {
+                            let c = match self.parse_primary() {
                                 Ok(c) => c,
                                 Err(_) => return None,
                             };
@@ -3792,11 +3855,12 @@ impl<'a> Parser<'a> {
                             Token::LeftForkToken => {
                                 self.advance();
                                 self.skip_newlines();
-                                let b = self.parse_function_atom()?;
+                                // tines via parse_primary (see top-level fork arm at 3867)
+                                let b = self.parse_primary()?;
                                 self.skip_newlines();
                                 self.expect(Token::RightForkToken, "expected » in fork")?;
                                 self.skip_newlines();
-                                let c = self.parse_function_atom()?;
+                                let c = self.parse_primary()?;
                                 return Ok(Instr::Train {
                                     funcs: vec![left, b, c],
                                     reverse: false,
@@ -3828,13 +3892,19 @@ impl<'a> Parser<'a> {
                 }
                 Token::LeftForkToken => {
                     // a « b » c  ->  fork. `a` is the already-parsed `left`.
+                    // Use `parse_primary` for the tines (not `parse_function_atom`):
+                    // a parenthesised tine like `((⌈3÷2)↑[0])` must bind `↑[0]`/`↓[k]`
+                    // through the full `parse_apply` -> `bind_operators_kotlin` path
+                    // (output3.kap:118 P12). `parse_function_atom` routes the inner
+                    // `(` through `parse_paren_vfn_chain` -> `try_parse_train` (fn-only),
+                    // which drops the value-shaped `⌈3÷2` tail and errors.
                     self.advance();
                     self.skip_newlines();
-                    let b = self.parse_function_atom()?;
+                    let b = self.parse_primary()?;
                     self.skip_newlines();
                     self.expect(Token::RightForkToken, "expected » in fork")?;
                     self.skip_newlines();
-                    let c = self.parse_function_atom()?;
+                    let c = self.parse_primary()?;
                     return Ok(Instr::Train { funcs: vec![left, b, c], reverse: false, compose: false });
                 }
                 _ => {}
@@ -3863,11 +3933,12 @@ impl<'a> Parser<'a> {
                 if matches!(self.peek().map(|t| &t.token), Some(Token::LeftForkToken)) {
                     self.advance(); // consume «
                     self.skip_newlines();
-                    let b = self.parse_function_atom()?;
+                    // tines via parse_primary (see top-level fork arm at 3867)
+                    let b = self.parse_primary()?;
                     self.skip_newlines();
                     self.expect(Token::RightForkToken, "expected » in fork")?;
                     self.skip_newlines();
-                    let c = self.parse_function_atom()?;
+                    let c = self.parse_primary()?;
                     return Ok(Instr::Train {
                         funcs: vec![derived, b, c],
                         reverse: false,
@@ -4039,11 +4110,13 @@ impl<'a> Parser<'a> {
                             Token::LeftForkToken => {
                                 self.advance();
                                 self.skip_newlines();
-                                let b = self.parse_function_atom()?;
+                                // Use `parse_primary` for the tines so paren groups bind
+                                // `↑[k]`/`↓[k]` via `bind_operators_kotlin` (see 2177 note).
+                                let b = self.parse_primary()?;
                                 self.skip_newlines();
                                 self.expect(Token::RightForkToken, "expected » in fork")?;
                                 self.skip_newlines();
-                                let c = self.parse_function_atom()?;
+                                let c = self.parse_primary()?;
                                 right = Instr::Train {
                                     funcs: vec![right, b, c],
                                     reverse: false,
@@ -4144,20 +4217,22 @@ impl<'a> Parser<'a> {
                                         };
                                     }
                                 }
-                                Token::LeftForkToken => {
-                                    self.advance();
-                                    self.skip_newlines();
-                                    let b = self.parse_function_atom()?;
-                                    self.skip_newlines();
-                                    self.expect(Token::RightForkToken, "expected » in fork")?;
-                                    self.skip_newlines();
-                                    let c = self.parse_function_atom()?;
-                                    member = Instr::Train {
-                                        funcs: vec![member, b, c],
-                                        reverse: false,
-                                        compose: false,
-                                    };
-                                }
+                            Token::LeftForkToken => {
+                                self.advance();
+                                self.skip_newlines();
+                                // Use `parse_primary` for the tines so paren groups bind
+                                // `↑[k]`/`↓[k]` via `bind_operators_kotlin` (see 2177 note).
+                                let b = self.parse_primary()?;
+                                self.skip_newlines();
+                                self.expect(Token::RightForkToken, "expected » in fork")?;
+                                self.skip_newlines();
+                                let c = self.parse_primary()?;
+                                member = Instr::Train {
+                                    funcs: vec![member, b, c],
+                                    reverse: false,
+                                    compose: false,
+                                };
+                            }
                                 _ => {}
                             }
                         }
