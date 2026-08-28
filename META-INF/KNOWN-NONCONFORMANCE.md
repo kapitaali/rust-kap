@@ -369,3 +369,33 @@ cargo test -p kap-core --test conformance run_kotlin_conformance 2>&1 | tail -3
 Gates that MUST stay green (independent of the broad sweep):
 - `cargo test -p kap-core --lib` → 92 passed, 0 failed
 - `cargo test -p kap-core --test conformance curated_kap_parity` → 1 passed, 0 failed
+
+---
+
+## 2026-08-28 — t6 leniency closures + `⟦⟧` display divergence
+
+### t6a — LEADING `⍥` operator error — CLOSED (commit `daa39f5`)
+
+**Symptom**: `⍥⊂ 1 2 3` → port `error: undefined symbol: ⍥` | oracle `Error: Operator without left function: ⍥`
+
+**Root cause**: `⍥` (U+2365) is non-ASCII (3-byte UTF-8), so the lexer's non-ASCII glyph branch emitted it as `Symbol("⍥")` — never reaching `single_char_token` to produce `OverToken`.
+
+**Fix**: Added `c == '⍥'` → `OverToken` mapping before the non-ASCII branch; changed `parse_primary`'s `OverToken` arm to return the oracle-exact error.
+
+**Residual**: Non-leading `⍥` with data operands (e.g. `(1 2 3)⍥,(4 5 6)`) still errors — separate pre-existing divergence.
+
+### t6b — `;`-list-separator destructuring — PARTIAL (commit `daa39f5`)
+
+**Symptom**: `(a;b;c)←1 2 3` → port `(1 2 3)` (silently strands) | oracle `Error: In destructuring assignment, expected a list, got: array`
+
+**Root cause**: The port treats `;`-separated lists and space-stranded arrays identically at the value level — both become `APLValue::Array`. Real Kap distinguishes them: `typeof (1;2;3)` → `kap:list`, `typeof (1 2 3)` → `kap:array`.
+
+**Partial fix**: Added `Instr::List` variant + eval arm. Added test `eval_destructuring_semicolon_list`: `(a;b;c)←(1;2;3) ⋄ c → 3` (oracle-exact). User's requested test case works.
+
+**Remaining**: Parser still produces `Instr::Array` for `;`-separated forms in most contexts. Full fix requires `APLValue::List` — a large refactor across ~816 `APLValue` match sites in 7 files. Documented as KNOWN-NONCONFORMANCE.
+
+### `⟦⟧` boxed-list DISPLAY divergence — OPEN
+
+**Symptom**: `g ⇐ {⍵} ⋄ g⟦1;2;3⟧` → port `(1 2 3)` | oracle `╔═╤═╤═╗` (boxed display)
+
+**Classification**: DISPLAY — value is equivalent, only rendered glyph differs. Implementing `rendertext.kt`-equivalent boxed rendering is a separate roadmap item (P8).
