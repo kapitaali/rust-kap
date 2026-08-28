@@ -421,8 +421,8 @@ impl Engine {
         }
         candidates.push(reg.current_ns());
         candidates.push("kap".to_string());
-        for c in candidates {
-            if reg.is_constant(&c, name) {
+        for c in &candidates {
+            if reg.is_constant(c, name) {
                 return Err(AplError::runtime(format!(
                     "Assignment to constant variable: {}:{}",
                     c, name

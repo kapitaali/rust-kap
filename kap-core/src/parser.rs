@@ -311,6 +311,25 @@ impl<'a> Parser<'a> {
         let start = self.pos;
         let mut left_args: Vec<Instr> = Vec::new();
         loop {
+            // Check for END_EXPR_TOKEN_LIST BEFORE consuming newlines.
+            // A Newline, EOF, or StatementSeparator terminates the expression.
+            // `skip_newlines()` below only skips newlines BETWEEN tokens of the
+            // same expression (e.g. between `pi` and `←`), never the newline that
+            // follows a complete expression (e.g. after `3.14` in `pi ← 3.14`).
+            let tok = match self.peek() {
+                Some(t) => t.clone(),
+                None => break,
+            };
+            if let Some(top) = self.kotlin_close_stack.last() {
+                if std::mem::discriminant(&tok.token) == std::mem::discriminant(top) {
+                    break;
+                }
+            }
+            match &tok.token {
+                Token::EndOfFile | Token::StatementSeparator | Token::Newline => break,
+                _ => {}
+            }
+            // Skip newlines BETWEEN tokens of the same expression.
             self.skip_newlines();
             // P1-M8 (parser.kt:1012-1013 OpenBracket/MemberDereferenceToken →
             // processIndex/processMemberDereference): a `[` or `.` immediately after a
@@ -326,21 +345,6 @@ impl<'a> Parser<'a> {
                     left_args.push(base);
                     continue;
                 }
-            }
-            let tok = match self.peek() {
-                Some(t) => t.clone(),
-                None => break,
-            };
-            // END_EXPR_TOKEN_LIST (parser.kt:1342), statement-level subset. M5: when
-            // nested inside a group, its close token also ends the accumulation.
-            if let Some(top) = self.kotlin_close_stack.last() {
-                if std::mem::discriminant(&tok.token) == std::mem::discriminant(top) {
-                    break;
-                }
-            }
-            match &tok.token {
-                Token::EndOfFile | Token::StatementSeparator => break,
-                _ => {}
             }
             // Short-circuit `and` / `or`: the lexer emits them as plain SYMBOL names
             // (no dedicated tokens); the legacy parser string-matches at
