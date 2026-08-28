@@ -549,10 +549,6 @@ impl Engine {
                 macros,
                 kotlin_close_stack: Vec::new(),
             };
-            if std::env::var("KAP_DEBUG_USE").is_ok() {
-                let at = toks.get(pos).map(|t| format!("{}:{}", t.line, t.col)).unwrap_or_else(|| "EOF".into());
-                eprintln!("DEBUG-USE[{}] LOOP stmt#{} parse-start @tok{}", file_label, total + 1, at);
-            }
             match p.parse_statements() {
                 Ok(Some(instr)) => {
                     pos = p.pos;
@@ -563,14 +559,6 @@ impl Engine {
                             failed += 1;
                             if first_err.is_none() {
                                 first_err = Some(e.to_string());
-                            }
-                            if std::env::var("KAP_DEBUG_USE").is_ok() {
-                                let at = toks.get(pos).map(|t| format!("{}:{}", t.line, t.col)).unwrap_or_else(|| "EOF".into());
-                                let tok = toks.get(pos).map(|t| format!("{:?}", t.token)).unwrap_or_else(|| "EOF".into());
-                                eprintln!(
-                                    "DEBUG-USE[{}] EVAL-FAIL stmt#{} @tok{}: {} | next-tok={}",
-                                    file_label, total + 1, at, e, tok
-                                );
                             }
                         }
                     }
@@ -583,14 +571,6 @@ impl Engine {
                     failed += 1;
                     if first_err.is_none() {
                         first_err = Some(format!("parse: {}", e));
-                    }
-                    if std::env::var("KAP_DEBUG_USE").is_ok() {
-                        let at = toks.get(pos).map(|t| format!("{}:{}", t.line, t.col)).unwrap_or_else(|| "EOF".into());
-                        let tok = toks.get(pos).map(|t| format!("{:?}", t.token)).unwrap_or_else(|| "EOF".into());
-                        eprintln!(
-                            "DEBUG-USE[{}] PARSE-FAIL stmt#{} @tok{}: {} | next-tok={}",
-                            file_label, total, at, e, tok
-                        );
                     }
                     let mut skipped = false;
                     while pos < toks.len() {
@@ -814,6 +794,23 @@ impl Engine {
                 funcs,
                 *reverse,
                 *compose,
+                &None,
+                &Box::new(Instr::Empty),
+                env,
+            ),
+            // `Over` operator `f ⍥ g` (Kotlin OverDerivedFunction, operator.kt:383):
+            //   monadic `(f⍥g) y`   = `f(g(y))`
+            //   dyadic  `x (f⍥g) y` = `f(g(x), g(y))`
+            // A LEADING `⍥` (parse-time NullFunction sentinel `Symbol("⍥")`) makes `f`
+            // the identity: monadic `g(y)`; dyadic `g(y)` (Kotlin NullFunction dyadic
+            // returns the right arg). When reached as a bare value, route through
+            // `eval_apply` with `&None`/`Empty` (mirrors the `Train` arm above); the
+            // real left/right-aware application lives in `eval_apply`.
+            Instr::OverOp { left_fn, right_fn } => self.eval_apply(
+                &Instr::OverOp {
+                    left_fn: left_fn.clone(),
+                    right_fn: right_fn.clone(),
+                },
                 &None,
                 &Box::new(Instr::Empty),
                 env,
@@ -1042,6 +1039,19 @@ impl Engine {
                 // (Kotlin `APLValue.get` / `indexFromPositionNegativeSupport`),
                 // NOT `pick` (`⊇`). Route to `index_select`.
                 self.index_select(arr.as_ref(), sel.as_ref())
+            }
+            Instr::MemberDeref { object, member } => {
+                let obj = self.eval_instr(object, env)?;
+                let mem = self.eval_instr(member, env)?;
+                // Kotlin `MemberDereferenceInstruction.invoke2Arg`: for non-map
+                // objects (`LookupByAPLValueSupport`/`LookupByNameSupport` absent,
+                // e.g. plain arrays) the member is used as an INDEX — equivalent to
+                // `object[member]` index-select (the `else` branch:
+                // `listOf(member).unwrapDeferred().valueAt(array)`). The port currently
+                // lacks `APLMap`/`APLList` value types, so name/map member lookup
+                // (`object.name`) is unimplemented; index-style member access reuses
+                // `index_select`.
+                self.index_select(obj.as_ref(), mem.as_ref())
             }
             Instr::Guard { cond, truthy, falsy } => {
                 let c = self.eval_instr(cond, env)?.force(self)?;
@@ -1617,6 +1627,46 @@ impl Engine {
         // --- Inner/outer product `f₁ ∙ f₂` (Kotlin OuterInnerJoinOp) ---
         if let Instr::InnerProduct { left_fn, right_fn } = fn_expr {
             return self.apply_inner_product(left_fn, right_fn, left, right, env);
+        }
+        // --- `Over` operator `f ⍥ g` (Kotlin OverDerivedFunction, operator.kt:383) ---
+        //   monadic `(f⍥g) y`   = `f(g(y))`
+        //   dyadic  `x (f⍥g) y` = `f(g(x), g(y))`
+        // A LEADING `⍥` (parse-time NullFunction sentinel `Symbol("⍥")`) makes `f` the
+        // identity: monadic `g(y)`; dyadic `g(y)` (Kotlin NullFunction dyadic returns
+        // the right arg). Real `f ⍥ g` (non-leading) carries the actual left function.
+        if let Instr::OverOp { left_fn, right_fn } = fn_expr {
+            let left_is_null = matches!(
+                left_fn.as_ref(),
+                Instr::Symbol { name, .. } if name == "⍥" || name == "∘"
+            );
+            match left {
+                None => {
+                    let gy = self.eval_apply(right_fn.as_ref(), &None, right, env)?;
+                    if left_is_null {
+                        return Ok(gy);
+                    }
+                    return self.eval_apply(left_fn.as_ref(), &None, &Box::new(Instr::Value(gy)), env);
+                }
+                Some(l) => {
+                    let left_val = self.eval_instr(l, env)?;
+                    let gx = self.eval_apply(
+                        right_fn.as_ref(),
+                        &None,
+                        &Box::new(Instr::Value(left_val.clone())),
+                        env,
+                    )?;
+                    let gy = self.eval_apply(right_fn.as_ref(), &None, right, env)?;
+                    if left_is_null {
+                        return Ok(gy);
+                    }
+                    return self.eval_apply(
+                        left_fn.as_ref(),
+                        &Some(Box::new(Instr::Value(gx))),
+                        &Box::new(Instr::Value(gy)),
+                        env,
+                    );
+                }
+            }
         }
         // --- User-defined / native operators called with explicit data args ---
         // e.g. `10 +foo 2` parses as `Apply{fn: OpCall{op:foo, left_fn:+}, left:10, right:2}`.
@@ -2854,7 +2904,25 @@ impl Engine {
                                          r: &Box<Instr>,
                                          e: &AplRef<Environment>|
                          -> Result<AplRef<APLValue>, AplError> {
-                            if Self::is_value(t) {
+                            // A tine is a VALUE only if it's a genuine constant
+                            // (literal/array/empty/symbol-value). A *callable* tine
+                            // (`Apply`, `Index`, `OverOp`, `AxisApplied`, …) is a
+                            // derived FUNCTION and must be applied to `r` (the right
+                            // arg `x`), NOT evaluated as a 0-arg value. `Instr::Apply`
+                            // is in `is_value` for the `[value, fn]` left-bind case
+                            // (arm above), but a parenthesised function tine like
+                            // `((-2)↑)` in a fork is a function, not a constant — using
+                            // `is_value` here made `⌽«,»((-2)↑)⍳6` drop the `x` and
+                            // evaluate the tine with no argument.
+                            if matches!(
+                                t,
+                                Instr::Literal(_)
+                                    | Instr::Array { .. }
+                                    | Instr::Empty
+                                    | Instr::Value(_)
+                                    | Instr::SymbolValue { .. }
+                                    | Instr::BooleanOp { .. }
+                            ) {
                                 s.eval_instr(t, e)
                             } else {
                                 s.eval_apply(t, &None, r, e)
@@ -11137,6 +11205,13 @@ mod tests {
         v.format_value()
     }
 
+    /// Returns true if `src` fails to parse/evaluate (used to assert that an
+    /// INVALID Kap form is rejected, e.g. the APL/Lisp-style `λ(x) …`).
+    fn eval_fails(src: &str) -> bool {
+        let e = Engine::new();
+        e.eval_string(src).is_err()
+    }
+
     #[test]
     fn eval_addition() {
         assert_eq!(eval("1 + 2"), "3");
@@ -11157,9 +11232,9 @@ mod tests {
         assert_eq!(eval("(⍳3) + 10"), "(10 11 12)");
         assert_eq!(eval("1 + (2 × 3)"), "7");
         assert_eq!(eval("(x ← 5) + 1"), "6");
-        assert_eq!(eval("f ← λ(x) x × 2 ⋄ (f 5) + 1"), "11");
+        assert_eq!(eval("f ⇐ {⍵×2} ⋄ (f 5) + 1"), "11");
         assert_eq!(eval("(1 2 3) + 10"), "(11 12 13)");
-        assert_eq!(eval("f ← λ(x) x × 2 ⋄ f (3 + 4)"), "14");
+        assert_eq!(eval("f ⇐ {⍵×2} ⋄ f (3 + 4)"), "14");
     }
 
     #[test]
@@ -11297,8 +11372,14 @@ mod tests {
 
     #[test]
     fn eval_lambda_apply() {
-        assert_eq!(eval("f ← λ(x) x × 2 ⋄ f 5"), "10");
-        assert_eq!(eval("g ← λ(a b) a + b ⋄ 3 g 4"), "7");
+        // Real Kap defines functions with `⇐` + a dfn `{⍵×2}` / `{⍺+⍵}` — NOT
+        // `← λ(x) …` (that is APL/Lisp, not Kap; `←` binds values, `⇐` binds
+        // functions). Oracle-verified results below.
+        assert_eq!(eval("f ⇐ {⍵×2} ⋄ f 5"), "10");
+        assert_eq!(eval("g ⇐ {⍺+⍵} ⋄ 3 g 4"), "7");
+        // The `λ(x) …` parameter-list form is INVALID in Kap and must be rejected
+        // (oracle: "Argument is not a function" for `λ(x) x×2`).
+        assert!(eval_fails("λ(x) x × 2"));
     }
 
     #[test]

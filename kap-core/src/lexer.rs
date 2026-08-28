@@ -38,6 +38,37 @@ pub fn tokenise(src: &str) -> Vec<SpannedToken> {
             }
             continue;
         }
+        // backtick: line continuation (` isBackquote` in Kotlin tokeniser.kt:830).
+        // Kotlin's lexer returns a `Whitespace` token (tokeniser.kt:596) which the
+        // parser skips between operands, so the next physical line is joined to the
+        // current statement. The port skips bare spaces with NO token, so to get the
+        // same "skippable separator" effect we emit a Newline token (which
+        // `skip_newlines` and statement parsing both treat as ignorable — statements
+        // end on `⋄`/EOF, never on Newline). This mirrors exactly what the REPL does:
+        // it strips the backtick and joins the lines with `\n`.
+        // e.g. `typeToFormatter ← map:with ` \n 'a λx ` \n 'b λy` -> one expression.
+        if c == '`' {
+            i += 1;
+            col += 1;
+            // consume the newline(s) following the backtick
+            if i < chars.len() && chars[i] == '\n' {
+                i += 1;
+                line += 1;
+                col = 1;
+            }
+            // also consume any further whitespace on the continued line start
+            while i < chars.len() && (chars[i] == ' ' || chars[i] == '\t') {
+                i += 1;
+                col += 1;
+            }
+            // Emit a Newline token so the continuation joins the current statement
+            // (skipped by the parser between operands, not a statement separator).
+            out.push(SpannedToken {
+                token: Token::Newline,
+                line: start_line,
+                col: start_col,
+            });
+        }
         // character literal: @...
         if c == '@' {
             if let Some((ch, ni, ncol)) = lex_char(&chars, i + 1, line, col) {
@@ -237,6 +268,8 @@ fn single_char_token(c: char) -> Option<Token> {
         '∘' => Token::ComposeToken,
         '⍛' => Token::ReverseComposeToken,
         '.' => Token::MemberDereferenceToken,
+        '⟦' => Token::FunctionCallOpenParen,
+        '⟧' => Token::FunctionCallCloseParen,
         _ => return None,
     })
 }

@@ -132,6 +132,12 @@ pub enum Instr {
         left_fn: Option<Box<Instr>>,
         right_fn: Box<Instr>,
     },
+    /// `Over` operator `f ⍥ g` (Kotlin `OverOp` / `OverDerivedFunction`,
+    /// builtins/operator.kt:383). A 2-arg operator producing a derived function:
+    ///   monadic `(f⍥g) y`   = `f(g(y))`
+    ///   dyadic  `x (f⍥g) y` = `f(g(x), g(y))`
+    /// `⍥` is NOT compose (`∘`): compare oracle `3 +⍥× 4` = 2 vs `3 +∘× 4` = 4.
+    OverOp { left_fn: Box<Instr>, right_fn: Box<Instr> },
     /// A function with an explicit axis specifier: `f[axis]` (e.g. `+[0]`). Mirrors
     /// Kotlin's `AxisValAssignedFunctionDirect`, created by `parseOperator` when a
     /// `[axis]` follows the function. `eval_apply` unwraps it and threads the axis into
@@ -152,6 +158,12 @@ pub enum Instr {
     /// multi-element selection is a vector of the picked elements. Binds tightly to the
     /// preceding primary (postfix), so `a b (c d)[0] e` indexes `(c d)`, not the whole strand.
     Index { array: Box<Instr>, selector: Box<Instr> },
+    /// Member dereference: `object.member` (Kotlin `MemberDereferenceToken` →
+    /// `MemberDereferenceInstruction` / `MemberDereferenceNameArgumentInstruction`).
+    /// `member` is either a bare symbol name (`object.name`) or a parenthesised value
+    /// expression (`object.(expr)`). Parsed as a postfix suffix on a primary, mirroring
+    /// index access `object[sel]`.
+    MemberDeref { object: Box<Instr>, member: Box<Instr> },
     /// Short-circuit boolean operator: `and` / `or` (Kotlin `AndToken`/`OrToken` →
     /// `BooleanAndFunction`/`BooleanOrFunction`). These are *not* the bitwise `∧`/`∨`
     /// functions — they sit at the **lowest precedence** (below assignment) and evaluate

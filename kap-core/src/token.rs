@@ -56,15 +56,21 @@ pub enum Token {
     RightForkToken, // »
     ComposeToken,   // ∘  (atop / compose: f ∘ g)
     ReverseComposeToken, // ⍛  (reverse compose: f ⍛ g)
+    OverToken,      // ⍥  (over operator: f ⍥ g — Kotlin OverOp; NOT compose)
     DynassignToken, // ⇐
     ColonSym,      // :  (guarded expression: cond : truthy ⋄ falsy)
     AndToken,    // and
     OrToken,     // or
     Comment,
     MemberDereferenceToken, // .
-    MethodCallToken,
+    /// `⟦` — function-call open paren (Kotlin `FunctionCallOpenParen`). Attaches ONLY
+    /// to a preceding function and turns `;`-separated contents into a single list
+    /// argument, i.e. `fn⟦a;b;c⟧` = monadic `fn` applied to `(a b c)`
+    /// (Kotlin `FunctionCall1Arg(parsedFn, APLList(...))`, parser.kt:440).
     FunctionCallOpenParen,
+    /// `⟧` — matching close for `⟦` (Kotlin `FunctionCallCloseParen`).
     FunctionCallCloseParen,
+    MethodCallToken,
     DefsyntaxSubToken,
     DefsyntaxToken,
     IncludeToken,

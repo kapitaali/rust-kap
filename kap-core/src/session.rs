@@ -93,10 +93,11 @@ mod tests {
     #[test]
     fn session_persists_lambda_and_sees_globals() {
         let s = Session::new();
-        s.eval("double ← λ(x) x × 2").unwrap();
+        // Real Kap defines functions with `⇐` + a dfn `{⍵×2}`; `←` binds values.
+        s.eval("double ⇐ {⍵×2}").unwrap();
         assert_eq!(s.eval("double 21").unwrap().format_value(), "42");
         s.eval("k ← 3").unwrap();
-        s.eval("addk ← λ(x) x + k").unwrap();
+        s.eval("addk ⇐ {⍵+k}").unwrap();
         assert_eq!(s.eval("addk 10").unwrap().format_value(), "13");
     }
 

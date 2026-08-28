@@ -454,6 +454,16 @@ impl<'a> Parser<'a> {
                     }
                     return self.finish_fn_call(dr, &mut left_args);
                 }
+                Token::LambdaToken => {
+                    // `λ` (Kotlin processLambda, parser.kt:1204) — a function reference
+                    // operator. Always FUNCTION-SHAPED, so it must flow through
+                    // `finish_fn_call` (like `⍞`/`{…}` above) — otherwise it falls through
+                    // to the catch-all reset and loops. `parse_function_atom` handles the
+                    // `λfoo` / `λ(...)` / `λ{...}` forms.
+                    self.advance();
+                    let lam = self.parse_function_atom()?;
+                    return self.finish_fn_call(lam, &mut left_args);
+                }
                 Token::OpenParen => {
                     // parser.kt:977 parseExprToplevel(CloseParen): M5 parses the group
                     // CONTENT with this same accumulator loop under a close-token stack,
@@ -722,11 +732,15 @@ impl<'a> Parser<'a> {
             {
                 self.advance(); // consume «
                 self.skip_newlines();
-                let b = self.parse_function_atom()?;
+                // Tines via parse_fork_tine: a complete function that binds
+                // non-leading operators (`⍥` → OverOp{`,`,`⊂`}) but does NOT
+                // absorb a following plain function (which belongs to the outer
+                // expression, e.g. `⌽«,»((-2)↑) ⍳6`). Stops at `»`.
+                let b = self.parse_fork_tine()?;
                 self.skip_newlines();
                 self.expect(Token::RightForkToken, "expected » in fork")?;
                 self.skip_newlines();
-                let c = self.parse_function_atom()?;
+                let c = self.parse_fork_tine()?;
                 cur = Instr::Train {
                     funcs: vec![cur, b, c],
                     reverse: false,
@@ -793,11 +807,13 @@ impl<'a> Parser<'a> {
                 {
                     self.advance(); // consume «
                     self.skip_newlines();
-                    let b = self.parse_function_atom()?;
+                    let b_atom = self.parse_function_atom()?;
+                    let b = self.parse_function_expr_continuation(b_atom)?;
                     self.skip_newlines();
                     self.expect(Token::RightForkToken, "expected » in fork")?;
                     self.skip_newlines();
-                    let c = self.parse_function_atom()?;
+                    let c_atom = self.parse_function_atom()?;
+                    let c = self.parse_function_expr_continuation(c_atom)?;
                     cur = Instr::Train {
                         funcs: vec![cur, b, c],
                         reverse: false,
@@ -849,6 +865,22 @@ impl<'a> Parser<'a> {
                             funcs: vec![cur, r],
                             reverse: true,
                             compose: true,
+                        };
+                        continue;
+                    }
+                    // Over `⍥` (Kotlin OverOp, operator.kt:383). Binds after a FUNCTION
+                    // like `∘`/`⍛`: left = cur, right = ONE function atom. A LEADING
+                    // `⍥` (cur is the NullFunction sentinel `Symbol("⍥")`) makes the left
+                    // identity; a non-leading `⍥` (cur is a real fn, e.g. fork middle
+                    // `,⍥⊂`) carries it. The evaluator's OverOp arm treats `Symbol("⍥")`
+                    // / `Symbol("∘")` left as NullFunction.
+                    Some(Token::OverToken) => {
+                        self.advance();
+                        self.skip_newlines();
+                        let r = self.parse_function_atom()?;
+                        cur = Instr::OverOp {
+                            left_fn: Box::new(cur),
+                            right_fn: Box::new(r),
                         };
                         continue;
                     }
@@ -976,6 +1008,56 @@ impl<'a> Parser<'a> {
     /// - right value & left empty  → FunctionCall1Arg monadic (:468)
     /// - right value & left n      → FunctionCall2Arg, ⍺ = the SINGLE left arg or a
     ///   strand of several (makeResultList semantics, :474)
+    /// Parse the contents of a `⟦ … ⟧` function-call list (Kotlin `FunctionCallOpenParen`
+    /// / `FunctionCallCloseParen`, parser.kt:440). Called from `finish_fn_call` and
+    /// `parse_apply` whenever a function is immediately followed by `⟦`. Builds a single
+    /// `APLList` argument (each `;`-separated item is a full expression) and returns a
+    /// MONADIC `Apply{fn, right: list}` — `fn⟦a;b;c⟧` ≡ `fn (a b c)`.
+    fn parse_function_call_list(&mut self, fn_instr: Instr) -> Result<Instr, AplError> {
+        self.advance(); // consume ⟦
+        self.kotlin_close_stack.push(Token::FunctionCallCloseParen);
+        let mut elems: Vec<Instr> = Vec::new();
+        self.skip_newlines();
+        // Empty `⟦⟧` => call with an empty list (APLList(emptyList) per parser.kt:442-445).
+        if matches!(self.peek().map(|t| &t.token), Some(Token::FunctionCallCloseParen)) {
+            self.advance();
+        } else {
+            loop {
+                let e = self.parse_expr()?;
+                elems.push(e);
+                self.skip_newlines();
+                // Extract the next token *kind* into an owned value so the immutable
+                // borrow from `self.peek()` does not conflict with the mutable
+                // `kotlin_close_stack.pop()` in the error arm (E0502).
+                let next_kind: Option<Token> = self.peek().map(|t| t.token.clone());
+                match next_kind {
+                    Some(Token::ListSeparator) => {
+                        self.advance();
+                        self.skip_newlines();
+                    }
+                    Some(Token::FunctionCallCloseParen) => {
+                        self.advance();
+                        break;
+                    }
+                    other => {
+                        self.kotlin_close_stack.pop();
+                        return Err(self.err(&format!(
+                            "expected ';' or '⟧' in function-call list, got {:?}",
+                            other
+                        )));
+                    }
+                }
+            }
+        }
+        self.kotlin_close_stack.pop();
+        let list = Instr::Array { elements: elems };
+        Ok(Instr::Apply {
+            fn_expr: Box::new(fn_instr),
+            left: None,
+            right: Box::new(list),
+        })
+    }
+
     fn finish_fn_call(&mut self, fn_instr: Instr, left_args: &mut Vec<Instr>) -> Result<Instr, AplError> {
         // M5: capture whether a NEWLINE immediately follows the function BEFORE
         // `bind_operators_kotlin` (which begins with `skip_newlines()`) can swallow it.
@@ -989,6 +1071,15 @@ impl<'a> Parser<'a> {
         let newline_before_right = matches!(self.peek().map(|t| &t.token), Some(Token::Newline));
         // parseOperator FIRST (parser.kt:437): bind axis / adverbs / user operators.
         let fn_instr = self.bind_operators_kotlin(fn_instr)?;
+        // parser.kt:440 — `FunctionCallOpenParen` (`⟦`) attaches to the just-parsed
+        // FUNCTION (not to a value) and turns its `;`-separated contents into a single
+        // list argument: `fn⟦a;b;c⟧` = monadic `fn` applied to `(a b c)`
+        // (Kotlin `FunctionCall1Arg(parsedFn, APLList(...))`). This is checked BEFORE
+        // the normal right-argument path. A `⟦` with no preceding function is a parse
+        // error (handled as a leading-primary error in parse_primary/parse_function_atom).
+        if matches!(self.peek().map(|t| &t.token), Some(Token::FunctionCallOpenParen)) {
+            return self.parse_function_call_list(fn_instr);
+        }
         self.skip_newlines();
         // M5: boundary check must respect a nested close token. Inside `(f …)` the
         // CloseParen is NOT "no right arg" — Kotlin's parseValue() recurses and only
@@ -1405,6 +1496,13 @@ impl<'a> Parser<'a> {
                         Token::Literal(LiteralValue::Symbol { name, namespace }) => {
                             names.push((name.clone(), namespace.clone()));
                             self.advance();
+                            // Allow `;` (ListSeparator) as a separator between the
+                            // destructured names, e.g. `(code;data;headers) ← …`
+                            // (Kap uses `;` for list-style destructuring; space also
+                            // works). Consume the separator if present and continue.
+                            if matches!(self.peek(), Some(t) if matches!(t.token, Token::ListSeparator)) {
+                                self.advance();
+                            }
                         }
                         Token::CloseParen => {
                             self.advance();
@@ -1842,6 +1940,15 @@ impl<'a> Parser<'a> {
             }
         }
         let mut first = self.parse_primary()?;
+        // Function-call bracket `⟦ … ⟧` (Kotlin FunctionCallOpenParen, parser.kt:440):
+        // attaches to a preceding FUNCTION and makes a monadic call with a list argument.
+        // Handle here so it works inside paren groups `(g⟦a;b⟧)` too (the legacy
+        // parse_apply path), not only on the top-level accumulator (finish_fn_call).
+        if Self::is_function_expr(&first)
+            && matches!(self.peek().map(|t| &t.token), Some(Token::FunctionCallOpenParen))
+        {
+            return self.parse_function_call_list(first);
+        }
         // A *value* followed by `primitive_op known_op` is a dyadic operator call where the
         // value is the operator's left DATA argument: `10 +foo 2` = `(+foo) applied to (10, 2)`.
         // Detect `value primitive known_op` and restructure into `Apply[OpCall{…}, left: value, right: …]`
@@ -2205,6 +2312,12 @@ impl<'a> Parser<'a> {
                         && !matches!(t, Token::CloseParen)
                         && !matches!(t, Token::CloseBracket)
                         && !matches!(t, Token::ListSeparator)
+                        // A `⟦ … ⟧` function-call list bracket is NOT a value operand: a
+                        // leading function inside `⟦ … ⟧` must stop at `⟧` (it is the list
+                        // terminator), not try to apply it monadically. `fn ⟧` would
+                        // otherwise parse `⟧` as a monadic argument and error.
+                        && !matches!(t, Token::FunctionCallCloseParen)
+                        && !matches!(t, Token::FunctionCallOpenParen)
                         // A primitive-op or adverb symbol is an *operator*, not a value
                         // operand: `N≤1` is dyadic (`≤` binds), `+/` is reduce — neither is
                         // a monadic application of the leading symbol to that symbol. Any
@@ -2994,7 +3107,8 @@ impl<'a> Parser<'a> {
             _ => false,
         };
         if first_is_value {
-            self.parse_paren_value_leading()
+            let r = self.parse_paren_value_leading();
+            r
         } else {
             self.try_parse_train()
         }
@@ -3011,9 +3125,19 @@ impl<'a> Parser<'a> {
     /// - `(¯1r2 0+2÷⍨≢)` → Fn(Train[Train[Array,+], Train[Train[2,÷⍨],≢]])  (stat.kap median)
     ///
     /// A `None` return means malformed (caller restores position and falls back).
+    /// The inner `parse_paren_accum` returns AT the group's close `)` (it does not
+    /// consume it — mirroring Kotlin), so we consume the `)` here when a result was
+    /// produced. An `Empty` holder (a bare `()` group) yields `None` and leaves the
+    /// `)` for the caller to consume (or skip).
     fn parse_paren_value_leading(&mut self) -> Option<Instr> {
         match self.parse_paren_accum() {
-            crate::parser::ParenHolder::Value(i) | crate::parser::ParenHolder::Fn(i) => Some(i),
+            crate::parser::ParenHolder::Value(i) | crate::parser::ParenHolder::Fn(i) => {
+                // Consume the group's close `)` left unconsumed by parse_paren_accum.
+                if matches!(self.peek().map(|t| &t.token), Some(Token::CloseParen)) {
+                    self.advance();
+                }
+                Some(i)
+            }
             crate::parser::ParenHolder::Empty => None,
             crate::parser::ParenHolder::Malformed => None,
         }
@@ -3028,8 +3152,15 @@ impl<'a> Parser<'a> {
             self.skip_newlines();
             match self.peek().map(|t| &t.token) {
                 Some(Token::CloseParen) => {
-                    self.advance();
-                    // END_EXPR: makeResultList (parser.kt:942–948)
+                    // Kotlin `parseValueInner` (parser.kt:939–948) returns AT the
+                    // group's close token (it is in `END_EXPR_TOKEN_LIST`) WITHOUT
+                    // consuming it; the *caller* consumes the `)`. Returning here
+                    // without advancing means a nested group's function-operand
+                    // sub-parse (e.g. the `0 0` in `(⊂ 0 0)`) stops at the inner
+                    // group's `)`, and the enclosing accumulator then sees that `)`
+                    // as the nested group's terminator — instead of swallowing it and
+                    // over-consuming into the outer group (which broke
+                    // `((⊂ 0 0)⊇)` in output3.kap:293).
                     return if left_args.is_empty() {
                         ParenHolder::Empty
                     } else if left_args.len() == 1 {
@@ -3178,15 +3309,31 @@ impl<'a> Parser<'a> {
                     // regression: `↑[0]` then has no integer count and errors
                     // "not an integer: 5/2". Recursing `parse_paren_accum` keeps the value,
                     // so `((⌈3÷2)↑[0])` correctly binds `↑[0]` to the VALUE 2.
+                    //
+                    // `parse_paren_accum` returns AT the inner group's close `)` WITHOUT
+                    // consuming it (mirroring Kotlin's `END_EXPR_TOKEN_LIST`), so after the
+                    // inner parse we MUST consume that `)` here — otherwise the enclosing
+                    // accumulator would mistake it for the OUTER group's close and the
+                    // tokens following the inner group (e.g. `⊇` in `((⊂ 0 0)⊇)`) would be
+                    // lost, breaking output3.kap:293.
                     self.advance(); // consume the inner '('
                     match self.parse_paren_accum() {
                         ParenHolder::Value(v) => {
+                            // Consume the inner group's close `)` (left unconsumed by
+                            // parse_paren_accum) before continuing.
+                            if matches!(self.peek().map(|t| &t.token), Some(Token::CloseParen)) {
+                                self.advance();
+                            }
                             // Value group: strand it and keep accumulating
                             // (so `((⌈3÷2)↑[0])` binds `↑[0]` to the value 2).
                             left_args.push(v);
                             continue;
                         }
                         ParenHolder::Fn(f) => {
+                            // Consume the inner group's close `)` before continuing.
+                            if matches!(self.peek().map(|t| &t.token), Some(Token::CloseParen)) {
+                                self.advance();
+                            }
                             // Function group: identical continuation to the symbol arm
                             // below (Kotlin parser.kt:457–491).
                             match self.parse_paren_accum() {
@@ -3247,7 +3394,11 @@ impl<'a> Parser<'a> {
                             }
                         }
                         ParenHolder::Empty => {
-                            // Inner `()` — niladic/empty group. Strand as Empty and continue.
+                            // Inner `()` — niladic/empty group. Consume its close `)`
+                            // then strand as Empty and continue.
+                            if matches!(self.peek().map(|t| &t.token), Some(Token::CloseParen)) {
+                                self.advance();
+                            }
                             left_args.push(Instr::Empty);
                             continue;
                         }
@@ -3744,6 +3895,31 @@ impl<'a> Parser<'a> {
         self.parse_function_expr_continuation_impl(&mut l, true)
     }
 
+    /// Parse a **fork tine** as a complete function. A tine is a single function
+    /// atom whose ONLY continuations are *operators* (`⍥ ∘ ⍛`, adverbs `/¨⍨⍣⍤⍢`,
+    /// fork `«`). It must NOT absorb a following plain function atom, because that
+    /// belongs to the *outer* expression (the fork's overall right arg), not the
+    /// tine. E.g. `⌽«,»((-2)↑) ⍳6`: the right tine is `((-2)↑)` only — `⍳6` applies
+    /// to the whole fork. (A naive `parse_function_expr_continuation` wrongly
+    /// built `Train{[(-2)↑, ⍳]}` atop, prepending `⍴x` to every fork result.)
+    /// A non-leading operator in a tine (`«,⍥⊂»` → OverOp{`,`,`⊂`}) DOES bind,
+    /// because `⍥` is an operator, not a function. `parse_function_atom` already
+    /// handles a LEADING operator (`⍥⊂`), so we only add the non-leading case.
+    fn parse_fork_tine(&mut self) -> Result<Instr, AplError> {
+        let atom = self.parse_function_atom()?;
+        // Bind a non-leading OverToken (`⍥`) into OverOp, mirroring the operator
+        // loop in bind_operators_kotlin. `,⍥⊂` → OverOp{`,`, `⊂`}.
+        if matches!(self.peek().map(|t| &t.token), Some(Token::OverToken)) {
+            self.advance(); // consume ⍥
+            let right = self.parse_function_atom()?;
+            return Ok(Instr::OverOp {
+                left_fn: Box::new(atom),
+                right_fn: Box::new(right),
+            });
+        }
+        Ok(atom)
+    }
+
     fn parse_function_expr_continuation_impl(
         &mut self,
         left: &mut Instr,
@@ -3855,12 +4031,15 @@ impl<'a> Parser<'a> {
                             Token::LeftForkToken => {
                                 self.advance();
                                 self.skip_newlines();
-                                // tines via parse_primary (see top-level fork arm at 3867)
-                                let b = self.parse_primary()?;
+                                // Tines via parse_fork_tine: a complete function that
+                                // binds non-leading operators (`⍥`) but does NOT absorb a
+                                // following plain function (which belongs to the outer
+                                // expression). Stops at `»`.
+                                let b = self.parse_fork_tine()?;
                                 self.skip_newlines();
                                 self.expect(Token::RightForkToken, "expected » in fork")?;
                                 self.skip_newlines();
-                                let c = self.parse_primary()?;
+                                let c = self.parse_fork_tine()?;
                                 return Ok(Instr::Train {
                                     funcs: vec![left, b, c],
                                     reverse: false,
@@ -3892,19 +4071,17 @@ impl<'a> Parser<'a> {
                 }
                 Token::LeftForkToken => {
                     // a « b » c  ->  fork. `a` is the already-parsed `left`.
-                    // Use `parse_primary` for the tines (not `parse_function_atom`):
-                    // a parenthesised tine like `((⌈3÷2)↑[0])` must bind `↑[0]`/`↓[k]`
-                    // through the full `parse_apply` -> `bind_operators_kotlin` path
-                    // (output3.kap:118 P12). `parse_function_atom` routes the inner
-                    // `(` through `parse_paren_vfn_chain` -> `try_parse_train` (fn-only),
-                    // which drops the value-shaped `⌈3÷2` tail and errors.
                     self.advance();
                     self.skip_newlines();
-                    let b = self.parse_primary()?;
+                    // Tines via parse_fork_tine (see top-level fork arm ~720): a
+                    // complete function that binds non-leading operators (`⍥`) but
+                    // does NOT absorb a following plain function (which belongs to
+                    // the outer expression, e.g. `⌽«,»((-2)↑) ⍳6`). Stops at `»`.
+                    let b = self.parse_fork_tine()?;
                     self.skip_newlines();
                     self.expect(Token::RightForkToken, "expected » in fork")?;
                     self.skip_newlines();
-                    let c = self.parse_primary()?;
+                    let c = self.parse_fork_tine()?;
                     return Ok(Instr::Train { funcs: vec![left, b, c], reverse: false, compose: false });
                 }
                 _ => {}
@@ -4352,6 +4529,28 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.parse_block()
             }
+            Token::ReverseComposeToken => {
+                // Leading reverse-compose `⍛ g` (fork tine `«,⍛⊂»`, oracle-verified).
+                // Kotlin parseOperator treats a leading operator as a NullFunction-LEFT
+                // + right fn (op.kt:383 NullFunction sentinel). Build
+                // `Train{funcs:[NullFn, g], reverse:true, compose:true}`.
+                self.advance(); // consume ⍛
+                let r = self.parse_function_atom()?;
+                Ok(Instr::Train { funcs: vec![Instr::symbol("⍛"), r], reverse: true, compose: true })
+            }
+            Token::OverToken => {
+                // Leading over `⍥ g` (OverOp, Kotlin OverOp). Fork tine `«,⍥⊂»` —
+                // oracle parses it, so the port must too. Build `OverOp{NullFn, g}`;
+                // the evaluator treats `Symbol("⍥")` left as NullFunction (identity
+                // under OverOp). Real `f ⍥ g` (non-leading) is bound in
+                // parse_function_expr compose arms.
+                self.advance(); // consume ⍥
+                let r = self.parse_function_atom()?;
+                Ok(Instr::OverOp {
+                    left_fn: Box::new(Instr::symbol("⍥")),
+                    right_fn: Box::new(r),
+                })
+            }
             Token::ComposeToken => {
                 // `∘∙f` — the OUTER product surface form (Kotlin NullFunction left
                 // operand of OuterInnerJoinOp, engine.kt:489). `∘` alone is also a
@@ -4367,6 +4566,42 @@ impl<'a> Parser<'a> {
                 }
                 let r = self.parse_function_atom()?;
                 Ok(Instr::Train { funcs: vec![Instr::symbol("∘"), r], reverse: false, compose: true })
+            }
+            Token::LambdaToken => {
+                // `λ` as a function atom (train member / fork tine). Same grammar as the
+                // primary handler (parser.rs:4975) and the oracle `processLambda`
+                // (parser.kt:1204): Symbol → short-form fn ref, `(` → parenthesised fn
+                // expr, `{` → dfn.
+                self.advance();
+                self.skip_newlines();
+                match self.peek() {
+                    Some(t) if matches!(t.token, Token::Literal(LiteralValue::Symbol { .. })) => {
+                        if let Token::Literal(LiteralValue::Symbol { name, namespace }) = &t.token {
+                            let name = name.clone();
+                            let ns = namespace.clone();
+                            self.advance();
+                            Ok(Instr::Symbol { name, namespace: ns })
+                        } else {
+                            unreachable!()
+                        }
+                    }
+                    Some(t) if matches!(t.token, Token::OpenParen) => {
+                        // The parenthesised content is parsed exactly like a paren GROUP
+                        // (so `λ(0-)` is a left-bind projection and `λ(+×)` a train), via
+                        // the same balanced accumulator used for `(0-)`.
+                        self.advance();
+                        match self.parse_paren_value_leading() {
+                            Some(holder) => Ok(holder),
+                            None => Err(self.err("λ: empty group is not a function")),
+                        }
+                    }
+                    Some(t) if matches!(t.token, Token::OpenBrace) => self.parse_function_atom(),
+                    Some(t) => {
+                        let tk = format!("{:?} @{}:{}", t.token, t.line, t.col);
+                        Err(self.err(&format!("λ: expected a function after λ (got {})", tk)))
+                    }
+                    None => Err(self.err("λ: unexpected end of input")),
+                }
             }
             _ => Err(self.err("expected a function in train")),
         }
@@ -4391,11 +4626,15 @@ impl<'a> Parser<'a> {
                 | Instr::Lambda { .. }
                 | Instr::Train { .. }
                 | Instr::ValueOp { .. }
-                | // An axis-applied function (`⌽[0]`, `,[0.5]`) is a DERIVED
+                // An axis-applied function (`⌽[0]`, `,[0.5]`) is a DERIVED
                   // FUNCTION value (Kotlin AxisValAssignedFunctionDirect) — it must
                   // count as a function so `⌽[0]˝` binds the inverse adverb and the
                   // __KOTLIN_FALLBACK__ guard does not fire on it.
-                  Instr::AxisApplied { .. }
+                | Instr::AxisApplied { .. }
+                // `Over` operator `f ⍥ g` (OverOp) is a derived function value.
+                | Instr::OverOp { .. }
+                // `object.member` (MemberDeref) is a function-shaped postfix, like `Index`.
+                | Instr::MemberDeref { .. }
                 // P1-M7: a `{…}` block IS a function value (Kotlin OpenFnDef →
                 // processFn); required for `{2×⍵}¨ 1 2 3` to bind the each-adverb.
                 | Instr::Block { .. }
@@ -4538,8 +4777,7 @@ impl<'a> Parser<'a> {
         match &t.token {
             // `∘∙f` at PRIMARY position (outer product, e.g. `1 2 3 ∘∙× 3 4`):
             // Kotlin parses `∘` as NullFunction then binds OuterInnerJoinOp. Only
-            // when `∙` immediately follows; otherwise fall through to the normal
-            // symbol path (plain compose).
+            // when `∙` immediately follows.
             Token::ComposeToken => {
                 if let Some(t2) = self.peek_at(1).map(|t| &t.token) {
                     if matches!(t2, Token::Literal(LiteralValue::Symbol { name, .. }) if name == "∙") {
@@ -4549,9 +4787,44 @@ impl<'a> Parser<'a> {
                         return Ok(Instr::InnerProduct { left_fn: None, right_fn: Box::new(r) });
                     }
                 }
-                // Not followed by ∙ — plain compose symbol; handled by the general path.
-                self.advance();
-                return Ok(Instr::symbol("∘"));
+                // Leading compose `∘ g` (e.g. fork tine `«,∘⊂»`, or `∘⊂` as a
+                // value): Kotlin parseFunctionExpr treats a leading operator as
+                // NullFunction-LEFT + right fn (op.kt:383 NullFunction sentinel).
+                // Build `Train{funcs:[NullFn, g], compose:true}`. The fork middle
+                // `(1↑)«,∘⊂»(1 0↓)` requires this to parse (oracle-verified).
+                self.advance(); // consume ∘
+                self.skip_newlines();
+                let r = self.parse_function_atom()?;
+                return Ok(Instr::Train {
+                    funcs: vec![Instr::symbol("∘"), r],
+                    reverse: false,
+                    compose: true,
+                });
+            }
+            // Leading reverse-compose `⍛ g` (fork tine `«,⍛⊂»`, oracle-verified).
+            Token::ReverseComposeToken => {
+                self.advance(); // consume ⍛
+                self.skip_newlines();
+                let r = self.parse_function_atom()?;
+                return Ok(Instr::Train {
+                    funcs: vec![Instr::symbol("⍛"), r],
+                    reverse: true,
+                    compose: true,
+                });
+            }
+            // Leading over `⍥ g` (OverOp, Kotlin OverOp). Fork tine `«,⍥⊂»` —
+            // oracle parses it, so the port must too. Build `OverOp{NullFn, g}`;
+            // the evaluator treats `Symbol("⍥")` left as NullFunction (identity
+            // under OverOp). Real `f ⍥ g` (non-leading) is bound in
+            // bind_operators_kotlin / parse_function_expr compose arms.
+            Token::OverToken => {
+                self.advance(); // consume ⍥
+                self.skip_newlines();
+                let r = self.parse_function_atom()?;
+                return Ok(Instr::OverOp {
+                    left_fn: Box::new(Instr::symbol("⍥")),
+                    right_fn: Box::new(r),
+                });
             }
             Token::Literal(LiteralValue::Symbol { name, namespace }) => {
                 let name = name.clone();
@@ -4776,54 +5049,56 @@ impl<'a> Parser<'a> {
                 Ok(Instr::Empty)
             }
             Token::LambdaToken => {
-                // λ(params) body  — params are bare symbols (or a parenthesised list),
-                // body is the rest of the expression.
+                // `λ` — Kap's "create function reference" operator (Kotlin
+                // `processLambda`, parser.kt:1204). The token AFTER `λ` selects the form:
+                //   • Symbol   → short-form function reference, e.g. `λfoo` ≡ the
+                //                function `foo` (no params, no body). This is the form
+                //                stdlib uses everywhere (`λrenderNumber`, `λfhelpCmd`).
+                //   • `(`      → a parenthesised *function* expression, e.g. `λ(0-)`,
+                //                `λ(+×)` (monadic/derived projection).
+                //   • `{`      → a dfn body, e.g. `λ{⍕⍵}`.
+                // The in-flight diff had `λ(params) body` (explicit param list) — the
+                // oracle REJECTS that ("Argument is not a function" for `λ(x) x*2`), so
+                // it is intentionally NOT supported here.
                 self.advance();
                 self.skip_newlines();
-                let mut params = Vec::new();
-                // optional parenthesised parameter list: (a b c) or (a,b,c)
-                if let Some(t) = self.peek() {
-                    if matches!(t.token, Token::OpenParen) {
-                        self.advance();
-                        loop {
-                            self.skip_newlines();
-                            match self.peek() {
-                                Some(t) if matches!(t.token, Token::CloseParen) => {
-                                    self.advance();
-                                    break;
-                                }
-                                Some(t) if matches!(t.token, Token::Literal(LiteralValue::Symbol { .. })) => {
-                                    if let Token::Literal(LiteralValue::Symbol { name, .. }) = &t.token {
-                                        if name == "," {
-                                            // `,` is the catenate separator between params
-                                            self.advance();
-                                        } else {
-                                            params.push(name.clone());
-                                            self.advance();
-                                        }
-                                    } else {
-                                        unreachable!()
-                                    }
-                                }
-                                _ => return Err(self.err("expected parameter name or ')'")),
-                            }
-                        }
-                    } else if let Some(t) = self.peek() {
-                        if let Token::Literal(LiteralValue::Symbol { name, .. }) = &t.token {
-                            // single unparenthesised param: λx x*2
-                            params.push(name.clone());
+                match self.peek() {
+                    Some(t) if matches!(t.token, Token::Literal(LiteralValue::Symbol { .. })) => {
+                        if let Token::Literal(LiteralValue::Symbol { name, namespace }) = &t.token {
+                            let name = name.clone();
+                            let ns = namespace.clone();
                             self.advance();
+                            Ok(Instr::Symbol { name, namespace: ns })
+                        } else {
+                            unreachable!()
                         }
                     }
+                    Some(t) if matches!(t.token, Token::OpenParen) => {
+                        // The parenthesised content is parsed exactly like a paren GROUP
+                        // (so `λ(0-)` is a left-bind projection and `λ(+×)` a train), via
+                        // the same balanced accumulator used for `(0-)`.
+                        self.advance();
+                        match self.parse_paren_value_leading() {
+                            Some(holder) => Ok(holder),
+                            None => Err(self.err("λ: empty group is not a function")),
+                        }
+                    }
+                    Some(t) if matches!(t.token, Token::OpenBrace) => self.parse_function_atom(),
+                    Some(t) => {
+                        let tk = format!("{:?} @{}:{}", t.token, t.line, t.col);
+                        Err(self.err(&format!("λ: expected a function after λ (got {})", tk)))
+                    }
+                    None => Err(self.err("λ: unexpected end of input")),
                 }
-                self.skip_newlines();
-                let body = self.parse_expr()?;
-                Ok(Instr::Lambda {
-                    params,
-                    body: Box::new(body),
-                })
+            }
+            Token::FunctionCallOpenParen => {
+                // `⟦` (FunctionCallOpenParen) attaches ONLY to a preceding function
+                // (handled in `finish_fn_call`). At a primary position (no preceding fn)
+                // it is a parse error — Kotlin emits "Unexpected token: FunctionCallOpenParen".
+                Err(self.err("unexpected token: function-call bracket ⟦ (must follow a function)"))
             }
             _ => {
+                let tk = self.peek().map(|t| format!("{:?} @{}:{}", t.token, t.line, t.col));
                 Err(self.err("unexpected token in primary"))
             }
         }
@@ -4842,6 +5117,46 @@ impl<'a> Parser<'a> {
     /// and any dyadic operator, so `a b (c d)[0] e` indexes `(c d)`, not the whole strand.
     fn parse_index_suffix(&mut self, mut base: Instr) -> Result<Instr, AplError> {
         loop {
+            let is_member_deref =
+                matches!(self.peek(), Some(t) if matches!(t.token, Token::MemberDereferenceToken));
+            if is_member_deref {
+                self.advance(); // consume the `.`
+                // Kotlin processMemberDereference: after `.` the next token is EITHER a
+                // bare name symbol (`object.name`) OR an OpenParen introducing a value
+                // expression (`object.(expr)`).
+                self.skip_newlines();
+                match self.peek() {
+                    Some(t) if matches!(t.token, Token::OpenParen) => {
+                        self.advance();
+                        let member = self.parse_expr()?;
+                        self.skip_newlines();
+                        match self.peek() {
+                            Some(t) if matches!(t.token, Token::CloseParen) => {
+                                self.advance();
+                            }
+                            _ => return Err(self.err("expected `)` after member-deref expression")),
+                        }
+                        base = Instr::MemberDeref {
+                            object: Box::new(base),
+                            member: Box::new(member),
+                        };
+                    }
+                    Some(t) => match &t.token {
+                        Token::Literal(LiteralValue::Symbol { name, namespace }) => {
+                            let nm = name.clone();
+                            let ns = namespace.clone();
+                            self.advance();
+                            base = Instr::MemberDeref {
+                                object: Box::new(base),
+                                member: Box::new(Instr::Symbol { name: nm, namespace: ns }),
+                            };
+                        }
+                        _ => return Err(self.err("expected a symbol or `(` after member dereference `.`")),
+                    },
+                    None => return Err(self.err("unexpected end of input after member dereference `.`")),
+                }
+                continue;
+            }
             let is_open_bracket =
                 matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenBracket));
             if !is_open_bracket {
