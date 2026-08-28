@@ -4897,13 +4897,24 @@ impl Engine {
                 "Only a single dimension is allowed to be marked as computed".into(),
             ));
         }
-        // Any other negative size errors verbatim.
+        // Kotlin reshape.kt: negative-size error depends on whether the left
+        // arg was a scalar or an array. A scalar negative (non-`¯1`) dim →
+        // "Attempt to reshape to dimension with negative size: <n>". An array
+        // left arg containing a negative dim → "Dimensions contains negative
+        // values" (from the Dimensions constructor, which validates each dim).
+        let is_scalar_shape = matches!(dims_val.as_ref(), APLValue::Number(_));
         if let Some(DimSpec::Fixed(d)) = specs.iter().find(|s| matches!(s, DimSpec::Fixed(d) if *d < 0 && *d != -1))
         {
-            return Err(AplError::runtime(format!(
-                "Attempt to reshape to dimension with negative size: {}",
-                d
-            )));
+            if is_scalar_shape {
+                return Err(AplError::runtime(format!(
+                    "Attempt to reshape to dimension with negative size: {}",
+                    d
+                )));
+            } else {
+                return Err(AplError::runtime(
+                    "Dimensions contains negative values".into(),
+                ));
+            }
         }
         let data = right_val.force(self)?;
         let src_elements: Vec<AplRef<APLValue>> = match data.as_ref() {
@@ -4950,6 +4961,15 @@ impl Engine {
                 })
                 .collect()
         };
+        // Kotlin reshape.kt:294-296: a computed dimension requires the right
+        // arg to be an array (not a scalar). Throws BEFORE any divisibility check.
+        if computed_count == 1 {
+            if data.dimensions().is_empty() {
+                return Err(AplError::runtime(
+                    "Calculated dimensions can only be used with array arguments".into(),
+                ));
+            }
+        }
         // MATCH requires divisibility (Kotlin :312-320, error verbatim).
         if computed_count == 1 {
             for s in &specs {
