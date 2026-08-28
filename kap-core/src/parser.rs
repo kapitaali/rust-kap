@@ -268,10 +268,13 @@ impl<'a> Parser<'a> {
             };
             // BARE FUNCTION VALUE CHECK: at statement level, a bare function with
             // no args is an error — the oracle errors "No arguments specified for
-            // function" (e.g. `+`, `≢`, `+/`). Only fire for bare primitives and
-            // trains, not for derived functions (adverb-bound) or user-defined fns.
+            // function" (e.g. `+`, `≢`, `+/`, or user-defined `f`). Only fire for
+            // bare primitives, trains, and user-defined fns — not for derived
+            // functions (adverb-bound) which are valid values.
             let is_bare_fn = match &instr {
-                Instr::Symbol { name, .. } => Self::is_primitive_op(name),
+                Instr::Symbol { name, namespace: None } => {
+                    Self::is_primitive_op(name) || self.known_functions.iter().any(|f| f == name)
+                }
                 Instr::Train { .. } | Instr::OpCall { .. } | Instr::OverOp { .. } => true,
                 _ => false,
             };
@@ -618,12 +621,10 @@ impl<'a> Parser<'a> {
                         self.advance(); // consume the name
                         self.advance(); // consume ⇐
                         let value = self.parse_function_expr_impl(true)?;
-                        // B2: a bare known-operator RHS is invalid.
+                        // B2: a bare pure-adverb RHS is invalid (e.g. `foo ⇐ ⌸`).
+                        // Ambivalent adverbs are valid (e.g. `f ⇐ /`, `f ⇐ ⌿`).
                         if let Instr::Symbol { name: rhs, namespace: None } = &value {
-                            if self.known_ops.iter().any(|n| n == rhs)
-                                || Self::is_primitive_op(rhs)
-                                || Self::is_adverb(rhs)
-                            {
+                            if Self::is_pure_adverb(rhs) {
                                 return Err(self.err(&format!(
                                     "Operator without left function: {}",
                                     rhs
@@ -3065,6 +3066,12 @@ impl<'a> Parser<'a> {
     /// `/` reduce, `\\` scan, `¨` each.
     fn is_adverb(name: &str) -> bool {
         matches!(name, "/" | "reduce" | "\\" | "scan" | "⌿" | "⍀" | "¨" | "each" | "⍨" | "commute" | "∵" | "bitwise" | "⌸" | "key" | "⌻" | "˝" | "inverse")
+    }
+
+    /// Pure adverbs that ALWAYS need a left function — invalid as a bare RHS
+    /// value (e.g. `f ⇐ ⌸` errors, but `f ⇐ /` is valid).
+    fn is_pure_adverb(name: &str) -> bool {
+        matches!(name, "¨" | "each" | "⍨" | "commute" | "∵" | "bitwise" | "⌸" | "key" | "⌻" | "˝" | "inverse")
     }
 
     /// Fold the *value-right-arg* operators `⍢` (structural-under) and `⍣` (power)
