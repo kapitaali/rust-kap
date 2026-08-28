@@ -4575,10 +4575,16 @@ impl Engine {
             }
             out.push(Rc::new(APLValue::Number(KapNumber::Long(found))));
         }
-        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-            b.dimensions(),
-            ArrayData::Nested(out),
-        )))))
+        // When the right argument is a scalar (rank 0), return a scalar — matching
+        // Kotlin FindIndexArray1DLeftArg.unwrapDeferredValue (member.kt:34).
+        if b.dimensions().is_empty() {
+            Ok(out.into_iter().next().unwrap_or(Rc::new(APLValue::Number(KapNumber::Long(not_found)))))
+        } else {
+            Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                b.dimensions(),
+                ArrayData::Nested(out),
+            )))))
+        }
     }
 
 

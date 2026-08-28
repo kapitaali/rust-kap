@@ -798,10 +798,10 @@ fn curated_kap_parity() {
         ("+⍀ 1 2 3 4", "(1 3 6 10)"),
         // --- Strings: dyadic `⍳` index-of (Kotlin FindIndexTest.kt) ---
         // Result shape = shape of B; first 0-based position in A matching B, else a.size.
-        ("\"abc\" ⍳ @c", "(2)"),
-        ("\"abc\" ⍳ 0", "(3)"),
-        ("3 1 4 2 ⍳ 2", "(3)"),
-        ("3 1 4 2 ⍳ 9", "(4)"),
+        ("\"abc\" ⍳ @c", "2"),
+        ("\"abc\" ⍳ 0", "3"),
+        ("3 1 4 2 ⍳ 2", "3"),
+        ("3 1 4 2 ⍳ 9", "4"),
         ("\"abc\" ⍳ \"xyz\"", "(3 3 3)"),
         ("1 2 3 ⍳ 2 1", "(1 0)"),
         // --- Strings: `cmp` now orders strings (lexicographic) and cross-kinds ---
