@@ -9764,63 +9764,54 @@ impl Engine {
     ) -> Result<Vec<AplRef<APLValue>>, AplError> {
         let elems = b.elements();
         if b_dims.is_empty() {
-            // Scalar B: expand emits count cells (B or Null).
+            // Scalar B: expand emits count cells (B or 0).
             let mut out = Vec::with_capacity(counts.len());
             for &c in counts {
                 if c > 0 {
                     out.push(Rc::new(b.clone()));
                 } else {
-                    out.push(Rc::new(APLValue::Null));
+                    out.push(Rc::new(APLValue::Number(KapNumber::Long(0))));
                 }
             }
             return Ok(out);
         }
-        // Number of B major-cells consumed by positive counts.
-        let mut b_cell = 0usize;
-        let total_cells = b_dims.iter().product::<usize>();
-        let mut out: Vec<AplRef<APLValue>> = Vec::new();
-        // Walk B flat indices, but only advance the B-cell pointer on positive counts.
-        // We instead iterate by coordinate and map each output A-index to a B index.
-        // Build an index map `out_pos[axis] -> b_pos[axis]` (or -1 for zero).
-        let mut b_for_a: Vec<isize> = Vec::with_capacity(counts.len());
+        // Build an index map: for each output position along axis, which B position
+        // does it read from (-1 = fill with 0).
+        // Positive counts consume B elements sequentially; zero/negative emit fills.
+        let mut b_for_out: Vec<isize> = Vec::with_capacity(counts.len());
         let mut bi = 0usize;
         for &c in counts {
             if c > 0 {
-                b_for_a.push(bi as isize);
-                bi += 1; // consumed one B cell (for multi-copy we still advance once)
-                // but Kotlin repeats the SAME B cell `c` times; we must not advance again
-                // for repeats — handle by pushing same `bi-1` for each repeat below.
-            } else {
-                b_for_a.push(-1);
-            }
-        }
-        // Recompute properly: for positive c, push `bi` c times, then advance bi once.
-        b_for_a.clear();
-        bi = 0;
-        for &c in counts {
-            if c > 0 {
                 for _ in 0..c {
-                    b_for_a.push(bi as isize);
+                    b_for_out.push(bi as isize);
                 }
                 bi += 1;
             } else {
-                let zeros = if c == 0 { 1 } else { (-c) as usize };
-                for _ in 0..zeros {
-                    b_for_a.push(-1);
+                let fills = if c == 0 { 1 } else { (-c) as usize };
+                for _ in 0..fills {
+                    b_for_out.push(-1);
                 }
             }
         }
-        for p in 0..total_cells {
-            let coord = Self::coord_of(b_dims, p);
+        // Iterate over output cells: output shape is b_dims with axis replaced by
+        // the total number of output entries (sum of positive counts + zero/negative fills).
+        let mut out_dims = b_dims.to_vec();
+        out_dims[axis] = b_for_out.len();
+        let total_out: usize = out_dims.iter().product();
+        let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(total_out);
+        for p in 0..total_out {
+            let coord = Self::coord_of(&out_dims, p);
             let a = coord[axis];
-            let bpos = b_for_a[a];
+            let bpos = b_for_out[a];
             if bpos < 0 {
-                // zero cell
-                out.push(Rc::new(APLValue::Null));
+                out.push(Rc::new(APLValue::Number(KapNumber::Long(0))));
             } else {
-                let mut c2 = coord.clone();
+                let mut c2 = b_dims.to_vec();
                 c2[axis] = bpos as usize;
-                out.push(elems[Self::flat_of(b_dims, &c2)].clone());
+                // Build full coordinate for B using other dims from output coord
+                let mut bc = coord.clone();
+                bc[axis] = bpos as usize;
+                out.push(elems[Self::flat_of(b_dims, &bc)].clone());
             }
         }
         Ok(out)
