@@ -1124,6 +1124,38 @@ impl<'a> Parser<'a> {
         if matches!(self.peek().map(|t| &t.token), Some(Token::FunctionCallOpenParen)) {
             return self.parse_function_call_list(fn_instr);
         }
+        // P1-M10 (parser.kt:451-453 LeftArrow after fn → processModifiedAssigment :405-424):
+        // `dest op← rhs` is a modified assignment. The dest is the last left arg (which
+        // may be an Index for `x[i] +← v` or a Symbol for `x +← v`). Build the function
+        // call `dest op rhs`, then wrap it in an assignment to dest.
+        if matches!(self.peek().map(|t| &t.token), Some(Token::LeftArrow)) {
+            if !left_args.is_empty() {
+                let dest = left_args.pop().unwrap();
+                self.advance(); // consume ←
+                let rhs = self.parse_value_kotlin()?;
+                let fn_call = Instr::Apply {
+                    fn_expr: Box::new(fn_instr),
+                    left: Some(Box::new(dest.clone())),
+                    right: Box::new(rhs),
+                };
+                return match dest {
+                    Instr::Index { array, selector } => {
+                        Ok(Instr::IndexAssign {
+                            array: array.clone(),
+                            selector: selector.clone(),
+                            value: Box::new(fn_call),
+                        })
+                    }
+                    Instr::Symbol { name, namespace } => {
+                        Ok(Instr::Assign {
+                            target: Box::new(Instr::Symbol { name, namespace }),
+                            value: Box::new(fn_call),
+                        })
+                    }
+                    _ => Err(self.err("modified assignment target must be a symbol or index")),
+                };
+            }
+        }
         self.skip_newlines();
         // M5: boundary check must respect a nested close token. Inside `(f …)` the
         // CloseParen is NOT "no right arg" — Kotlin's parseValue() recurses and only
