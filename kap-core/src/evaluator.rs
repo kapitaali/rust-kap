@@ -2553,7 +2553,18 @@ impl Engine {
             "⍲" => self.bool_broadcast(left_val, right_val, |x, y| !(x && y), "⍲"),
             "⍱" => self.bool_broadcast(left_val, right_val, |x, y| !(x || y), "⍱"),
             "∼" | "not" => self.logical_not(right_val),
-            "~" | "bitnot" => self.scalar1(right_val, |x| x.not(), "~"),
+            // `~` (without/set-difference) is dyadic. Monadic `~` is strict boolean
+            // logical NOT (0 → 1, 1 → 0, anything else → Error "Operation not supported for value").
+            "~" | "bitnot" => match left_val {
+                None => match right_val.as_ref() {
+                    APLValue::Number(n) => {
+                        let b = self.as_strict_bool(n, "~")?;
+                        Ok(Rc::new(APLValue::Number(KapNumber::Long(if b { 0 } else { 1 }))))
+                    }
+                    _ => Err(AplError::runtime("~ requires a number".into())),
+                },
+                Some(l) => self.without(l, right_val),
+            },
             "∊" | "in" => self.membership(left_val, right_val),
             // `∪` unique/union (Kotlin unique.kt): monadic → unique; dyadic → union.
             "∪" | "unique" => match left_val {
@@ -9318,6 +9329,58 @@ impl Engine {
         }
     }
 
+    /// Set difference / without: `L ~ R` removes from L all elements that appear in R.
+    /// For vectors: `1 2 3 4 ~ 2 4` → `1 3`. For strings: `'hello' ~ 'l'` → `'heo'`.
+    fn without(
+        &self,
+        left_val: AplRef<APLValue>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let l = left_val.force(self)?;
+        let r = right_val.force(self)?;
+        match (l.as_ref(), r.as_ref()) {
+            (APLValue::Array(la), APLValue::Array(ra)) => {
+                let lb = la.elements();
+                let rb = ra.elements();
+                let mut out = Vec::with_capacity(lb.len());
+                for e in &lb {
+                    let mut found = false;
+                    for r in &rb {
+                        if Self::deep_equal(e.as_ref(), r.as_ref()) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        out.push(e.clone());
+                    }
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![out.len()],
+                    ArrayData::Nested(out),
+                )))))
+            }
+            (APLValue::Array(la), APLValue::Number(n)) => {
+                let lb = la.elements();
+                let mut out = Vec::with_capacity(lb.len());
+                for e in &lb {
+                    if let APLValue::Number(x) = e.as_ref() {
+                        if x != n {
+                            out.push(e.clone());
+                        }
+                    } else {
+                        out.push(e.clone());
+                    }
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![out.len()],
+                    ArrayData::Nested(out),
+                )))))
+            }
+            _ => Err(AplError::runtime("~ requires arrays".into())),
+        }
+    }
+
     /// Dyadic boolean AND/OR: operands are 0/1 (truthy: non-zero). Result 0/1.
     fn bool2(
         &self,
@@ -11612,8 +11675,11 @@ mod tests {
     #[test]
     fn eval_not() {
         assert_eq!(eval("~ 0"), "1");
-        assert_eq!(eval("~ 5"), "0");
-        assert_eq!(eval("~ 1 0 3"), "(0 1 0)");
+        assert_eq!(eval("~ 1"), "0");
+        assert!(eval_fails("~ 5"));
+        assert!(eval_fails("~ 1 0 3"));
+        assert_eq!(eval("~¨ 1 0"), "(0 1)");
+        assert!(eval_fails("~¨ 1 0 3"));
     }
 
     #[test]
@@ -11656,7 +11722,7 @@ mod tests {
     #[test]
     fn eval_each_monadic() {
         assert_eq!(eval("⌈¨ 1.2 2.8 3.5"), "(2 3 4)");
-        assert_eq!(eval("~¨ 1 0 3"), "(0 1 0)");
+        assert_eq!(eval("~¨ 1 0"), "(0 1)");
     }
 
     #[test]
