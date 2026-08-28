@@ -608,7 +608,10 @@ impl<'a> Parser<'a> {
                         let value = self.parse_function_expr_impl(true)?;
                         // B2: a bare known-operator RHS is invalid.
                         if let Instr::Symbol { name: rhs, namespace: None } = &value {
-                            if self.known_ops.iter().any(|n| n == rhs) {
+                            if self.known_ops.iter().any(|n| n == rhs)
+                                || Self::is_primitive_op(rhs)
+                                || Self::is_adverb(rhs)
+                            {
                                 return Err(self.err(&format!(
                                     "Operator without left function: {}",
                                     rhs
@@ -1932,15 +1935,28 @@ impl<'a> Parser<'a> {
         // is also called to fetch a *dyadic operator* (e.g. the `-` in `3 - 4`), where the
         // same arm would wrongly hijack the operator into a unary Apply. (Must not fire for
         // dyadic subtraction, where `-` already has a left operand.)
+        //
+        // CRITICAL: only treat `-` as monadic minus when followed by a VALUE operand. When
+        // followed by an operator/adverb (e.g. `-⍛+`, `-+/`, `-¨`), `-` is a function atom
+        // that forms a train/derived function — the oracle parses `-⍛+` as the derived
+        // function (OverOp{-, +}) with no right arg, NOT as monadic minus over `⍛+`.
         if let Some(Token::Literal(LiteralValue::Symbol { name, namespace })) = self.peek().map(|t| &t.token) {
             if name == "-" && namespace.is_none() {
-                self.advance();
-                let operand = self.parse_apply()?;
-                return Ok(Instr::Apply {
-                    fn_expr: Box::new(Instr::Symbol { name: "-".to_string(), namespace: None }),
-                    left: None,
-                    right: Box::new(operand),
-                });
+                let next_is_fn_atom = match self.peek_at(1).map(|t| &t.token) {
+                    Some(Token::Literal(LiteralValue::Symbol { name: nn, .. })) => {
+                        Self::is_primitive_op(nn) || Self::is_adverb(nn) || nn == "⍤" || nn == "⍣" || nn == "⍢"
+                    }
+                    _ => false,
+                };
+                if !next_is_fn_atom {
+                    self.advance();
+                    let operand = self.parse_apply()?;
+                    return Ok(Instr::Apply {
+                        fn_expr: Box::new(Instr::Symbol { name: "-".to_string(), namespace: None }),
+                        left: None,
+                        right: Box::new(operand),
+                    });
+                }
             }
         }
         let mut first = self.parse_primary()?;
