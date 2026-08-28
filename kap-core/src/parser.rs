@@ -312,6 +312,21 @@ impl<'a> Parser<'a> {
         let mut left_args: Vec<Instr> = Vec::new();
         loop {
             self.skip_newlines();
+            // P1-M8 (parser.kt:1012-1013 OpenBracket/MemberDereferenceToken →
+            // processIndex/processMemberDereference): a `[` or `.` immediately after a
+            // value adjusts the LAST left arg (index access / member deref). This mirrors
+            // Kotlin's left-arg adjustment in the main loop.
+            if !left_args.is_empty() {
+                let next_tok = self.peek().map(|t| &t.token);
+                if matches!(next_tok, Some(Token::OpenBracket))
+                    || matches!(next_tok, Some(Token::MemberDereferenceToken))
+                {
+                    let base = left_args.pop().unwrap();
+                    let base = self.parse_index_suffix(base)?;
+                    left_args.push(base);
+                    continue;
+                }
+            }
             let tok = match self.peek() {
                 Some(t) => t.clone(),
                 None => break,
@@ -523,6 +538,7 @@ impl<'a> Parser<'a> {
                     // `x ← v` (parser.kt:997 → processAssignment): target = last leftArg.
                     // Destructuring `(a b c) ← v`: the target is a value group of
                     // symbols → DestructAssign (matches the legacy path's behaviour).
+                    // Indexed assignment `arr[idx] ← v`: target is an `Index` instr.
                     let target = match left_args.pop() {
                         Some(t) => t,
                         None => return Err(self.err("assignment without a target")),
@@ -531,7 +547,7 @@ impl<'a> Parser<'a> {
                     // Kotlin `processAssignment` (parser.kt:529) parses the RHS with
                     // `parseValue()` — the SAME accumulator loop we are in, NOT a
                     // separate legacy path. Recursing here is what lets operators the
-                    // accumulator owns (`⍢` structural-under, `⍣` power, `«»` forks)
+                    // accumulator owns (`⍢` structural-under, `⍣` power, «» forks)
                     // appear on an assignment RHS: `x ← ⌽⍢⌽ ⍳5`. Calling the legacy
                     // `parse_expr` instead made `⍢` fall through to a bare symbol
                     // lookup → `undefined symbol: ⍢` (output3.kap:38 and friends).
@@ -544,6 +560,14 @@ impl<'a> Parser<'a> {
                         }
                         Err(e) => return Err(e),
                     };
+                    // P1-M9: indexed assignment `arr[idx] ← v`
+                    if let Instr::Index { array, selector } = target {
+                        return Ok(Instr::IndexAssign {
+                            array: array.clone(),
+                            selector: selector.clone(),
+                            value: Box::new(value),
+                        });
+                    }
                     if let Instr::Array { elements } = &target {
                         if elements.iter().all(|e| matches!(e, Instr::Symbol { .. })) {
                             let names = elements

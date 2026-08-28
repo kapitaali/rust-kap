@@ -1062,6 +1062,20 @@ impl Engine {
                 // NOT `pick` (`⊇`). Route to `index_select`.
                 self.index_select(arr.as_ref(), sel.as_ref())
             }
+            Instr::IndexAssign { array, selector, value } => {
+                let arr = self.eval_instr(array, env)?;
+                let sel = self.eval_instr(selector, env)?;
+                let val = self.eval_instr(value, env)?;
+                let result = self.index_assign(arr.as_ref(), sel.as_ref(), val.as_ref())?;
+                // P1-M9: assign the result back to the variable (mirrors Kotlin's
+                // processAssignment with an ArrayIndex dest — the lvalue reader updates
+                // the variable in the environment).
+                if let Instr::Symbol { name, namespace } = array.as_ref() {
+                    self.check_not_constant(name, namespace, env)?;
+                    env.assign(name, namespace, result.clone());
+                }
+                Ok(result)
+            }
             Instr::MemberDeref { object, member } => {
                 let obj = self.eval_instr(object, env)?;
                 let mem = self.eval_instr(member, env)?;
@@ -3061,6 +3075,7 @@ impl Engine {
                 | Instr::Empty
                 | Instr::Apply { .. }
                 | Instr::Index { .. }
+                | Instr::IndexAssign { .. }
                 | Instr::BooleanOp { .. }
                 | Instr::Value(_)
         )
@@ -7126,6 +7141,123 @@ impl Engine {
         Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
             result_dims,
             ArrayData::Nested(out),
+        )))))
+    }
+
+    /// Compute the flat indices for a given selector (mirrors `index_select`'s logic).
+    fn compute_flat_indices(
+        &self,
+        arr: &APLValue,
+        selector: &APLValue,
+    ) -> Result<Vec<usize>, AplError> {
+        let dims = arr.dimensions();
+        let rank = dims.len();
+        let sections: Vec<AplRef<APLValue>> = match selector {
+            APLValue::Array(a) => a.elements(),
+            other => vec![Rc::new(other.clone())],
+        };
+        if sections.len() > rank {
+            return Err(AplError::runtime(format!(
+                "Index list length must be less than or equal to the rank of the argument. Argument={}, index={}",
+                rank, sections.len()
+            )));
+        }
+        let mut selected: Vec<Vec<usize>> = Vec::with_capacity(rank);
+        for k in 0..sections.len() {
+            let sec = sections[k].force(self)?;
+            let axis_size = dims[k];
+            let idx_list: Vec<AplRef<APLValue>> = match sec.as_ref() {
+                APLValue::Null => vec![],
+                APLValue::Array(a) if a.element_count() == 0 => vec![],
+                APLValue::Array(a) => a.elements(),
+                _ => vec![Rc::new(sec.as_ref().clone())],
+            };
+            if idx_list.is_empty() {
+                selected.push((0..axis_size).collect());
+            } else {
+                let mut v = Vec::with_capacity(idx_list.len());
+                for e in &idx_list {
+                    let i = self.index_to_i64(e.force(self)?.as_ref())?;
+                    v.push(check_and_adjust_selected_index(i, axis_size)?);
+                }
+                selected.push(v);
+            }
+        }
+        for k in sections.len()..rank {
+            selected.push((0..dims[k]).collect());
+        }
+        let mut strides = vec![1usize; rank];
+        if rank > 1 {
+            for k in (0..rank - 1).rev() {
+                strides[k] = strides[k + 1] * dims[k + 1];
+            }
+        }
+        let total: usize = selected.iter().map(|s| s.len()).product();
+        let mut flat_indices = Vec::with_capacity(total.max(1));
+        let mut combo = vec![0usize; selected.len()];
+        for _ in 0..total {
+            let mut flat = 0usize;
+            for k in 0..selected.len() {
+                flat += selected[k][combo[k]] * strides[k];
+            }
+            flat_indices.push(flat);
+            for k in (0..selected.len()).rev() {
+                combo[k] += 1;
+                if combo[k] < selected[k].len() {
+                    break;
+                }
+                combo[k] = 0;
+            }
+        }
+        Ok(flat_indices)
+    }
+
+    /// Indexed assignment: `array[index] ← value` — set the selected positions in
+    /// `array` to `value`. Returns the modified array.
+    fn index_assign(
+        &self,
+        arr: &APLValue,
+        selector: &APLValue,
+        val: &APLValue,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let arr = arr.force(self)?;
+        let dims = arr.dimensions();
+        let flat_indices = self.compute_flat_indices(&arr, selector)?;
+        let total_elements: usize = dims.iter().product();
+        let mut elements: Vec<AplRef<APLValue>> = Vec::with_capacity(total_elements);
+        for i in 0..total_elements {
+            elements.push(Rc::new(arr.value_at(i)));
+        }
+        if flat_indices.len() == 1 {
+            elements[flat_indices[0]] = Rc::new(val.clone());
+        } else {
+            match val {
+                APLValue::Array(va) => {
+                    let ve = va.elements();
+                    if ve.len() == flat_indices.len() {
+                        for (j, &fi) in flat_indices.iter().enumerate() {
+                            elements[fi] = ve[j].clone();
+                        }
+                    } else if va.element_count() == 1 {
+                        for &fi in &flat_indices {
+                            elements[fi] = ve[0].clone();
+                        }
+                    } else {
+                        return Err(AplError::runtime(
+                            "indexed assignment: value shape mismatch".into(),
+                        ));
+                    }
+                }
+                scalar => {
+                    for &fi in &flat_indices {
+                        elements[fi] = Rc::new(scalar.clone());
+                    }
+                }
+            }
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            dims,
+            ArrayData::Nested(elements),
         )))))
     }
 

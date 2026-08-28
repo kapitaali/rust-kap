@@ -156,7 +156,10 @@ pub enum Instr {
     ValueOp { func: Box<Instr>, op_name: String, operand: Box<Instr> },
     /// An empty array / nil.
     Empty,
-    /// Array *pick* / selection: `array[selector]`. `selector` is an index expression
+    /// Indexed assignment: `array[index] ← value` (Kotlin `processAssignment`
+    /// with an `ArrayIndex` dest — `deriveLvalueReader()` on an index produces
+    /// an lvalue reader that updates the array at the selected positions).
+    IndexAssign { array: Box<Instr>, selector: Box<Instr>, value: Box<Instr> },
     /// (a scalar or vector of integers) parsed from `[...]`. Semantics (Kap `PickAPLFunction`
     /// / `PickResultValue`): 1-D, each index `i` is adjusted with negative-from-end support
     /// (`checkAndAdjustSelectedIndex`); a 1-element selection is disclosed to a scalar, a
