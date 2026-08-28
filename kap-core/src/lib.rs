@@ -136,7 +136,7 @@ impl APLValue {
     /// REPL-style renderer that wraps strings in double quotes.
     pub fn format_value(&self) -> String {
         match self {
-            APLValue::Number(n) => n.format(true),
+            APLValue::Number(n) => n.format(false), // PLAIN style: ASCII minus (matches oracle ⍕)
             APLValue::Char(c) => c.to_string(),
             APLValue::Str(s) => s.clone(),
             APLValue::Null => "null".to_string(),

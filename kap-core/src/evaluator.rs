@@ -11703,9 +11703,9 @@ mod tests {
     #[test]
     fn eval_monadic_arithmetic() {
         // `+` and `-` are ambivalent: monadic `- x` = negate, `+ x` = identity.
-        assert_eq!(eval("-(1 + 2)"), "¯3");
+        assert_eq!(eval("-(1 + 2)"), "-3");
         assert_eq!(eval("+(1 + 2)"), "3");
-        assert_eq!(eval("-(3 1 4)"), "(¯3 ¯1 ¯4)");
+        assert_eq!(eval("-(3 1 4)"), "(-3 -1 -4)");
     }
 
     #[test]
@@ -11756,7 +11756,7 @@ mod tests {
     #[test]
     fn eval_sub_neg() {
         assert_eq!(eval("5 - 2"), "3");
-        assert_eq!(eval("2 - 5"), "¯3");
+        assert_eq!(eval("2 - 5"), "-3");
     }
 
     #[test]
@@ -11972,7 +11972,7 @@ mod tests {
     #[test]
     fn eval_train_fork() {
         // x (A « B » C) y = (x A y) B (x C y)
-        assert_eq!(eval("3 (+ « × » -) 4"), "¯7");
+        assert_eq!(eval("3 (+ « × » -) 4"), "-7");
     }
 
     #[test]
@@ -11995,7 +11995,7 @@ mod tests {
         // Non-integer gamma via lgamma reflection (oracle values).
         assert_eq!(eval("!0.5"), "0.886226925452758");
         assert_eq!(eval("!¯0.5"), "1.772453850905516");
-        assert_eq!(eval("!¯1.5"), "¯3.5449077018110318");
+        assert_eq!(eval("!¯1.5"), "-3.5449077018110318");
         // Binomial: scalar and element-wise over arrays.
         assert_eq!(eval("5 ! 2"), "0.0");
         assert_eq!(eval("1 2 3 ! 4 5 6"), "(4 10 20)");
@@ -12009,7 +12009,7 @@ mod tests {
         assert_eq!(eval("3r3"), "1");
         // Non-whole rationals keep the num/den form (oracle: 2r4 → 1/2).
         assert_eq!(eval("2r4"), "1/2");
-        assert_eq!(eval("¯2r4"), "¯1/2");
+        assert_eq!(eval("¯2r4"), "-1/2");
         assert_eq!(eval("6r9"), "2/3");
     }
 
@@ -12046,7 +12046,7 @@ mod tests {
     #[test]
     fn eval_train_compose() {
         // x (f ∘ g) y = f(y, g(y))  (compose is dyadic: f(y, g(y)))
-        assert_eq!(eval("¯2 3 4 (×∘-) 1000"), "(2000 ¯3000 ¯4000)");
+        assert_eq!(eval("¯2 3 4 (×∘-) 1000"), "(2000 -3000 -4000)");
         // monadic compose with reciprocal: (×∘÷) y = y × (1/y) = y, exactly 1 for all y≠0.
         // The result is the rational 1/1, which Kap renders as the bare integer `1`
         // (oracle: 1r2 displays 1/2, but a whole-number rational displays as `1`).
@@ -12056,8 +12056,8 @@ mod tests {
     #[test]
     fn eval_train_atop() {
         // x (f g) y = f(x g y)  (atop: g dyadic between x and y)
-        assert_eq!(eval("2 (-*) 5"), "¯32"); // -(2*5)
-        assert_eq!(eval("10 (-,) 20"), "(¯10 ¯20)"); // -(10,20) = (-10,-20)
+        assert_eq!(eval("2 (-*) 5"), "-32"); // -(2*5)
+        assert_eq!(eval("10 (-,) 20"), "(-10 -20)"); // -(10,20) = (-10,-20)
     }
 
     // --- Phase 9b: function-assignment validation (SHOULD FAIL, per Kotlin CustomFunctionTest/FnParseTest) ---
@@ -12128,9 +12128,9 @@ mod tests {
     #[test]
     fn eval_char_difference() {
         // "bBa" - "aAb" => codepoint diff. Kotlin's stored expectation is `(1 1 -1)` (ASCII
-        // minus) but Kap renders the negative sign as the overbar glyph, so we get `(1 1 ¯1)`.
-        // The value [-1] is identical; this is a display-glyph artifact, not a logic error.
-        assert_eq!(eval(r#""bBa" - "aAb""#), "(1 1 ¯1)");
+        // minus). The port now renders negative numbers with ASCII minus in format_value(),
+        // matching the oracle's PLAIN style.
+        assert_eq!(eval(r#""bBa" - "aAb""#), "(1 1 -1)");
     }
 
     #[test]
