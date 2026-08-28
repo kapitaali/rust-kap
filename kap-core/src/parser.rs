@@ -566,6 +566,9 @@ impl<'a> Parser<'a> {
                     };
                     // P1-M9: indexed assignment `arr[idx] ← v`
                     if let Instr::Index { array, selector } = target {
+                        if !matches!(array.as_ref(), Instr::Symbol { .. }) {
+                            return Err(self.err("Indexed assignment can only be used when the target is a variable"));
+                        }
                         return Ok(Instr::IndexAssign {
                             array: array.clone(),
                             selector: selector.clone(),
