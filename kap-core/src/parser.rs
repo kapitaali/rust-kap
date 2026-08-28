@@ -543,6 +543,7 @@ impl<'a> Parser<'a> {
                             return Ok(Instr::DestructAssign {
                                 names,
                                 value: Box::new(value),
+                                semicolon: false,
                             });
                         }
                     }
@@ -1489,6 +1490,7 @@ impl<'a> Parser<'a> {
             // gather bare symbols until the matching `)`
             let mut names: Vec<(String, Option<String>)> = Vec::new();
             let mut ok = true;
+            let mut has_semicolon = false;
             loop {
                 self.skip_newlines();
                 match self.peek() {
@@ -1502,6 +1504,7 @@ impl<'a> Parser<'a> {
                             // works). Consume the separator if present and continue.
                             if matches!(self.peek(), Some(t) if matches!(t.token, Token::ListSeparator)) {
                                 self.advance();
+                                has_semicolon = true;
                             }
                         }
                         Token::CloseParen => {
@@ -1527,6 +1530,7 @@ impl<'a> Parser<'a> {
                     return Ok(Instr::DestructAssign {
                         names,
                         value: Box::new(value),
+                        semicolon: has_semicolon,
                     });
                 }
             }
@@ -4965,8 +4969,9 @@ impl<'a> Parser<'a> {
                 self.pos = save;
                 let e = self.parse_expr()?;
                 self.skip_newlines();
-                // A `;` between operands inside a group is a vector literal: `(10;20;30)`.
+                // A `;` between operands inside a group is a *list* literal: `(10;20;30)`.
                 // (Kap uses `;` as the list separator in vectors and function argument lists.)
+                // Distinct from a space-stranded array — `typeof (1;2;3)` → `kap:list`.
                 if matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator)) {
                     let mut elems = vec![e];
                     while matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator)) {
@@ -4978,9 +4983,9 @@ impl<'a> Parser<'a> {
                     match self.peek() {
                         Some(t) if matches!(t.token, Token::CloseParen) => {
                             self.advance();
-                            return Ok(Instr::Array { elements: elems });
+                            return Ok(Instr::List { elements: elems });
                         }
-                        _ => return Err(self.err("expected ')' after ';'-separated vector")),
+                        _ => return Err(self.err("expected ')' after ';'-separated list")),
                     }
                 }
                 // A `⋄` (statement separator) inside the group makes it a statement sequence

@@ -713,14 +713,12 @@ impl Engine {
             }
             Instr::List { elements } => {
                 // A `;`-separated list literal `(1;2;3)`. Evaluates to an
-                // APLValue::Array (the port has no separate list type yet), but
-                // the parser distinguishes it from `Instr::Array` (space-stranded)
-                // so that destructuring assignment can require a list RHS.
+                // APLValue::List — distinct from a space-stranded array.
                 let mut vals = Vec::with_capacity(elements.len());
                 for e in elements {
                     vals.push(self.eval_instr(e, env)?);
                 }
-                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                Ok(Rc::new(APLValue::List(Rc::new(KapArray::new(
                     vec![vals.len()],
                     ArrayData::Nested(vals),
                 )))))
@@ -750,10 +748,26 @@ impl Engine {
                     Err(AplError::runtime("assignment target must be a symbol".into()))
                 }
             }
-            Instr::DestructAssign { names, value } => {
+            Instr::DestructAssign { names, value, semicolon } => {
                 // `(a b c) ← expr` — bind each LHS symbol to the corresponding element of
                 // the (vector) RHS. Mirrors Kap's multi-target assignment.
+                // A `;`-separated LHS `(a;b;c)←RHS` requires the RHS to be a *list*
+                // (Kotlin `LiteralAPLList`); a plain array is a type mismatch.
                 let v = self.eval_instr(value, env)?;
+                if *semicolon {
+                    if !matches!(v.as_ref(), APLValue::List(_)) {
+                        return Err(AplError::runtime(format!(
+                            "In destructuring assignment, expected a list, got: {}",
+                            v.class_name()
+                        )));
+                    }
+                } else if matches!(v.as_ref(), APLValue::List(_)) {
+                    return Err(AplError::runtime(format!(
+                        "In destructuring assignment, expected a rank-1 array of {}, got dimensions: {}",
+                        names.len(),
+                        v.dimensions().len()
+                    )));
+                }
                 let elems = v.elements();
                 if elems.len() != names.len() {
                     return Err(AplError::runtime(format!(
@@ -1123,6 +1137,7 @@ impl Engine {
         match v {
             APLValue::Number(n) => n.as_boolean(),
             APLValue::Array(a) => a.element_count() > 0,
+            APLValue::List(a) => a.element_count() > 0,
             APLValue::Str(s) => !s.is_empty(),
             APLValue::Char(_) => true,
             APLValue::Null => false,
@@ -3327,7 +3342,7 @@ impl Engine {
             env.define(&names[0], &None, Rc::new(arg.clone()));
             return;
         }
-        if let APLValue::Array(a) = arg {
+        if let APLValue::Array(a) | APLValue::List(a) = arg {
             let elems = a.elements();
             for (i, n) in names.iter().enumerate() {
                 let v = elems.get(i).cloned().unwrap_or_else(|| Rc::new(APLValue::Null));
@@ -4688,7 +4703,7 @@ impl Engine {
         // Right arg is an `(subject; replacement)` pair (Kotlin `b.listify()`).
         let pair = right_val.force(self)?;
         let (subject, replacement) = match pair.as_ref() {
-            APLValue::Array(a) if a.element_count() == 2 => {
+            APLValue::Array(a) | APLValue::List(a) if a.element_count() == 2 => {
                 let es = a.elements();
                 let subj = match es[0].as_ref() {
                     APLValue::Str(s) => s.clone(),
@@ -7498,6 +7513,13 @@ impl Engine {
                     elems.push(self.apl_to_instr(e.as_ref())?);
                 }
                 Ok(Instr::Array { elements: elems })
+            }
+            APLValue::List(a) => {
+                let mut elems = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    elems.push(self.apl_to_instr(e.as_ref())?);
+                }
+                Ok(Instr::List { elements: elems })
             }
             APLValue::UserFn { .. } => {
                 Err(AplError::runtime("cannot use a function as an array element".into()))

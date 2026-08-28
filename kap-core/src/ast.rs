@@ -201,6 +201,10 @@ pub enum Instr {
     DestructAssign {
         names: Vec<(String, Option<String>)>,
         value: Box<Instr>,
+        /// Whether the LHS uses `;` as a separator (e.g. `(a;b;c)←RHS`). When true,
+        /// the RHS must be a *list* (`APLValue::List`); a plain array is a type mismatch.
+        /// Space-separated LHS (`(a b c)←RHS`) accepts any array RHS.
+        semicolon: bool,
     },
     /// A macro *expansion*: splice `body` with `bindings` (var name → already-parsed
     /// `Instr`) defined in a child scope. Faithful port of Kotlin's

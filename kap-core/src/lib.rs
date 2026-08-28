@@ -50,6 +50,11 @@ pub enum APLValue {
     Char(char),
     Str(String),
     Array(AplRef<KapArray>),
+    /// A `;`-separated *list* value (Kotlin `APLList` / `LiteralAPLList`).
+    /// Distinct from `Array` (space-stranded): `typeof (1;2;3)` → `kap:list`,
+    /// `typeof (1 2 3)` → `kap:array`. Destructuring assignment `(a;b;c)←RHS`
+    /// requires the RHS to be a list, not an array.
+    List(AplRef<KapArray>),
     Null,
     /// An unevaluated expression (lazy thunk). `instr` is the tree; `env` is the lexical
     /// environment captured at the point of deferral.
@@ -111,6 +116,7 @@ impl APLValue {
             APLValue::Char(_) => "char",
             APLValue::Str(_) => "string",
             APLValue::Array(_) => "array",
+            APLValue::List(_) => "list",
             APLValue::Null => "null",
             APLValue::Deferred { .. } => "deferred",
             APLValue::UserFn { .. } => "lambda",
@@ -139,6 +145,12 @@ impl APLValue {
                 let parts: Vec<String> = a.elements().iter().map(|e| e.format_value()).collect();
                 format!("({})", parts.join(" "))
             }
+            APLValue::List(a) => {
+                // A `;`-separated list. Renders with angle brackets: `⟨1 2 3⟩`
+                // (Kap distinguishes lists from arrays in display).
+                let parts: Vec<String> = a.elements().iter().map(|e| e.format_value()).collect();
+                format!("⟨{}⟩", parts.join(" "))
+            }
             APLValue::Deferred { .. } => "<deferred>".to_string(),
             APLValue::UserFn { .. } => "<function>".to_string(),
             APLValue::UserOp { .. } => "<operator>".to_string(),
@@ -163,6 +175,9 @@ impl APLValue {
             APLValue::Str(s) => s.clone(),
             APLValue::Null => String::new(),
             APLValue::Array(a) => {
+                a.elements().iter().map(|e| e.format_plain()).collect()
+            }
+            APLValue::List(a) => {
                 a.elements().iter().map(|e| e.format_plain()).collect()
             }
             APLValue::Deferred { .. } => "<deferred>".to_string(),
@@ -217,6 +232,10 @@ impl APLValue {
             APLValue::Deferred { .. } => "<deferred>".to_string(),
             APLValue::UserFn { .. } => "<function>".to_string(),
             APLValue::UserOp { .. } => "<operator>".to_string(),
+            APLValue::List(a) => {
+                let parts: Vec<String> = a.elements().iter().map(|e| e.format_display()).collect();
+                format!("⟨{}⟩", parts.join(" "))
+            }
             APLValue::Symbol { name, namespace } => match namespace {
                 Some(ns) if ns == "keyword" => format!(":{}", name),
                 Some(ns) => format!("{}:{}", ns, name),
@@ -236,6 +255,7 @@ impl APLValue {
     pub fn dimensions(&self) -> Vec<usize> {
         match self {
             APLValue::Array(a) => a.dimensions.clone(),
+            APLValue::List(a) => a.dimensions.clone(),
             APLValue::Str(s) => vec![s.chars().count()],
             _ => vec![],
         }
@@ -245,6 +265,7 @@ impl APLValue {
     pub fn rank(&self) -> usize {
         match self {
             APLValue::Array(a) => a.dimensions.len(),
+            APLValue::List(a) => a.dimensions.len(),
             APLValue::Str(s) => {
                 if s.is_empty() {
                     0
@@ -260,6 +281,7 @@ impl APLValue {
     pub fn element_count(&self) -> usize {
         match self {
             APLValue::Array(a) => a.element_count(),
+            APLValue::List(a) => a.element_count(),
             APLValue::Str(s) => s.chars().count(),
             _ => 1,
         }
@@ -269,6 +291,7 @@ impl APLValue {
     pub fn value_at(&self, i: usize) -> APLValue {
         match self {
             APLValue::Array(a) => a.elements().get(i).map(|e| e.as_ref().clone()).unwrap_or(APLValue::Null),
+            APLValue::List(a) => a.elements().get(i).map(|e| e.as_ref().clone()).unwrap_or(APLValue::Null),
             APLValue::Str(s) => s
                 .chars()
                 .nth(i)
@@ -286,6 +309,7 @@ impl APLValue {
     pub fn elements(&self) -> Vec<AplRef<APLValue>> {
         match self {
             APLValue::Array(a) => a.elements(),
+            APLValue::List(a) => a.elements(),
             APLValue::Str(s) => s.chars().map(|c| Rc::new(APLValue::Char(c))).collect(),
             APLValue::Null => vec![],
             other => vec![Rc::new(other.clone())],
@@ -329,6 +353,7 @@ impl APLValue {
                 Number(_) => Some(0),
                 Char(_) => Some(5),
                 Array(_) => Some(7),
+                List(_) => Some(8),
                 Null => Some(11),
                 _ => None,
             }
