@@ -2457,7 +2457,8 @@ impl Engine {
             },
             "≢" | "tally" => self.tally(right_val),
             "⊃" | "first" => self.reveal(left_val, right_val),
-            "," | "⍪" => self.catenate(left_val, right_val),
+            "," => self.catenate(left_val, right_val, false),
+            "⍪" => self.catenate(left_val, right_val, true),
             "⌽" | "rotateright" => self.reverse_horizontal(left_val, right_val),
             "⊖" | "rotateleft" => self.reverse_vertical(left_val, right_val),
             "⍉" => self.transpose(left_val, right_val),
@@ -5050,6 +5051,7 @@ impl Engine {
         &self,
         left_val: Option<AplRef<APLValue>>,
         right_val: AplRef<APLValue>,
+        is_table: bool,
     ) -> Result<AplRef<APLValue>, AplError> {
         match left_val {
             None => {
@@ -5071,13 +5073,80 @@ impl Engine {
                     s.push_str(s2);
                     return Ok(Rc::new(APLValue::Str(s)));
                 }
-                let mut elems = Vec::new();
-                self.collect_elements(&a, &mut elems);
-                self.collect_elements(&right_val, &mut elems);
-                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                    vec![elems.len()],
-                    ArrayData::Nested(elems),
-                )))))
+                let b = right_val.force(self)?;
+                let a_is_scalar = a.dimensions().is_empty();
+                let b_is_scalar = b.dimensions().is_empty();
+                // Both scalar: rank-1 vector of 2 elements (Kotlin joinNoAxis, :174-178).
+                if a_is_scalar && b_is_scalar {
+                    let mut elems = Vec::new();
+                    self.collect_elements(&a, &mut elems);
+                    self.collect_elements(&b, &mut elems);
+                    return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        vec![elems.len()],
+                        ArrayData::Nested(elems),
+                    )))));
+                }
+                // Default axis: `,` uses last axis (rank-1), `⍪` uses first axis (0).
+                // Kotlin: ConcatenateAPLFunctionLastAxis vs ConcatenateAPLFunctionFirstAxis.
+                let a_rank = a.dimensions().len();
+                let b_rank = b.dimensions().len();
+                let default_axis = if is_table {
+                    0
+                } else if a_rank >= b_rank {
+                    a_rank - 1
+                } else {
+                    b_rank - 1
+                };
+                // Arrayify scalars: reshape to other side's shape with length-1 at
+                // the concatenation axis (Kotlin joinByAxis :213-234).
+                let a = if a_is_scalar {
+                    let b_dims = b.dimensions();
+                    let mut ad = vec![1usize; b_dims.len()];
+                    for i in 0..b_dims.len() {
+                        if i != default_axis { ad[i] = b_dims[i]; }
+                    }
+                    let count = ad.iter().product::<usize>();
+                    Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        ad,
+                        ArrayData::Nested(vec![Rc::new(a.as_ref().clone()); count]),
+                    ))))
+                } else {
+                    a
+                };
+                let b = if b_is_scalar {
+                    let a_dims = a.dimensions();
+                    let mut bd = vec![1usize; a_dims.len()];
+                    for i in 0..a_dims.len() {
+                        if i != default_axis { bd[i] = a_dims[i]; }
+                    }
+                    let count = bd.iter().product::<usize>();
+                    Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        bd,
+                        ArrayData::Nested(vec![Rc::new(b.as_ref().clone()); count]),
+                    ))))
+                } else {
+                    b
+                };
+                let a_dims = a.dimensions();
+                let b_dims = b.dimensions();
+                // Both rank <= 1: flat concat (Kotlin Concatenated1DArrays, :181).
+                if a_dims.len() <= 1 && b_dims.len() <= 1 {
+                    let mut elems = Vec::new();
+                    self.collect_elements(&a, &mut elems);
+                    self.collect_elements(&b, &mut elems);
+                    return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        vec![elems.len()],
+                        ArrayData::Nested(elems),
+                    )))));
+                }
+                // Higher rank: use join_by_axis (Kotlin joinByAxis, :188).
+                self.join_by_axis(
+                    &a.elements(),
+                    &a_dims,
+                    &b.elements(),
+                    &b_dims,
+                    default_axis,
+                )
             }
         }
     }
