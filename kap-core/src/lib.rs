@@ -246,6 +246,191 @@ impl APLValue {
         }
     }
 
+    /// Render a value in **conform mode** — oracle-compatible display.
+    ///
+    /// This matches Real Kap's `formatted(FormatStyle.PLAIN)` for scalars and
+    /// `encloseInBox` for arrays. Used by `--conform-display` for manual
+    /// comparison with the oracle. Differences from `format_display`:
+    /// - Negative numbers use ASCII `-` (not `¯`).
+    /// - 1-D vectors use `⟨⟩` (not `()`).
+    /// - Multi-dim arrays use box frames (┌→──┐ etc.).
+    /// - Empty arrays use `⍬` or `┌⊖┐` (not `()`).
+    pub fn format_conform(&self) -> String {
+        match self {
+            APLValue::Number(n) => n.format(false), // readable=false → ASCII minus
+            APLValue::Char(c) => c.to_string(),
+            APLValue::Str(s) => s.clone(),
+            APLValue::Null => "⍬".to_string(),
+            APLValue::Array(a) => Self::format_conform_array(a, false),
+            APLValue::List(a) => Self::format_conform_array(a, true),
+            APLValue::Deferred { .. } => "<deferred>".to_string(),
+            APLValue::UserFn { .. } => "<function>".to_string(),
+            APLValue::UserOp { .. } => "<operator>".to_string(),
+            APLValue::Symbol { name, namespace } => match namespace {
+                Some(ns) if ns == "keyword" => format!(":{}", name),
+                Some(ns) => format!("{}:{}", ns, name),
+                None => name.clone(),
+            },
+        }
+    }
+
+    /// Wrap a rendered value in a box frame (for enclosed arrays).
+    fn enclose_in_box_frame(content: &str) -> String {
+        let lines: Vec<&str> = content.split('\n').collect();
+        let max_width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+        let mut result = String::new();
+        result.push('┌');
+        for _ in 0..max_width {
+            result.push('─');
+        }
+        result.push('┐');
+        for line in &lines {
+            result.push('\n');
+            result.push('│');
+            result.push_str(line);
+            let pad = max_width - line.chars().count();
+            for _ in 0..pad {
+                result.push(' ');
+            }
+            result.push('│');
+        }
+        result.push('\n');
+        result.push('└');
+        for _ in 0..max_width {
+            result.push('─');
+        }
+        result.push('┘');
+        result
+    }
+
+    /// Render an array in conform (oracle-compatible) mode.
+    ///
+    /// Handles rank-0 (scalar), rank-1 (`⟨⟩`), and rank-2 (box frames).
+    /// Higher-rank arrays fall back to a compact debug representation.
+    /// `is_list` = true for `List` values (enclosed arrays from `⊂`), which
+    /// use box frames even for rank-1.
+    fn format_conform_array(a: &KapArray, is_list: bool) -> String {
+        let dims = &a.dimensions;
+        let rank = dims.len();
+
+        // Empty array (any dimension is 0)
+        if dims.iter().any(|&d| d == 0) {
+            return if rank <= 1 {
+                "⍬".to_string()
+            } else {
+                "┌⊖┐".to_string()
+            };
+        }
+
+        // Rank 0 (scalar array)
+        if rank == 0 {
+            let elems = a.elements();
+            let elem = elems.first().map(|e| e.as_ref().clone());
+            return match elem {
+                Some(e) if matches!(&e, APLValue::Array(inner) if inner.dimensions.len() > 0)
+                    || matches!(&e, APLValue::List(inner) if inner.dimensions.len() > 0) =>
+                {
+                    Self::enclose_in_box_frame(&e.format_conform())
+                }
+                Some(e) => e.format_conform(),
+                None => String::new(),
+            };
+        }
+
+        // Rank 1: ⟨elem1 elem2 ...⟩ for arrays, box frame for lists
+        if rank == 1 {
+            let parts: Vec<String> = a
+                .elements()
+                .iter()
+                .map(|e| e.format_conform())
+                .collect();
+            if is_list {
+                // Enclosed 1-D vector: box frame
+                let content_width = parts.join(" ").chars().count();
+                let mut result = String::new();
+                result.push('┌');
+                for _ in 0..content_width {
+                    result.push('─');
+                }
+                result.push('┐');
+                result.push('\n');
+                result.push('│');
+                result.push_str(&parts.join(" "));
+                result.push('│');
+                result.push('\n');
+                result.push('└');
+                for _ in 0..content_width {
+                    result.push('─');
+                }
+                result.push('┘');
+                return result;
+            }
+            return format!("⟨{}⟩", parts.join(" "));
+        }
+
+        // Rank 2: box-frame rendering
+        if rank == 2 {
+            let rows = dims[0];
+            let cols = dims[1];
+
+            // Compute per-column widths for cell alignment
+            let mut col_widths = vec![0usize; cols];
+            for c in 0..cols {
+                for r in 0..rows {
+                    let idx = r * cols + c;
+                    let w = a.elements()[idx].format_conform().chars().count();
+                    if w > col_widths[c] {
+                        col_widths[c] = w;
+                    }
+                }
+            }
+
+            // Build row strings with right-justified cells
+            let mut row_strs = Vec::with_capacity(rows);
+            for r in 0..rows {
+                let mut cells = Vec::with_capacity(cols);
+                for c in 0..cols {
+                    let idx = r * cols + c;
+                    let val = a.elements()[idx].format_conform();
+                    let pad = col_widths[c] - val.chars().count();
+                    let mut cell = String::new();
+                    for _ in 0..pad {
+                        cell.push(' ');
+                    }
+                    cell.push_str(&val);
+                    cells.push(cell);
+                }
+                row_strs.push(cells.join(" "));
+            }
+
+            let content_width = col_widths.iter().sum::<usize>() + cols - 1;
+
+            let mut result = String::new();
+            result.push('┌');
+            result.push('→');
+            for _ in 1..content_width {
+                result.push('─');
+            }
+            result.push('┐');
+            result.push('\n');
+            for row in &row_strs {
+                result.push('│');
+                result.push_str(row);
+                result.push('│');
+                result.push('\n');
+            }
+            result.push('└');
+            for _ in 0..content_width {
+                result.push('─');
+            }
+            result.push('┘');
+            return result;
+        }
+
+        // Rank 3+: compact fallback (conformance tests rarely check these)
+        format!("<{:?} array>", dims)
+    }
+
     // --- Array-shape accessors ---
     // A `Str` is a rank-1 array (vector of its chars) in Kap, exactly matching
     // Kotlin `APLBmpString.dimensions = dimensionsOfSize(content.length)`. These

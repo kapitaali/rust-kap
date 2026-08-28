@@ -6,6 +6,7 @@
 //! [`crate::Engine::eval_string`] directly (Mode 1).
 
 use crate::{APLValue, AplError, AplRef, Engine, Environment};
+use std::cell::Cell;
 use std::rc::Rc;
 
 /// A persistent Kap evaluation context. State lives in the shared
@@ -21,6 +22,7 @@ use std::rc::Rc;
 pub struct Session {
     engine: Engine,
     env: AplRef<Environment>,
+    conform_display: Cell<bool>,
 }
 
 impl Default for Session {
@@ -35,6 +37,7 @@ impl Session {
         Session {
             engine: Engine::new(),
             env: Environment::new_root(),
+            conform_display: Cell::new(false),
         }
     }
 
@@ -64,6 +67,17 @@ impl Session {
     /// `--lib-path`), consulted by `use(...)` when resolving a file by basename.
     pub fn set_lib_paths<S: AsRef<std::path::Path>>(&self, paths: &[S]) {
         self.engine.set_lib_paths(paths);
+    }
+
+    /// Check whether oracle-compatible display formatting is enabled.
+    pub fn is_conform_display(&self) -> bool {
+        self.conform_display.get()
+    }
+
+    /// Set whether to use oracle-compatible display formatting (`⟨⟩` for vectors,
+    /// box frames for multi-dim arrays). Default: false (house style with `()`).
+    pub fn set_conform_display(&self, enabled: bool) {
+        self.conform_display.set(enabled);
     }
 
     /// Load the standard library at startup (`use("standard-lib.kap")`), mirroring

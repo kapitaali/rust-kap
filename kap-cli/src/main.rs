@@ -49,6 +49,10 @@ fn main() {
             lib_paths.push(a[2..].to_string());
             i += 1;
             continue;
+        } else if a == "--conform-display" {
+            session.set_conform_display(true);
+            i += 1;
+            continue;
         } else if a == "--no-standard-lib" {
             // Startup stdlib-suppression flag (handled again below at load time); it
             // is NOT a file argument, so skip it here and do not switch to file mode.
@@ -152,7 +156,11 @@ fn repl(session: &Session) {
 fn run(session: &Session, src: &str) {
     match session.eval(src) {
         Ok(v) => {
-            let out = v.format_display();
+            let out = if session.is_conform_display() {
+                v.format_conform()
+            } else {
+                v.format_display()
+            };
             if !out.is_empty() {
                 println!("{}", out);
             }
