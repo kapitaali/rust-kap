@@ -9328,10 +9328,30 @@ impl Engine {
     ) -> Result<AplRef<APLValue>, AplError> {
         let a = left_val.ok_or_else(|| AplError::runtime(format!("{} needs two args", sym)))?;
         let (x, y) = match (a.as_ref(), right_val.as_ref()) {
-            (APLValue::Number(x), APLValue::Number(y)) => (x.as_boolean(), y.as_boolean()),
+            (APLValue::Number(x), APLValue::Number(y)) => {
+                let x_bool = self.as_strict_bool(x, sym)?;
+                let y_bool = self.as_strict_bool(y, sym)?;
+                (x_bool, y_bool)
+            }
             _ => return Err(AplError::runtime(format!("{} requires booleans", sym))),
         };
         Ok(Rc::new(APLValue::Number(KapNumber::Long(if f(x, y) { 1 } else { 0 }))))
+    }
+
+    /// Validate that a number is a strict Kap boolean (0 or 1). The oracle errors
+    /// "Invalid argument to logic function: argument is APLLong(N)" for any other value.
+    fn as_strict_bool(&self, n: &KapNumber, sym: &str) -> Result<bool, AplError> {
+        let v = n.as_long().map_err(|_| {
+            AplError::runtime(format!("{}: Invalid argument to logic function: argument is {}", sym, n.format(false)))
+        })?;
+        match v {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(AplError::runtime(format!(
+                "{}: Invalid argument to logic function: argument is APLLong({})",
+                sym, v
+            ))),
+        }
     }
 
     /// Dyadic boolean with broadcasting (Kotlin `MathCombineAPLFunction`): element-wise
@@ -9371,14 +9391,15 @@ impl Engine {
     }
 
     /// Extract a flat list of booleans from a scalar/vector of numbers (Kap booleans: 1/0).
+    /// Uses STRICT checking (only 0/1 allowed) — the oracle errors for any other value.
     fn boolean_vector(&self, v: &APLValue, sym: &str) -> Result<Vec<bool>, AplError> {
         match v {
-            APLValue::Number(n) => Ok(vec![n.as_boolean()]),
+            APLValue::Number(n) => Ok(vec![self.as_strict_bool(n, sym)?]),
             APLValue::Array(a) => {
                 let mut out = Vec::with_capacity(a.element_count());
                 for e in a.elements() {
                     match e.as_ref() {
-                        APLValue::Number(n) => out.push(n.as_boolean()),
+                        APLValue::Number(n) => out.push(self.as_strict_bool(n, sym)?),
                         other => return Err(AplError::runtime(format!("{} requires booleans", sym))),
                     }
                 }
