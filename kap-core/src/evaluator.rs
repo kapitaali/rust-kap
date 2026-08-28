@@ -942,7 +942,7 @@ impl Engine {
                     env: env.clone(),
                 });
                 env.define(name, namespace, v.clone());
-                Ok(v)
+                Ok(Rc::new(APLValue::Null))
             }
             Instr::FnAssign {
                 name,
