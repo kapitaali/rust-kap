@@ -10232,6 +10232,17 @@ impl Engine {
         if l.is_null() || r.is_null() {
             return Ok(Rc::new(APLValue::Null));
         }
+        // Rank check (Kotlin unique.kt:20-56): both args must have rank ≤ 1.
+        // If either has rank > 1, error with the dimension mismatch message.
+        let l_dims = l.dimensions();
+        let r_dims = r.dimensions();
+        if l_dims.len() > 1 || r_dims.len() > 1 {
+            return Err(AplError::runtime(format!(
+                "∩: All but the first axis needs to have the same dimensions. Ranks: A=[{}], B=[{}]",
+                l_dims.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "),
+                r_dims.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ")
+            )));
+        }
         if let (APLValue::Str(s1), APLValue::Str(s2)) = (l.as_ref(), r.as_ref()) {
             let mut seen_b = std::collections::HashSet::new();
             for c in s2.chars() {
