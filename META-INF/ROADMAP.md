@@ -82,7 +82,7 @@ migration IS the roadmap item (see P1, P2).
 | `builtins/bitwise_ops.kt` (∨∵ ∧∵ ⌽∵ BitwiseOp) | missing | P4 (io.kap blocker) |
 | `builtins/gamma.kt` (! factorial/binomial, 980 ln) | partial | P5 |
 | `builtins/format.kt` ($ directives) | done | keep aligned |
-| `rendertext.kt` (box renderer) | `format_value/display` | decision required (P8) |
+| `rendertext.kt` (box renderer) | `format_value/display` | P8 — conform display mode implemented (`--conform-display`); default house style preserved |
 | `standard-lib/*.kap` | `kap-stdlib/std/*.kap` | per-file milestones (P7) |
 
 ---
