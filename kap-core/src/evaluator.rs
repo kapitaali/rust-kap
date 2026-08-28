@@ -11475,21 +11475,20 @@ impl Engine {
                 _ => return Err(AplError::runtime("⊤ radix must be an integer".into())),
             };
             let radix = if radix == 0 { 1 } else { radix };
-            // digit count = max over B of divisions by radix (min 1; 0 → empty).
-            let max_val: i64 = b_elems.iter().copied().max().unwrap_or(0);
-            let digits = if max_val <= 0 {
-                0
+            // Digit count = enough to represent the largest |B| element (min 1).
+            let max_abs: i64 = b_elems.iter().map(|v| v.unsigned_abs() as i64).max().unwrap_or(0);
+            let digits = if max_abs == 0 {
+                1
             } else {
-                let mut v = max_val;
+                let mut v = max_abs;
                 let mut d = 0;
                 while v > 0 {
                     v /= radix;
                     d += 1;
                 }
-                d
+                d.max(1)
             };
             if digits == 0 {
-                // Result shape: (0, ⍴B) \u2014 an empty leading axis.
                 let mut out_dims = vec![0usize];
                 out_dims.extend(b_dims.iter().copied());
                 return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
@@ -11497,18 +11496,16 @@ impl Engine {
                     ArrayData::Nested(vec![]),
                 )))));
             }
-            // For each B element, compute digits MSB-first. Result shape is
-            // (digits, ⍴B): digits along axis 0, B elements along axis 1+, so the
-            // flat fill must INTERLEAVE (digit-major outer loop, element inner),
-            // matching Kotlin vectorEncode's `rem⍪res` row-prepending.
+            // For each B element, compute digits MSB-first using Euclidean division
+            // (matching Kotlin's vectorEncode for negative values).
             let per_elem: Vec<Vec<i64>> = b_elems
                 .iter()
                 .map(|&v0| {
                     let mut v = v0;
                     let mut lsbs = Vec::with_capacity(digits);
                     for _ in 0..digits {
-                        lsbs.push(v % radix);
-                        v /= radix;
+                        lsbs.push(v.rem_euclid(radix));
+                        v = v.div_euclid(radix);
                     }
                     lsbs.reverse();
                     lsbs
@@ -11550,8 +11547,8 @@ impl Engine {
                     let mut lsbs = Vec::with_capacity(nr);
                     for &r in &radices {
                         let r = if r == 0 { 1 } else { r };
-                        lsbs.push(v % r);
-                        v /= r;
+                        lsbs.push(v.rem_euclid(r));
+                        v = v.div_euclid(r);
                     }
                     lsbs.reverse();
                     lsbs
