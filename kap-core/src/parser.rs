@@ -266,6 +266,18 @@ impl<'a> Parser<'a> {
                 }
                 Err(e) => return Err(e),
             };
+            // BARE FUNCTION VALUE CHECK: at statement level, a bare function with
+            // no args is an error — the oracle errors "No arguments specified for
+            // function" (e.g. `+`, `≢`, `+/`). Only fire for bare primitives and
+            // trains, not for derived functions (adverb-bound) or user-defined fns.
+            let is_bare_fn = match &instr {
+                Instr::Symbol { name, .. } => Self::is_primitive_op(name),
+                Instr::Train { .. } | Instr::OpCall { .. } | Instr::OverOp { .. } => true,
+                _ => false,
+            };
+            if is_bare_fn {
+                return Err(self.err("No arguments specified for function"));
+            }
             self.skip_newlines();
             if let Some(t) = self.peek() {
                 if matches!(t.token, Token::StatementSeparator) {
@@ -975,7 +987,10 @@ impl<'a> Parser<'a> {
                 };
             } else {
                 if self.at_statement_boundary() {
-                    return Err(self.err(&format!("Operator without left function: {}", op_name)));
+                    // Not an error — the adverb is stranded as a bare function value.
+                    // e.g. `+/` is a valid derived function value. Break and let
+                    // finish_fn_call handle the "no right arg" case.
+                    break;
                 }
                 // Explicit axis on a reduce/scan derived fn (`+/[0] x`): Kotlin binds
                 // the bracket to the FUNCTION operand of the reduction
@@ -1098,6 +1113,18 @@ impl<'a> Parser<'a> {
             && !matches!(
                 self.peek().map(|t| &t.token),
                 Some(Token::StatementSeparator) | Some(Token::EndOfFile)
+            )
+            // Don't consume an operator/adverb as a value operand: `typeof ⌸`
+            // should error "No arguments specified for function" at 1:1, not
+            // parse `⌸` as the right arg of `typeof`. Operators bind to the
+            // function via bind_operators_kotlin, not as data operands.
+            // NOTE: Only exclude ADVERBS and user operators, NOT plain primitives
+            // like `⍳` — `≢ ⍳5` is valid (⍳5 is the right arg of ≢).
+            && !matches!(
+                self.peek().map(|t| &t.token),
+                Some(Token::Literal(LiteralValue::Symbol { name, namespace: None }))
+                    if Self::is_adverb(name)
+                        || self.known_ops.iter().any(|n| n == name)
             );
         if !has_right {
 
@@ -3035,7 +3062,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Higher-order operators (adverbs) that take a *function* as one operand:
-    /// `/` reduce, `\` scan, `¨` each.
+    /// `/` reduce, `\\` scan, `¨` each.
     fn is_adverb(name: &str) -> bool {
         matches!(name, "/" | "reduce" | "\\" | "scan" | "⌿" | "⍀" | "¨" | "each" | "⍨" | "commute" | "∵" | "bitwise" | "⌸" | "key" | "⌻" | "˝" | "inverse")
     }
