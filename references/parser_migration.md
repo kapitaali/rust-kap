@@ -132,10 +132,10 @@ The Rust port (`parse_value_kotlin` + `finish_fn_call` + `bind_operators_kotlin`
 | `LambdaToken` → `processFn` | `LambdaToken` → `finish_fn_call` | ✅ Aligned |
 | `ApplyToken` → `processFn` | `ApplyToken` → `finish_fn_call` | ✅ Aligned |
 | `OpenFnDef` → `processFn` | `OpenFnDef` → `parse_fn_def` (returns directly) | ⚠️ Diverged — ∇ definition not routed through `finish_fn_call` |
-| `LeftArrow` → `processAssignment` | `LeftArrow` handled in `parse_apply`, not main loop | ⚠️ Diverged |
+| `LeftArrow` → `processAssignment` | `LeftArrow` handled in `parse_value_kotlin` main loop | ✅ Aligned (since P1-M8) |
 | `FnDefSym` → `processFunctionDefinition` | `FnDefSym` → `parse_fn_def` | ✅ Aligned |
-| `OpenBracket` → `processIndex` (adjusts leftArgs) | `OpenBracket` handled in `parse_apply` | ⚠️ Diverged |
-| `MemberDereferenceToken` → `processMemberDereference` | `MemberDereferenceToken` handled in `parse_apply` | ⚠️ Diverged |
+| `OpenBracket` → `processIndex` (adjusts leftArgs) | `OpenBracket` handled via `parse_index_suffix` in main loop | ✅ Aligned (since P1-M8) |
+| `MemberDereferenceToken` → `processMemberDereference` | `MemberDereferenceToken` handled via `parse_index_suffix` in main loop | ✅ Aligned (since P1-M8) |
 | `IfToken`/`WhileToken` → `processIf`/`processWhile` | `IfToken`/`WhileToken` → `parse_keyword_prefix` | ✅ Aligned |
 | `ResHolder` propagation | Direct return via `finish_fn_call` | ✅ Aligned |
 
@@ -147,9 +147,9 @@ The Rust port (`parse_value_kotlin` + `finish_fn_call` + `bind_operators_kotlin`
 
 1. **Route `OpenFnDef` (∇) through `finish_fn_call`** — currently `parse_fn_def` returns directly, but Kotlin routes it through `processFn` so that `3 ∇ f` builds a left-bind function. This is needed for trains containing ∇ definitions.
 
-2. **Move `LeftArrow` (assignment) into the main loop** — currently handled in `parse_apply`, but Kotlin handles it in `parseValueInner` so that assignment interacts correctly with stranding and operator folding.
+2. **Move `LeftArrow` (assignment) into the main loop** — DONE (P1-M8, 2026-08-28).
 
-3. **Move `OpenBracket` (index) and `MemberDereferenceToken` into the main loop** — currently handled in `parseApply`, but Kotlin handles them as left-arg adjustments in the main loop.
+3. **Move `OpenBracket` (index) and `MemberDereferenceToken` into the main loop** — DONE (P1-M8, 2026-08-28).
 
 ### Phase 2: Feature-flag and validate
 
@@ -170,3 +170,52 @@ The Rust port (`parse_value_kotlin` + `finish_fn_call` + `bind_operators_kotlin`
 `3 - 4`, `3-4`, `-x`, `2 (+) 3`, `(1+2)(3+4)`, `f ⇐ ×-`, `10 (-,) 20`, `-⍛+`, `2 ×¨ 3 4 5`, `+/ 1 2 3`, `1 2 3 +[0] 4 5 6`, `(≠⌸)`, `data ⌸ fn`, `typeof ⌸`, `foo ⇐ ⌸`, `3 (+ « × » -) 4`, `(10+) 1`, `10 (-⍛+) 100`
 
 All pass after today's P1 fixes.
+
+---
+
+## P1-M8 fix details (2026-08-28)
+
+At the top of the `parse_value_kotlin` loop (parser.rs ~313), before main dispatch:
+
+```rust
+if !left_args.is_empty() {
+    let next_tok = self.peek().map(|t| &t.token);
+    if matches!(next_tok, Some(Token::OpenBracket))
+        || matches!(next_tok, Some(Token::MemberDereferenceToken))
+    {
+        let base = left_args.pop().unwrap();
+        let base = self.parse_index_suffix(base)?;
+        left_args.push(base);
+        continue;
+    }
+}
+```
+
+This routes `[` and `.` after a value through `parse_index_suffix` in the main accumulator loop, matching Kotlin's `processIndex`/`processMemberDereference` left-arg adjustment pattern.
+
+---
+
+## Feature gaps discovered during migration probing
+
+### Indexed assignment (`x[i] ← v`, `x[i] op← v`)
+
+**Status:** Implemented (P1-M9, P1-M10). All probes oracle-exact.
+
+**Oracle behavior:**
+- `x ← 1 2 3 ⋄ x[1] ← 99 ⋄ x` → `⟨1 99 3⟩`
+- `x ← 1 2 3 ⋄ x[1 2] ← 99 100 ⋄ x` → `⟨1 99 100⟩`
+- `x ← 1 2 3 ⋄ x[1] +← 10 ⋄ x` → `⟨1 12 3⟩` (modified assignment)
+
+**Implementation:**
+- `Instr::IndexAssign { array, selector, value }` in ast.rs
+- Parser: `LeftArrow` arm in `parse_value_kotlin` recognizes `Index` target → `IndexAssign`
+- Parser: `finish_fn_call` detects `LeftArrow` after function → modified assignment (`x[i] op← v`)
+- Evaluator: `index_assign()` computes flat indices, builds modified array, assigns back to variable
+
+### Member dereference (`x.f`, `x.(expr)`)
+
+**Status:** Parsing works via P1-M8. Assignment to `x.f` would need the same treatment as indexed assignment.
+
+### `f ← {⍵}` (assignment vs definition)
+
+**Status:** Correctly errors on both — `←` is assignment, `⇐` is definition. The probes that use `←` with a function RHS are invalid Kap. This is correct behavior, not a gap.
