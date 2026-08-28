@@ -560,32 +560,21 @@ impl Engine {
                             if first_err.is_none() {
                                 first_err = Some(e.to_string());
                             }
+                            // P0.2: abort at the first failing statement (oracle semantics).
+                            // Earlier definitions persist; later ones do not.
+                            break;
                         }
                     }
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    // Parse error: advance past this statement so we don't loop forever on a
-                    // broken token stream. Best-effort skip to the next newline/separator.
+                    // Parse error: abort at the first failing statement (oracle semantics).
                     total += 1;
                     failed += 1;
                     if first_err.is_none() {
                         first_err = Some(format!("parse: {}", e));
                     }
-                    let mut skipped = false;
-                    while pos < toks.len() {
-                        match &toks[pos].token {
-                            Token::Newline | Token::StatementSeparator | Token::ListSeparator => {
-                                pos += 1;
-                                skipped = true;
-                                break;
-                            }
-                            _ => pos += 1,
-                        }
-                    }
-                    if !skipped {
-                        break;
-                    }
+                    break;
                 }
             }
         }
@@ -598,6 +587,11 @@ impl Engine {
                 file_label,
                 first_err.as_deref().unwrap_or("unknown error")
             );
+        }
+        // P0.2: propagate the first error to the caller (oracle semantics).
+        // Earlier definitions persist; later ones do not.
+        if let Some(err) = first_err {
+            return Err(AplError::runtime(err));
         }
         Ok(last)
     }
