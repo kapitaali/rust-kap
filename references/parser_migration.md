@@ -1,62 +1,172 @@
-# Parser Migration Reference (P1)
+# Parser Migration Map — Kotlin `parseValueInner` → Rust `parse_value_kotlin`
 
-## Kotlin `parseExpr` loop → Rust mapping
+**Goal:** Faithful translation of Kotlin's single-pass accumulator loop. Every recurring parser burn of the last weeks traces to the port guessing where Kotlin *accumulates*.
 
-Kotlin `parser.kt:939-1030` is a single `while(true)` loop accumulating `leftArgs`.
-The Rust port's `parse_value_kotlin` (parser.rs:295-695) is the equivalent.
+**Kotlin anchor:** `parser.kt::parseValueInner` (:875–1030), `processFn` (:432–497), `parseOperator` (:1273–1319), `makeResultList` (:206–212).
 
-### Token dispatch table
+---
 
-| Kotlin token | Rust `parse_value_kotlin` arm | Notes |
-|---|---|---|
-| `END_EXPR_TOKEN_LIST` (EOF, `⋄`, `]`, `)`, `}`) | line 306-312 (close stack + EOF/sep break) | |
-| `Name` → customSyntax | line 560-564 | defsyntax macro triggers |
-| `Name` → `⇐` short-form fn def | line 599-628 | `name ⇐ rhs` |
-| `Name` → known function | line 658-678 | `finish_fn_call` |
-| `Name` → known operator (no left) | line 650-655 | `Operator without left function` |
-| `Name` → dual-nature `/⌿\⍀` | line 649 (exception) | value-left → function form |
-| `Name` → variable/strand | line 668-673 | accumulate to leftArgs |
-| `OpenParen` | line 467-506 | group → fn or value |
-| `OpenFnDef` (`{…}` lambda) | line 399-415 | function-shaped |
-| `ApplyToken` (`⍞`) | line 423-456 | dynamic ref, function-shaped |
-| `LambdaToken` (`λ`) | line 457-466 | function-shaped |
-| `FnDefSym` (`∇`) | line 383-388 | short-form or long-form def |
-| `LeftArrow` (`←`) | line 507-554 | assignment |
-| literals (number, string, char, null) | line 346-361 | accumulate to leftArgs |
-| `QuotePrefix` / `SymbolValue` | line 395-398 | symbol literals are values |
-| `if`/`while`/`when` | line 369-378 | statement-complete, return |
-| `and`/`or` | line 318-343 | infix short-circuit |
-| `defsyntax`/`defsyntaxsub` | line 589-593 | bails to legacy `parse_expr` |
-| `declare(…)` | line 569-586 | special form |
+## Kotlin accumulator loop structure
 
-### Kotlin `processFn` → Rust `finish_fn_call`
+```
+parseValueInner():
+  leftArgs = []
+  loop:
+    token = nextToken()
+    if token in END_EXPR_TOKEN_LIST:
+      return makeResultList(leftArgs)
+    res = dispatch(token):
+      Name →
+        if customSyntax: processCustomSyntax()
+        elif FnDefArrow: processShortFormFn()
+        else:
+          fn = lookupFunction(symbol)
+          if fn != null: processFn(fn, leftArgs, pos)
+          elif getOperator(symbol) != null: throw InvalidOperatorArgument
+          else: addLeftArg(makeVariableRef(symbol))
+      OpenParen →
+        group = parseExprToplevel(CloseParen)
+        if FnParseResult: processFn(group.fn, leftArgs, pos)
+        else: addLeftArg(group.instr)
+      OpenFnDef → processFn(parseFnDefinition(), leftArgs, pos)
+      ApplyToken → processFn(parseApplyDefinition(), leftArgs, pos)
+      MethodCallToken → processFn(processMethodCall(), leftArgs, pos)
+      ParsedLong/Double/Complex/BigInt/Rational/Character → addLeftArg(Literal...)
+      LeftArrow → return processAssignment(pos, leftArgs)
+      DynassignToken → return processDynamicAssignment(pos, leftArgs)
+      FnDefSym → return processFunctionDefinition(pos, leftArgs)
+      APLNullSym → addLeftArg(LiteralAPLNullValue)
+      NilToken → addLeftArg(EmptyValueMarker)
+      StringToken → addLeftArg(LiteralStringValue)
+      QuotePrefix → addLeftArg(LiteralSymbol)
+      LambdaToken → processFn(processLambda(), leftArgs, pos)
+      NamespaceToken → processNamespace()
+      ImportToken → processImport()
+      DefsyntaxSubToken → processDefsyntaxSub()
+      DefsyntaxToken → processDefsyntax()
+      IncludeToken → processInclude()
+      IncludeIfToken → processConditionalInclude()
+      DeclareToken → processDeclare()
+      OpenBracket → processIndex(pos)  // adjusts leftArgs
+      MemberDereferenceToken → processMemberDereference(pos)  // adjusts leftArgs
+      IfToken → processIf(pos)
+      WhileToken → processWhile(pos)
+      else → throw UnexpectedToken
+    when (res):
+      Instr → addLeftArg(res.instr)
+      ResHolder → return res.holder
+      Empty → continue
+```
 
-| Kotlin | Rust | Notes |
-|---|---|---|
-| `FunctionCallOpenParen` | line 1081-1083 | `parse_function_call_list` |
-| `LeftArrow` (modified assignment) | not yet in `finish_fn_call` | handled at call site |
-| empty right + empty left → fn value | line 1105-1107 | |
-| empty right + non-empty left → LeftBind | line 1110-1121 | 2-train `[strand, fn]` |
-| value right + empty left → monadic | line 1183-1188 | `Apply{fn, left: None, right}` |
-| value right + non-empty left → dyadic | line 1192-1207 | `Apply{fn, left, right}` |
-| fn right + empty left → Chain2 (atop) | line 1175-1181 | `Train[fn, right]` |
-| fn right + non-empty left → Chain2∘LeftBind | line 1141-1161 | `Train[Train[strand, fn], right]` |
+## `processFn(fn, leftArgs, pos)` — the core dispatch
 
-### Remaining gaps (from non-regression probes)
+```
+parseOperator(fn)  // fold operators/adverbs onto fn
+tokenAfter = nextToken()
+if FunctionCallOpenParen:
+  parse `;`-separated list → FunctionCall1Arg(fn, list)  // monadic
+elif LeftArrow:
+  processModifiedAssignment(fn, leftArgs, pos)
+else:
+  pushBack(tokenAfter)
+  holder = parseValue()
+  if Empty:
+    if leftArgs empty: return FnParseResult(fn)  // bare function
+    else: return FnParseResult(makeLeftBindFunction(leftArgs, fn))
+  elif Instr:
+    if leftArgs empty: return InstrParseResult(FunctionCall1Arg(fn, holder.instr))  // monadic
+    else: return InstrParseResult(FunctionCall2Arg(fn, makeResultList(leftArgs), holder.instr))  // dyadic
+  elif FnParseResult:
+    if leftArgs empty: return FnParseResult(Chain2(fn, holder.fn))  // compose
+    else: return FnParseResult(Chain2(makeLeftBindFunction(leftArgs, fn), holder.fn))
+```
 
-1. **`foo ⇐ ⌸`** — B2 check missing in Kotlin short-form fn path. Should error
-   `Operator without left function: ⌸`.
-2. **`typeof ⌸`** — parsed as two separate statements (`typeof` then `⌸`) instead
-   of a single expression `typeof(⌸)`. The `⌸` operator triggers the "Operator
-   without left function" error at statement start.
-3. **`-⍛+`** — port says `- requires a number` (monadic minus over `⍛+`), oracle
-   says `No arguments specified for function` (the whole `-⍛+` is a 3-train
-   with no right arg). Display/train-parse divergence.
+## `parseOperator(fn)` — operator folding
 
-### Key invariants
+```
+loop:
+  axis = parseAxis()  // optional [axis]
+  if axis: currentFn = AxisValAssignedFunction(currentFn, axis)
+  token = nextToken()
+  if Name:
+    op = getOperator(symbol)
+    if op == null: break
+    currentFn = op.parseAndCombineFunctions(this, currentFn, ...)
+  elif LeftForkToken:
+    midExpr = parseExprToplevel(RightForkToken)
+    rightArg = parseFunctionForOperatorRightArg(this)
+    currentFn = Chain3(currentFn, midExpr.fn, rightArg)
+  else: break
+pushBack(token)
+return currentFn
+```
 
-- **Strand collection**: consecutive value operands strand (`1 2 3` → `Array`).
-- **Valence at eval, not parse**: parser never peeks at glyph meaning.
-- **Operator references are parse errors**: known-op with no function operand → error.
-- **Single-pass**: no backtracking; fallback to legacy parser only via explicit
-  `__KOTLIN_FALLBACK__` sentinel or reset-to-`start`.
+## `makeResultList(leftArgs)` — strand collection
+
+```
+if leftArgs.empty: null
+elif leftArgs.size == 1: leftArgs.first()
+else: Literal1DArray.make(leftArgs)
+```
+
+## `END_EXPR_TOKEN_LIST`
+
+CloseParen, EndOfFile, StatementSeparator, CloseFnDef, CloseBracket, ListSeparator, Newline, RightForkToken, AndToken, OrToken, FunctionCallCloseParen
+
+---
+
+## Rust port current state
+
+The Rust port (`parse_value_kotlin` + `finish_fn_call` + `bind_operators_kotlin`) is **structurally close** to Kotlin. Key differences:
+
+| Kotlin | Rust | Status |
+|--------|------|--------|
+| `parseValueInner` accumulator loop | `parse_value_kotlin` loop | ✅ Aligned |
+| `processFn(fn, leftArgs, pos)` | `finish_fn_call(fn, &mut left_args)` | ✅ Aligned |
+| `parseOperator(fn)` | `bind_operators_kotlin(fn)` | ✅ Aligned |
+| `makeResultList(leftArgs)` | `make_result_list(&left_args)` | ✅ Aligned |
+| `END_EXPR_TOKEN_LIST` | `kotlin_close_stack` + token match | ✅ Aligned |
+| `addLeftArg` | `left_args.push()` | ✅ Aligned |
+| `Name` dispatch (fn/op/var) | Symbol dispatch in `parse_value_kotlin` | ✅ Aligned |
+| `OpenParen` group → `processFn` if fn | `OpenParen` group → `finish_fn_call` if fn | ✅ Aligned |
+| `LambdaToken` → `processFn` | `LambdaToken` → `finish_fn_call` | ✅ Aligned |
+| `ApplyToken` → `processFn` | `ApplyToken` → `finish_fn_call` | ✅ Aligned |
+| `OpenFnDef` → `processFn` | `OpenFnDef` → `parse_fn_def` (returns directly) | ⚠️ Diverged — ∇ definition not routed through `finish_fn_call` |
+| `LeftArrow` → `processAssignment` | `LeftArrow` handled in `parse_apply`, not main loop | ⚠️ Diverged |
+| `FnDefSym` → `processFunctionDefinition` | `FnDefSym` → `parse_fn_def` | ✅ Aligned |
+| `OpenBracket` → `processIndex` (adjusts leftArgs) | `OpenBracket` handled in `parse_apply` | ⚠️ Diverged |
+| `MemberDereferenceToken` → `processMemberDereference` | `MemberDereferenceToken` handled in `parse_apply` | ⚠️ Diverged |
+| `IfToken`/`WhileToken` → `processIf`/`processWhile` | `IfToken`/`WhileToken` → `parse_keyword_prefix` | ✅ Aligned |
+| `ResHolder` propagation | Direct return via `finish_fn_call` | ✅ Aligned |
+
+---
+
+## Migration plan
+
+### Phase 1: Close structural gaps (high-value, low-risk)
+
+1. **Route `OpenFnDef` (∇) through `finish_fn_call`** — currently `parse_fn_def` returns directly, but Kotlin routes it through `processFn` so that `3 ∇ f` builds a left-bind function. This is needed for trains containing ∇ definitions.
+
+2. **Move `LeftArrow` (assignment) into the main loop** — currently handled in `parse_apply`, but Kotlin handles it in `parseValueInner` so that assignment interacts correctly with stranding and operator folding.
+
+3. **Move `OpenBracket` (index) and `MemberDereferenceToken` into the main loop** — currently handled in `parseApply`, but Kotlin handles them as left-arg adjustments in the main loop.
+
+### Phase 2: Feature-flag and validate
+
+4. **Env-var feature flag** — `Parser::new_kotlin_loop()` behind `KAP_KOTLIN_PARSER` (already exists as the default path).
+
+5. **Run both parsers over full conformance corpus** — compare ok-counts.
+
+6. **Flip when new parser ≥ old on ok-count AND matches oracle on every hand-probe**.
+
+### Phase 3: Remove legacy
+
+7. **Delete `parse_expr` / `parse_apply` / `parse_primary` legacy path** — once the new parser is validated.
+
+---
+
+## Non-regression probes (from ROADMAP §P1)
+
+`3 - 4`, `3-4`, `-x`, `2 (+) 3`, `(1+2)(3+4)`, `f ⇐ ×-`, `10 (-,) 20`, `-⍛+`, `2 ×¨ 3 4 5`, `+/ 1 2 3`, `1 2 3 +[0] 4 5 6`, `(≠⌸)`, `data ⌸ fn`, `typeof ⌸`, `foo ⇐ ⌸`, `3 (+ « × » -) 4`, `(10+) 1`, `10 (-⍛+) 100`
+
+All pass after today's P1 fixes.
