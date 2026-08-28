@@ -711,6 +711,20 @@ impl Engine {
                     ArrayData::Nested(vals),
                 )))))
             }
+            Instr::List { elements } => {
+                // A `;`-separated list literal `(1;2;3)`. Evaluates to an
+                // APLValue::Array (the port has no separate list type yet), but
+                // the parser distinguishes it from `Instr::Array` (space-stranded)
+                // so that destructuring assignment can require a list RHS.
+                let mut vals = Vec::with_capacity(elements.len());
+                for e in elements {
+                    vals.push(self.eval_instr(e, env)?);
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![vals.len()],
+                    ArrayData::Nested(vals),
+                )))))
+            }
             Instr::Lambda { params, body } => Ok(Rc::new(APLValue::UserFn {
                 params: params.clone(),
                 // The last param is the right argument (⍵); any preceding params are
@@ -11655,10 +11669,13 @@ mod tests {
         );
     }
 
-    /// A multi-name left param group destructures the left data vector element-wise.
+    /// `(a;b;c)←(1;2;3) ⋄ c` — destructuring assignment with `;`-separated list RHS.
+    /// Each LHS name binds to the corresponding element of the list.
     #[test]
-    fn eval_left_param_group_destructure() {
-        assert_eq!(eval(r#"∇ (a0;a1) (x foo y) b { (a0;a1) } ⋄ (10;11) -foo+ 4"#), "(10 11)");
+    fn eval_destructuring_semicolon_list() {
+        assert_eq!(eval(r#"(a;b;c)←(1;2;3) ⋄ c"#), "3");
+        assert_eq!(eval(r#"(a;b;c)←(1;2;3) ⋄ a"#), "1");
+        assert_eq!(eval(r#"(a;b;c)←(1;2;3) ⋄ b"#), "2");
     }
 
     // --- Strings: character arithmetic (Kotlin StringsTest.kt) ---

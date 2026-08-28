@@ -4812,19 +4812,13 @@ impl<'a> Parser<'a> {
                     compose: true,
                 });
             }
-            // Leading over `⍥ g` (OverOp, Kotlin OverOp). Fork tine `«,⍥⊂»` —
-            // oracle parses it, so the port must too. Build `OverOp{NullFn, g}`;
-            // the evaluator treats `Symbol("⍥")` left as NullFunction (identity
-            // under OverOp). Real `f ⍥ g` (non-leading) is bound in
-            // bind_operators_kotlin / parse_function_expr compose arms.
+            // Leading over `⍥` (OverOp, Kotlin OverOp). A leading `⍥` with no
+            // left operand is an error in Real Kap — `⍥⊂ 1 2 3` → "Operator
+            // without left function: ⍥" (Kotlin parser.kt:967-971, InvalidOperatorArgument).
+            // A NON-leading `⍥` (e.g. `f ⍥ g`, fork tine `,⍥⊂`) is bound in
+            // bind_operators_kotlin / parse_fork_tine, never here.
             Token::OverToken => {
-                self.advance(); // consume ⍥
-                self.skip_newlines();
-                let r = self.parse_function_atom()?;
-                return Ok(Instr::OverOp {
-                    left_fn: Box::new(Instr::symbol("⍥")),
-                    right_fn: Box::new(r),
-                });
+                return Err(self.err("Operator without left function: ⍥"));
             }
             Token::Literal(LiteralValue::Symbol { name, namespace }) => {
                 let name = name.clone();

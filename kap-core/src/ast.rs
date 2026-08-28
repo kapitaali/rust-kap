@@ -34,6 +34,11 @@ pub enum Instr {
     },
     /// An array/vector literal: `[a;b;c]` (explicit) or a stranded vector `a b c`.
     Array { elements: Vec<Instr> },
+    /// A `;`-separated *list* literal: `(1;2;3)`. Distinct from `Array` (which is
+    /// space-stranded) because Kap's destructuring assignment `(a;b;c)←RHS`
+    /// requires the RHS to be a *list* (`;`-separated), not a plain array.
+    /// Kotlin: `LiteralAPLList` (instr.kt:68) → `APLList`.
+    List { elements: Vec<Instr> },
     /// A lambda / anonymous function: `λ(params) body`. `params` are argument names;
     /// `body` is the unevaluated expression. Evaluated (Phase 4) into an `APLValue::UserFn`.
     Lambda { params: Vec<String>, body: Box<Instr> },

@@ -170,6 +170,17 @@ pub fn tokenise(src: &str) -> Vec<SpannedToken> {
             col += 1;
             continue;
         }
+        // `⍥` (Over, U+2365) is a dedicated operator token (Kotlin `OverOp`),
+        // not a plain symbol name. It is non-ASCII (3-byte UTF-8), so the glyph
+        // branch below would otherwise emit it as Symbol("⍥") — catch it first.
+        // Without this, `⍥⊂ 1 2 3` errors "undefined symbol: ⍥" instead of the
+        // oracle's "Operator without left function: ⍥".
+        if c == '⍥' {
+            out.push(SpannedToken { token: Token::OverToken, line: start_line, col: start_col });
+            i += 1;
+            col += 1;
+            continue;
+        }
         // APL glyphs that are not ASCII (e.g. ⍳ ⊃ ≢ ⍴ ⌽ etc.) are single-char
         // function/operator *names* in Kap. Emit each as its own Symbol token.
         // Exception: `⎕` (U+2395, the quad), which begins a *multi-char* name such
