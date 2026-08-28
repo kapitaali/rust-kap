@@ -968,7 +968,7 @@ fn curated_kap_parity() {
             ("typeof 10", "kap:integer"),
             ("typeof 1.2", "kap:float"),
             ("typeof 1÷5", "kap:rational"),
-            ("typeof \"x\"", "kap:string"),
+            ("typeof \"x\"", "kap:array"),
             ("typeof @a", "kap:char"),
             ("typeof 1 2 3", "kap:array"),
             ("typeof 'foo", "kap:symbol"),

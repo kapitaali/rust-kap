@@ -2463,7 +2463,10 @@ impl Engine {
             "⍉" => self.transpose(left_val, right_val),
             "↑" => self.take(left_val, right_val),
             "↓" => self.drop(left_val, right_val),
-            "⊂" => self.enclose(right_val),
+            "⊂" => match left_val {
+                None => self.enclose(right_val),
+                Some(l) => self.partitioned_enclose_subset(l, right_val),
+            },
             "⊆" => self.partitioned_enclose(left_val, right_val),
             "⊇" => self.pick_apl(left_val, right_val),
             "→" | "branch" => self.return_arrow(left_val, right_val),
@@ -5743,54 +5746,68 @@ impl Engine {
                                 ))
                             }
                         };
+                        // Kotlin eval2Arg branches on aLength vs bDimensions.size.
+                        // If aLength == rank: use as-is (validate as permutation below).
+                        // If aLength < rank: OOB-check, then prefix-fill with unused axes.
+                        // If aLength > rank: error (handled above).
                         let mut seen = vec![false; rank];
                         let mut perm = Vec::with_capacity(rank);
                         let mut has_dup = false;
-                        // Kotlin TransposeFunction.eval2Arg (:493): a left arg
-                        // LONGER than the rank errors before any axis checks.
-                        if axes.len() > rank {
-                            return Err(AplError::runtime(
-                                "⍉: Left must have a size less than or equal to the rank of the right argument"
-                                    .into(),
-                            ));
-                        }
-                        for (pos, &x) in axes.iter().enumerate() {
-                            if x < 0 || x as usize >= rank {
-                                // Kotlin :501 verbatim, SIGNED value in the text.
-                                return Err(AplError::runtime(format!(
-                                    "⍉: Invalid axis index at position {} in left argument: {}",
-                                    pos, x
-                                )));
+                        if axes.len() == rank {
+                            // No OOB check here — Kotlin relies on makeInverseTransposeIndex
+                            // to catch invalid values via "Not all axis represented...".
+                            for &x in &axes {
+                                let u = if x >= 0 && (x as usize) < rank {
+                                    x as usize
+                                } else {
+                                    // Out-of-range axis in a full-perm left arg ⇒
+                                    // "Not all axis represented..."
+                                    return Err(AplError::runtime(format!(
+                                        "⍉: Not all axis represented in transpose definition: {:?}",
+                                        axes
+                                    )));
+                                };
+                                if seen[u] {
+                                    has_dup = true;
+                                }
+                                seen[u] = true;
+                                perm.push(u);
                             }
-                            if seen[x as usize] {
-                                // Duplicate axis index ⇒ DIAGONAL (Kotlin
-                                // TransposeIndexes.isDiagonal, transpose.kt:580).
-                                // Handled after the loop below.
-                                has_dup = true;
+                            if has_dup {
+                                return Ok(self.transpose_diagonal(&axes, a)?);
                             }
-                            seen[x as usize] = true;
-                            perm.push(x as usize);
-                        }
-                        if has_dup {
-                            return Ok(self.transpose_diagonal(&axes, a)?);
-                        }
-                        // Kotlin rule: the left arg is a *prefix* of the full axis
-                        // permutation. When it is shorter than the rank, the remaining
-                        // axes are appended in ascending order (skipping those already
-                        // used). So `0 1 ⍉ 3 4 5⍴⍳60` => perm [0,1,2] (identity). A left
-                        // arg longer than the rank is an error.
-                        if axes.len() < rank {
+                            // Verify every 0..rank-1 present (valid permutation).
+                            for n in 0..rank {
+                                if !seen[n] {
+                                    return Err(AplError::runtime(format!(
+                                        "⍉: Not all axis represented in transpose definition: {:?}",
+                                        axes
+                                    )));
+                                }
+                            }
+                        } else {
+                            // axes.len() < rank: OOB-check + prefix-fill.
+                            for (pos, &x) in axes.iter().enumerate() {
+                                if x < 0 || x as usize >= rank {
+                                    return Err(AplError::runtime(format!(
+                                        "⍉: Invalid axis index at position {} in left argument: {}",
+                                        pos, x
+                                    )));
+                                }
+                                if seen[x as usize] {
+                                    has_dup = true;
+                                }
+                                seen[x as usize] = true;
+                                perm.push(x as usize);
+                            }
+                            if has_dup {
+                                return Ok(self.transpose_diagonal(&axes, a)?);
+                            }
                             for n in 0..rank {
                                 if !seen[n] {
                                     perm.push(n);
                                 }
                             }
-                        } else if axes.len() != rank {
-                            return Err(AplError::runtime(format!(
-                                "⍉ axis count {} does not match array rank {}",
-                                axes.len(),
-                                rank
-                            )));
                         }
                         perm
                     }
@@ -6611,6 +6628,98 @@ impl Engine {
                 )))))
             }
         }
+    }
+
+    /// Dyadic `⊂` (partition/enclose) — mirrors Kotlin `EncloseAPLFunction.eval2Arg`
+    /// with its own `computePartitionIndexes` logic. Differs from `⊆` in how it
+    /// handles partition boundaries: a `0` closes the current partition; a rise
+    /// from the previous indicator starts a new one.
+    fn partitioned_enclose_subset(
+        &self,
+        left_val: AplRef<APLValue>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let b = right_val.force(self)?;
+        let a = left_val.force(self)?;
+        let b_dims = b.dimensions();
+        if b_dims.is_empty() {
+            return Err(AplError::runtime("⊂: right argument must not be a scalar".into()));
+        }
+        let axis = b_dims.len() - 1;
+        let inds: Vec<i64> = match a.as_ref() {
+            APLValue::Number(KapNumber::Long(v)) => vec![*v],
+            APLValue::Array(_) => a
+                .elements()
+                .iter()
+                .map(|e| match e.as_ref() {
+                    APLValue::Number(KapNumber::Long(v)) => *v,
+                    _ => 0,
+                })
+                .collect(),
+            _ => vec![0],
+        };
+        if inds.len() != b_dims[axis] {
+            return Err(AplError::runtime(format!(
+                "⊂: size of A ({}) must equal the dimension of B along the selected axis ({})",
+                inds.len(),
+                b_dims[axis]
+            )));
+        }
+        // Kotlin EncloseAPLFunction.computePartitionIndexes
+        let mut partitions: Vec<(usize, usize)> = Vec::new();
+        let mut prev_index: i64 = -1;
+        for i in 0..inds.len() {
+            let curr = inds[i];
+            if prev_index >= 0 && curr == 0 {
+                partitions.push((prev_index as usize, i));
+                prev_index = -1;
+            } else if i == 0 || (inds[i - 1] < curr && curr != 0) {
+                if prev_index >= 0 {
+                    partitions.push((prev_index as usize, i));
+                }
+                prev_index = if curr == 0 { -1 } else { i as i64 };
+            }
+        }
+        if prev_index >= 0 {
+            partitions.push((prev_index as usize, inds.len()));
+        }
+        let b_elems = b.elements();
+        let frame = b_dims[..axis].iter().product::<usize>().max(1);
+        let row_len = b_dims[axis];
+        let mut cells: Vec<AplRef<APLValue>> = Vec::new();
+        for f in 0..frame {
+            for &(start, end) in &partitions {
+                if start + 1 == end {
+                    // Single element: box it in a 0-D array
+                    let flat = f * row_len + start;
+                    cells.push(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        vec![],
+                        ArrayData::Nested(vec![b_elems[flat].clone()]),
+                    )))));
+                } else {
+                    let mut cell: Vec<AplRef<APLValue>> = Vec::new();
+                    for j in start..end {
+                        let flat = f * row_len + j;
+                        cell.push(b_elems[flat].clone());
+                    }
+                    cells.push(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        vec![cell.len()],
+                        ArrayData::Nested(cell),
+                    )))));
+                }
+            }
+        }
+        let outer_dims = if frame == 1 {
+            vec![partitions.len()]
+        } else {
+            let mut d = b_dims[..axis].to_vec();
+            d.push(partitions.len());
+            d
+        };
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            outer_dims,
+            ArrayData::Nested(cells),
+        )))))
     }
 
     /// Kap's pair (`⍮`): monadic `⍮x` = enclose x in a length-1 nested vector;

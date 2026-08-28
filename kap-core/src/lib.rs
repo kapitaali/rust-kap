@@ -114,7 +114,9 @@ impl APLValue {
                 KapNumber::Complex(_, _) => "complex",
             },
             APLValue::Char(_) => "char",
-            APLValue::Str(_) => "string",
+            // Strings are arrays in Kap (Kotlin APLString : APLArray()).
+            // `typeof "x"` → kap:array.
+            APLValue::Str(_) => "array",
             APLValue::Array(_) => "array",
             APLValue::List(_) => "list",
             APLValue::Null => "null",
