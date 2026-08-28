@@ -148,10 +148,10 @@ impl APLValue {
                 format!("({})", parts.join(" "))
             }
             APLValue::List(a) => {
-                // A `;`-separated list. Renders with angle brackets: `⟨1 2 3⟩`
-                // (Kap distinguishes lists from arrays in display).
+                // A `;`-separated list. Kotlin's internal toString uses `(1 2 3)`
+                // notation (same as arrays) — `⟨⟩` is only for conform-display.
                 let parts: Vec<String> = a.elements().iter().map(|e| e.format_value()).collect();
-                format!("⟨{}⟩", parts.join(" "))
+                format!("({})", parts.join(" "))
             }
             APLValue::Deferred { .. } => "<deferred>".to_string(),
             APLValue::UserFn { .. } => "<function>".to_string(),

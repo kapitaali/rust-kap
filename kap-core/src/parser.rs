@@ -1098,7 +1098,7 @@ impl<'a> Parser<'a> {
             }
         }
         self.kotlin_close_stack.pop();
-        let list = Instr::Array { elements: elems };
+        let list = Instr::List { elements: elems };
         Ok(Instr::Apply {
             fn_expr: Box::new(fn_instr),
             left: None,
