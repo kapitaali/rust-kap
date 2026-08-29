@@ -308,8 +308,16 @@ impl<'a> Parser<'a> {
     ///
     /// Active only under KAP_KOTLIN_PARSER=1; default path byte-identical to pre-M1.
     fn parse_value_kotlin(&mut self) -> Result<Instr, AplError> {
+        self.parse_value_kotlin_with(Vec::new())
+    }
+
+    /// Accumulator loop with a PRE-SEEDED `left_args`. Used by `finish_fn_call` to
+    /// resume the accumulation after a `⟦…⟧` call bracket closes a function call
+    /// (the closed call's VALUE continues as a left operand for a following dyadic
+    /// operator — e.g. `+/⟦1 2 3 4⟧ + 100` → `(10) + 100` → `110`).
+    fn parse_value_kotlin_with(&mut self, seeded: Vec<Instr>) -> Result<Instr, AplError> {
         let start = self.pos;
-        let mut left_args: Vec<Instr> = Vec::new();
+        let mut left_args: Vec<Instr> = seeded;
         loop {
             // Check for END_EXPR_TOKEN_LIST BEFORE consuming newlines.
             // A Newline, EOF, or StatementSeparator terminates the expression.
@@ -1150,7 +1158,14 @@ impl<'a> Parser<'a> {
         // the normal right-argument path. A `⟦` with no preceding function is a parse
         // error (handled as a leading-primary error in parse_primary/parse_function_atom).
         if matches!(self.peek().map(|t| &t.token), Some(Token::FunctionCallOpenParen)) {
-            return self.parse_function_call_list(fn_instr);
+            let call = self.parse_function_call_list(fn_instr)?;
+            // `⟦…⟧` CLOSES the function call; `call` is a VALUE (Kotlin parseExpr
+            // pushes FunctionCall1Arg into leftArgs and continues the loop, so a
+            // following dyadic operator binds to it: `+/⟦1 2 3 4⟧ + 100` → (10)+100).
+            // Resume the accumulator with `call` seeded as a left operand.
+            left_args.push(call);
+            let seeded = std::mem::take(left_args);
+            return self.parse_value_kotlin_with(seeded);
         }
         // P1-M10 (parser.kt:451-453 LeftArrow after fn → processModifiedAssigment :405-424):
         // `dest op← rhs` is a modified assignment. The dest is the last left arg (which
