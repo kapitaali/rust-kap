@@ -5079,13 +5079,26 @@ impl Engine {
             }
             Some(a) => {
                 let a = a.force(self)?;
+                let b = right_val.force(self)?;
+                // Kotlin joinByAxis (concatenate-array.kt:203-211): a WHOLE empty
+                // array (`⍬`, dimensions [0]) absorbs its partner — `(1 2 3),⍬` →
+                // `(1 2 3)`, `⍬,1 2 3` → `(1 2 3)`, `⍬,⍬` → `⍬`. The port models `⍬`
+                // as `APLValue::Null`, so a Null WHOLE operand returns the other.
+                // (A Null that is an ELEMENT of a larger strand — `1 2 3 , ⍬ 4` —
+                // still reaches here only as part of that strand's array, not as a
+                // bare Null, so it is preserved correctly.)
+                if a.is_null() {
+                    return Ok(b);
+                }
+                if b.is_null() {
+                    return Ok(a);
+                }
                 // Two strings concatenate into a string (Kotlin ConcatenateAPLFunction, BMP path).
-                if let (APLValue::Str(s1), APLValue::Str(s2)) = (a.as_ref(), right_val.as_ref()) {
+                if let (APLValue::Str(s1), APLValue::Str(s2)) = (a.as_ref(), b.as_ref()) {
                     let mut s = s1.clone();
                     s.push_str(s2);
                     return Ok(Rc::new(APLValue::Str(s)));
                 }
-                let b = right_val.force(self)?;
                 let a_is_scalar = a.dimensions().is_empty();
                 let b_is_scalar = b.dimensions().is_empty();
                 // Both scalar: rank-1 vector of 2 elements (Kotlin joinNoAxis, :174-178).
@@ -7874,7 +7887,7 @@ impl Engine {
             APLValue::UserOp { .. } => {
                 Err(AplError::runtime("cannot use an operator as an array element".into()))
             }
-            APLValue::Null => Ok(Instr::Literal(LiteralValue::Str(String::new()))),
+            APLValue::Null => Ok(Instr::Empty),
             APLValue::Deferred { .. } => {
                 Err(AplError::runtime("cannot use a deferred value as an array element".into()))
             }
@@ -10099,28 +10112,29 @@ impl Engine {
         right_val: AplRef<APLValue>,
     ) -> Result<AplRef<APLValue>, AplError> {
         let a = left_val.ok_or_else(|| AplError::runtime("∊ needs two args".into()))?;
-        // Collect the set of "keys" in b (compare by formatted value for simplicity).
-        let mut keys = std::collections::HashSet::new();
-        match right_val.as_ref() {
-            APLValue::Array(b) => {
-                for e in b.elements() {
-                    keys.insert(e.format_value());
-                }
-            }
-            other => {
-                keys.insert(other.format_value());
-            }
-        }
+        // Collect the set of elements in b, compared by VALUE equality (Kotlin
+        // MembershipFunction uses compareEqualsTotalOrdering semantics like `=`/`≠`,
+        // NOT the type-strict `≡`/`≢` key): `3.0 ∊ 2 3` -> 1 (Double==Long). Using
+        // format_value() strings here was wrong — `3.0` formats as "3.0" while `3`
+        // formats as "3", so `3.0 ∊ 2 3` returned 0 instead of 1.
+        let elems_b: Vec<AplRef<APLValue>> = match right_val.as_ref() {
+            APLValue::Array(b) => b.elements(),
+            APLValue::List(b) => b.elements(),
+            other => vec![Rc::new(other.clone())],
+        };
+        let contains = |needle: &APLValue| -> bool {
+            elems_b.iter().any(|e| Self::deep_equal(needle, e.as_ref()))
+        };
         let mut out = Vec::new();
         match a.as_ref() {
             APLValue::Array(aa) => {
                 for e in aa.elements() {
-                    let hit = if keys.contains(&e.format_value()) { 1 } else { 0 };
+                    let hit = if contains(e.as_ref()) { 1 } else { 0 };
                     out.push(Rc::new(APLValue::Number(KapNumber::Long(hit))));
                 }
             }
             other => {
-                let hit = if keys.contains(&other.format_value()) { 1 } else { 0 };
+                let hit = if contains(other) { 1 } else { 0 };
                 // Scalar left operand → scalar result (Kap returns a result with the
                 // *shape of the left argument*, so a scalar membership is a scalar 0/1,
                 // not a length-1 vector). This matters for short-circuit `and`/`or`
