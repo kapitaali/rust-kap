@@ -707,7 +707,13 @@ impl Engine {
             }
             Instr::List { elements } => {
                 // A `;`-separated list literal `(1;2;3)`. Evaluates to an
-                // APLValue::List — distinct from a space-stranded array.
+                // APLValue::List — distinct from a space-stranded array. A Kap
+                // List is a RANK-0 scalar (Kotlin `APLList : APLSingleValue`,
+                // `dimensions = emptyDimensions()`), so its shape is `⍬`, its tally
+                // `≢` is 1, and `+/` of a list returns the list itself (unreduced).
+                // STORAGE stays rank-1 (`vec![len]`) so KapArray's element_count()/
+                // elements() invariants hold; the rank-0 semantics are enforced in
+                // `APLValue::dimensions()`/`rank()` (lib.rs) which special-case List.
                 let mut vals = Vec::with_capacity(elements.len());
                 for e in elements {
                     vals.push(self.eval_instr(e, env)?);
@@ -7954,7 +7960,19 @@ impl Engine {
         let dims = data.dimensions();
         let rank = dims.len();
         if rank == 0 {
-            return Err(AplError::runtime("reduce: cannot reduce a scalar".into()));
+            // Kotlin `ReduceAPLFunctionImpl.eval1Arg` (reduce.kt:282-286): a rank-0
+            // argument is returned unchanged — `+/5` → 5, `+/⟦1;2;3;4⟧` → the list
+            // itself. An EXPLICIT non-zero axis on a rank-0 value is the only error
+            // (`IllegalAxisException`). The old "cannot reduce a scalar" error was wrong.
+            if let Some(ax) = explicit_axis {
+                if ax != 0 {
+                    return Err(AplError::runtime(format!(
+                        "Axis {} is not valid. Expected: 0",
+                        ax
+                    )));
+                }
+            }
+            return Ok(data);
         }
         let axis = explicit_axis.unwrap_or(if last_axis { rank - 1 } else { 0 });
         let axis_len = dims[axis];

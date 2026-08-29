@@ -439,10 +439,13 @@ impl APLValue {
     // every `Str(...)` construction site). Scalars (Number/Char/Null) are rank 0.
 
     /// Dimensions of the value. `Str` => `[len]`; scalars => `[]`; arrays => their dims.
+    /// A `List` is a RANK-0 scalar (Kotlin `APLList : APLSingleValue`,
+    /// `dimensions = emptyDimensions()`), so it reports `[]` even though its backing
+    /// `KapArray` is stored rank-1 (see `Instr::List` eval arm in evaluator.rs).
     pub fn dimensions(&self) -> Vec<usize> {
         match self {
             APLValue::Array(a) => a.dimensions.clone(),
-            APLValue::List(a) => a.dimensions.clone(),
+            APLValue::List(_) => vec![],
             APLValue::Str(s) => vec![s.chars().count()],
             _ => vec![],
         }
@@ -452,7 +455,7 @@ impl APLValue {
     pub fn rank(&self) -> usize {
         match self {
             APLValue::Array(a) => a.dimensions.len(),
-            APLValue::List(a) => a.dimensions.len(),
+            APLValue::List(_) => 0,
             APLValue::Str(s) => {
                 if s.is_empty() {
                     0

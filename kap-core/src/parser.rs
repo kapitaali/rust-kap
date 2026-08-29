@@ -1059,53 +1059,74 @@ impl<'a> Parser<'a> {
     /// - right value & left empty  → FunctionCall1Arg monadic (:468)
     /// - right value & left n      → FunctionCall2Arg, ⍺ = the SINGLE left arg or a
     ///   strand of several (makeResultList semantics, :474)
-    /// Parse the contents of a `⟦ … ⟧` function-call list (Kotlin `FunctionCallOpenParen`
-    /// / `FunctionCallCloseParen`, parser.kt:440). Called from `finish_fn_call` and
-    /// `parse_apply` whenever a function is immediately followed by `⟦`. Builds a single
-    /// `APLList` argument (each `;`-separated item is a full expression) and returns a
-    /// MONADIC `Apply{fn, right: list}` — `fn⟦a;b;c⟧` ≡ `fn (a b c)`.
+    /// Parse the contents of a `⟦ … ⟧` function-call bracket (Kotlin
+    /// `FunctionCallOpenParen` / `FunctionCallCloseParen`, parser.kt:440). Called from
+    /// `finish_fn_call` and `parse_apply` whenever a function is immediately followed by
+    /// `⟦`. Returns a MONADIC `Apply{fn, left: None, right: arg}` where the single argument
+    /// is decided by the CONTENTS (exactly as Kotlin `parseExprToplevel(FunctionCallCloseParen)`
+    /// → `parseListInner` does):
+    ///   - empty `⟦⟧`            → `APLList(emptyList)` (parser.kt:442-445)
+    ///   - `;`-separated items   → `LiteralAPLList(elems)` — a `;`-list like `⟦1;2;3⟧`
+    ///   - space-stranded (no `;`) → the single stranded expression DIRECTLY as the argument
+    ///     (`⟦1 2 3⟧` ≡ `fn (1 2 3)`; the strand `1 2 3` is a plain array, NOT a list).
     fn parse_function_call_list(&mut self, fn_instr: Instr) -> Result<Instr, AplError> {
         self.advance(); // consume ⟦
         self.kotlin_close_stack.push(Token::FunctionCallCloseParen);
         let mut elems: Vec<Instr> = Vec::new();
+        let mut saw_semicolon = false;
         self.skip_newlines();
         // Empty `⟦⟧` => call with an empty list (APLList(emptyList) per parser.kt:442-445).
         if matches!(self.peek().map(|t| &t.token), Some(Token::FunctionCallCloseParen)) {
             self.advance();
-        } else {
-            loop {
-                let e = self.parse_expr()?;
-                elems.push(e);
-                self.skip_newlines();
-                // Extract the next token *kind* into an owned value so the immutable
-                // borrow from `self.peek()` does not conflict with the mutable
-                // `kotlin_close_stack.pop()` in the error arm (E0502).
-                let next_kind: Option<Token> = self.peek().map(|t| t.token.clone());
-                match next_kind {
-                    Some(Token::ListSeparator) => {
-                        self.advance();
-                        self.skip_newlines();
-                    }
-                    Some(Token::FunctionCallCloseParen) => {
-                        self.advance();
-                        break;
-                    }
-                    other => {
-                        self.kotlin_close_stack.pop();
-                        return Err(self.err(&format!(
-                            "expected ';' or '⟧' in function-call list, got {:?}",
-                            other
-                        )));
-                    }
+            self.kotlin_close_stack.pop();
+            let list = Instr::List { elements: Vec::new() };
+            return Ok(Instr::Apply {
+                fn_expr: Box::new(fn_instr),
+                left: None,
+                right: Box::new(list),
+            });
+        }
+        loop {
+            let e = self.parse_value_kotlin()?;
+            elems.push(e);
+            self.skip_newlines();
+            // Extract the next token *kind* into an owned value so the immutable
+            // borrow from `self.peek()` does not conflict with the mutable
+            // `kotlin_close_stack.pop()` in the error arm (E0502).
+            let next_kind: Option<Token> = self.peek().map(|t| t.token.clone());
+            match next_kind {
+                Some(Token::ListSeparator) => {
+                    self.advance();
+                    saw_semicolon = true;
+                    self.skip_newlines();
+                }
+                Some(Token::FunctionCallCloseParen) => {
+                    self.advance();
+                    break;
+                }
+                other => {
+                    self.kotlin_close_stack.pop();
+                    return Err(self.err(&format!(
+                        "expected ';' or '⟧' in function-call list, got {:?}",
+                        other
+                    )));
                 }
             }
         }
         self.kotlin_close_stack.pop();
-        let list = Instr::Array { elements: elems };
+        // A `;`-separated content is a LIST; a space-stranded content (no `;`) is the
+        // single stranded expression as the argument directly (Kotlin parseListInner
+        // returns the single InstrParseResult when there is no ListSeparator).
+        let arg = if saw_semicolon {
+            Instr::List { elements: elems }
+        } else {
+            // Exactly one element (the stranded expression) — not wrapped in a List.
+            elems.into_iter().next().unwrap_or(Instr::Empty)
+        };
         Ok(Instr::Apply {
             fn_expr: Box::new(fn_instr),
             left: None,
-            right: Box::new(list),
+            right: Box::new(arg),
         })
     }
 
