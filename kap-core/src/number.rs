@@ -254,18 +254,26 @@ impl KapNumber {
         use KapNumber::*;
         match (self, other) {
             (Long(a), Long(b)) => Long(a - b),
-            (Long(a), Double(b)) | (Double(b), Long(a)) => Double(*a as f64 - *b),
+            // Mixed Long/Double: operand order matters. `self - other`:
+            //   Long - Double ⇒ a - b;  Double - Long ⇒ b - a.
+            (Long(a), Double(b)) => Double(*a as f64 - *b),
+            (Double(a), Long(b)) => Double(*a - *b as f64),
             (Double(a), Double(b)) => Double(a - b),
             (BigInt(a), BigInt(b)) => BigInt(a - b),
-            (Long(a), BigInt(b)) | (BigInt(b), Long(a)) => BigInt(num_bigint::BigInt::from(*a) - b),
+            (Long(a), BigInt(b)) => BigInt(num_bigint::BigInt::from(*a) - b.clone()),
+            (BigInt(a), Long(b)) => BigInt(a.clone() - num_bigint::BigInt::from(*b)),
             (Rational(a), Rational(b)) => Rational(a - b),
-            (Long(a), Rational(b)) | (Rational(b), Long(a)) => {
-                Rational(b * -BigRational::new(num_bigint::BigInt::from(*a), num_bigint::BigInt::from(1)))
-                    .neg()
-            }
+            (Long(a), Rational(b)) => Rational(
+                BigRational::new(num_bigint::BigInt::from(*a), num_bigint::BigInt::from(1)) - b,
+            ),
+            (Rational(b), Long(a)) => Rational(
+                b - BigRational::new(num_bigint::BigInt::from(*a), num_bigint::BigInt::from(1)),
+            ),
             (Complex(ar, ai), Complex(br, bi)) => Complex(ar - br, ai - bi),
-            (Long(a), Complex(br, bi)) | (Complex(br, bi), Long(a)) => Complex(*a as f64 - br, -*bi),
-            (Double(a), Complex(br, bi)) | (Complex(br, bi), Double(a)) => Complex(a - br, -*bi),
+            (Long(a), Complex(br, bi)) => Complex(*a as f64 - *br, -*bi),
+            (Complex(br, bi), Long(a)) => Complex(*br - *a as f64, *bi),
+            (Double(a), Complex(br, bi)) => Complex(*a - *br, -*bi),
+            (Complex(br, bi), Double(a)) => Complex(*br - *a, *bi),
             _ => Double(self.as_double() - other.as_double()),
         }
     }

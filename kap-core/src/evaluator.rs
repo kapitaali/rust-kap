@@ -5458,6 +5458,52 @@ impl Engine {
                     "˝: inverse not supported for this function".into(),
                 ));
             }
+            // `⍨` commute inverse (Kotlin CommuteFunctionImpl.evalInverse2ArgB/A,
+            // commute.kt:24-32): the inverse of `(v f⍨)` applied dyadically solves
+            // `y f v = a` for y, i.e. `f.evalInverse2ArgA(a, v)`. Kotlin's commute
+            // has NO evalInverse1Arg, so a monadic `(f⍨)˝ y` correctly errors.
+            Instr::Derived { func: inner, op } if matches!(
+                op.as_ref(),
+                Instr::Symbol { name, .. } if name == "⍨" || name == "commute"
+            ) => {
+                if left.is_none() {
+                    return Err(AplError::runtime(
+                        "⍨: Function does not have an inverse".into(),
+                    ));
+                }
+                let v = left.clone().unwrap();
+                // `f.evalInverse2ArgA(a, v)`: solve `y f v = a`.
+                return match inner.as_ref() {
+                    Instr::Symbol { name, .. } => {
+                        let new_op = match name.as_str() {
+                            // `y + v = a` ⇒ y = a - v
+                            "+" => Instr::Symbol { name: "-".into(), namespace: None },
+                            // `y - v = a` ⇒ y = a + v
+                            "-" => Instr::Symbol { name: "+".into(), namespace: None },
+                            // `y × v = a` ⇒ y = a ÷ v
+                            "×" => Instr::Symbol { name: "÷".into(), namespace: None },
+                            // `y ÷ v = a` ⇒ y = a × v
+                            "÷" => Instr::Symbol { name: "×".into(), namespace: None },
+                            _ => {
+                                return Err(AplError::runtime(format!(
+                                    "{}: Function does not have an inverse",
+                                    name
+                                )))
+                            }
+                        };
+                        // `a` is the port's `right`; feed (op a v).
+                        self.eval_apply(&new_op, &Some(right.clone()), &v, env)
+                    }
+                    // Nested train/derived under commute: delegate generically by
+                    // recursing with swapped inverse semantics (A-path).
+                    _ => {
+                        // `fn.evalInverse2ArgA(a, v)` ≡ solve `y` with `fn(y, v) = a`.
+                        // Port's adverb_inverse models the B-path `fn(v, y) = a`, so
+                        // swap args to request the A-path on the inner fn.
+                        self.adverb_inverse(inner, &Some(right.clone()), &v, env)
+                    }
+                }
+            }
             _ => {
                 return Err(AplError::runtime(
                     "˝: inverse not supported for this function".into(),
