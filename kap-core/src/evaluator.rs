@@ -2098,6 +2098,13 @@ impl Engine {
             // accepts the args and stores the command for `man`/tab-completion; the port
             // simply discards it so the stdlib loads without error.)
             "int:registerCmd" => Ok(Rc::new(APLValue::Null)),
+            // `int:ensure*` (Kotlin `EnsureTypeFunction`, div_functions.kt:415): monadic
+            // type-coercion wrappers used by ReshapeTest to force an array's element type
+            // (GENERIC / LONG / DOUBLE). The Rust port's value model doesn't track element
+            // subtypes the way Kotlin's `ForcedElementTypeArray` does, and the oracle shows
+            // they are semantically identity (`int:ensureGeneric 5` → `5`, `int:ensureGeneric
+            // 10 11 12` → `⟨10 11 12⟩`). Return the argument unchanged.
+            "int:ensureGeneric" | "int:ensureLong" | "int:ensureDouble" => Ok(right_val),
             // `sysparam` (div_functions.kt SystemParameterFunction + custom-renderer.kt):
             // monadic lookup, dyadic update. The parameter name is a SYMBOL VALUE
             // (`'kap:altVectorOutput`, i.e. Symbol{name, namespace:"kap"}); keyword-form
@@ -3317,6 +3324,7 @@ impl Engine {
                 | "throw"
                 | "int:libInitialised"
                 | "int:registerCmd"
+                | "int:ensureGeneric" | "int:ensureLong" | "int:ensureDouble"
                 // Namespaced `map:` natives (builtins/map.kt): admitted via is_known_fn
                 // at parse time; listed here so the eval-time late gate knows them.
                 | "map:with" | "map:get" | "map:remove" | "map:entries" | "map:size" | "map:keys"
