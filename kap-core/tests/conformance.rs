@@ -467,6 +467,10 @@ fn curated_kap_parity() {
         ("⍴(2 :fill ⍴ ⍳5)", "(2 3)"),
         ("⍴(2 :truncate ⍴ ⍳9)", "(2 4)"),
         ("⍴(2 :recycle ⍴ ⍳5)", "(2 3)"),
+        // Reshape spec parity (Kotlin reshape.kt:244-257,376). Oracle-verified 2026-08-30.
+        ("¯1 ⍴ 1 2 3 4", "(1 2 3 4)"),
+        ("⍬⍴ 1 2 3", "1"),
+        ("⍬⍴ ⍬", "0"),
         ("(⊃(2 :fill ⍴ ⍳5))[1;2]", "0"),
         // Error rows (harness cannot assert): (2 :match ⍴ ⍳7) ->
         // "Invalid size of right argument: 7. Should be divisible by 2.";

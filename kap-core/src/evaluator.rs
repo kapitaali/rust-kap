@@ -4931,6 +4931,13 @@ impl Engine {
             Computed(SizeMethod),
         }
         let dims_val = left_val.force(self)?;
+        // Kotlin reshape.kt:244-246 — the left shape must be scalar or a
+        // one-dimensional array; a rank-2+ left arg errors verbatim.
+        if dims_val.dimensions().len() > 1 {
+            return Err(AplError::runtime(
+                "Left side of rho must be scalar or a one-dimensional array".into(),
+            ));
+        }
         let mut specs: Vec<DimSpec> = Vec::new();
         match dims_val.as_ref() {
             APLValue::Array(a) => {
@@ -4955,7 +4962,44 @@ impl Engine {
                     });
                 }
             }
-            APLValue::Number(KapNumber::Long(v)) => specs.push(DimSpec::Fixed(*v)),
+            APLValue::Number(KapNumber::Long(v)) => match method_of(dims_val.as_ref()) {
+                Some(Ok(m)) => specs.push(DimSpec::Computed(m)),
+                _ => specs.push(DimSpec::Fixed(*v)),
+            },
+            // Kotlin reshape.kt:249-257 — an empty (rank-1, size-0) left shape (`⍬`)
+            // returns the first element of the right arg, enclosed.
+            APLValue::Null => {
+                let b = right_val.force(self)?;
+                // Kotlin reshape.kt:249-257 — an empty left shape (`⍬`) returns the
+                // first element of the right arg, enclosed. If the right arg is itself
+                // empty/Null, the default value (0) is used. An atomic element is
+                // returned as a scalar (depth 0), matching `⊂`/enclose (oracle
+                // `⍬⍴5 → 5`, depth 0).
+                let first: Rc<APLValue> = match b.as_ref() {
+                    APLValue::Array(a) if a.element_count() == 0 => {
+                        Rc::new(APLValue::Number(KapNumber::Long(0)))
+                    }
+                    APLValue::Null => Rc::new(APLValue::Number(KapNumber::Long(0))),
+                    _ => {
+                        let b_arr = match b.as_ref() {
+                            APLValue::Array(a) => a.elements(),
+                            other => vec![Rc::new(other.clone())],
+                        };
+                        b_arr[0].clone()
+                    }
+                };
+                match first.as_ref() {
+                    APLValue::Number(_) | APLValue::Char(_) | APLValue::Null => {
+                        return Ok(first)
+                    }
+                    _ => {
+                        return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                            vec![],
+                            ArrayData::Nested(vec![first]),
+                        )))))
+                    }
+                }
+            }
             APLValue::Str(s) => {
                 // A string as a reshape shape means its length as a single dimension
                 // (Kap: `"abc"⍴x` ≡ `(3)⍴x`).
