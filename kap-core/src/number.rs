@@ -423,10 +423,64 @@ pub fn format_double(v: f64) -> String {
     if v.is_infinite() {
         return if v < 0.0 { "¯Infinity".to_string() } else { "Infinity".to_string() };
     }
-    let s = format!("{}", v);
-    if s.parse::<f64>().map(|x| x.fract() == 0.0).unwrap_or(false) && !s.contains('.') {
-        // integral-looking integer (e.g. "1") -> force one decimal: "1.0"
-        format!("{}.0", s)
+    if v == 0.0 {
+        return if v.is_sign_negative() {
+            "-0.0".to_string()
+        } else {
+            "0.0".to_string()
+        };
+    }
+    // Rust's f64 Display (Ryu) yields the shortest round-trip decimal, in either plain
+    // or lowercase-scientific form (e.g. "123456789", "0.0001", "1e-7",
+    // "6.123233995736766e-17"). Kotlin's `Double.formatDouble()` is Java
+    // `Double.toString()`, which renders scientifically whenever |v| < 1e-3 || |v| >= 1e7,
+    // uses uppercase 'E', and puts a ".0" on the mantissa when it has no fractional
+    // part. Normalise to that convention here so output matches the Kotlin oracle.
+    let s = format!("{}", v); // shortest round-trip — same digits Java emits
+    let av = v.abs();
+    let force_exp = av < 1e-3 || av >= 1e7;
+    if let Some(idx) = s.bytes().position(|b| b == b'e' || b == b'E') {
+        // Already scientific: uppercase the marker, ensure mantissa has a '.'.
+        let (mant, exp) = s.split_at(idx);
+        let exp = &exp[1..]; // drop 'e'/'E' (sign is preserved in exp)
+        let mant = if mant.contains('.') {
+            mant.to_string()
+        } else {
+            format!("{}.0", mant)
+        };
+        format!("{}E{}", mant, exp)
+    } else if force_exp {
+        let (sign, body) = if s.starts_with('-') {
+            ("-", &s[1..])
+        } else {
+            ("", s.as_ref())
+        };
+        if body.starts_with("0.") {
+            // 0.0001 -> 1.0E-4
+            let frac = &body[2..];
+            let zeros = frac.bytes().take_while(|b| *b == b'0').count();
+            let digits = &frac[zeros..];
+            let first = &digits[0..1];
+            let rest = &digits[1..];
+            let mant = if rest.is_empty() {
+                format!("{}.0", first)
+            } else {
+                format!("{}.{}", first, rest)
+            };
+            let p = -((zeros + 1) as i32);
+            format!("{}{}E{}", sign, mant, p)
+        } else {
+            // integer >= 1e7: 123456789 -> 1.23456789E8
+            let p = (body.len() as i32) - 1;
+            let first = &body[0..1];
+            let rest = &body[1..];
+            let mant = if rest.is_empty() {
+                format!("{}.0", first)
+            } else {
+                format!("{}.{}", first, rest)
+            };
+            format!("{}{}E{}", sign, mant, p)
+        }
     } else if s.contains('.') {
         s
     } else {
@@ -925,7 +979,15 @@ impl KapNumber {
             other => {
                 let x = other.as_double();
                 if x < 0.0 {
-                    KapNumber::Complex(0.0, (-x).sqrt())
+                    // Kotlin SqrtAPLFunction.sqrtDouble routes negatives through
+                    // `x.toComplex().pow(Complex.ONE_HALF)`, i.e. the polar form. For
+                    // `√¯1` that yields `cos(π/2)J sin(π/2)` = `6.12e-17J1.0` (a tiny
+                    // real-part artifact), NOT a clean `0.0J1.0`. Reuse the same
+                    // polar computation so the display matches the oracle.
+                    let z = (x, 0.0);
+                    let (mag, arg) = (babs(z), barg(z));
+                    let rm = mag.sqrt();
+                    KapNumber::Complex(rm * bcos(arg * 0.5), rm * bsin(arg * 0.5))
                 } else {
                     KapNumber::Double(x.sqrt())
                 }

@@ -202,7 +202,7 @@ impl APLValue {
     /// array are also quoted, so a vector of strings shows `( "a" "b" )`).
     pub fn format_display(&self) -> String {
         match self {
-            APLValue::Number(n) => n.format(true),
+            APLValue::Number(n) => n.format(false), // PLAIN: ASCII '-' (matches oracle REPL)
             // REPL / "pretty" form: a character is shown with an `@` prefix
             // (Real Kap: `↑"abc"` prints `@a`, ` @a ` prints `@a`). The internal
             // `format_value` (used by `⍕` and operator results) stays bare.
