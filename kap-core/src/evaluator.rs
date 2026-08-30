@@ -2091,6 +2091,13 @@ impl Engine {
             // The Kap text-mode build has no pending initialisers, so this is a no-op
             // that returns null — matching `int:libInitialised 0` → `⍬` on the oracle.
             "int:libInitialised" => Ok(Rc::new(APLValue::Null)),
+            // `int:registerCmd` (Kotlin `RegisterCommandFunction`, command.kt): registers
+            // an interactive REPL command (`int:registerCmd⟦name; description; fn⟧` or the
+            // `;` form). The text-mode port has no REPL command-dispatch system, so this is
+            // a no-op that returns null — matching `int:libInitialised`'s precedent. (Oracle
+            // accepts the args and stores the command for `man`/tab-completion; the port
+            // simply discards it so the stdlib loads without error.)
+            "int:registerCmd" => Ok(Rc::new(APLValue::Null)),
             // `sysparam` (div_functions.kt SystemParameterFunction + custom-renderer.kt):
             // monadic lookup, dyadic update. The parameter name is a SYMBOL VALUE
             // (`'kap:altVectorOutput`, i.e. Symbol{name, namespace:"kap"}); keyword-form
@@ -3292,6 +3299,7 @@ impl Engine {
                 | "⍣"
                 | "throw"
                 | "int:libInitialised"
+                | "int:registerCmd"
                 // Namespaced `map:` natives (builtins/map.kt): admitted via is_known_fn
                 // at parse time; listed here so the eval-time late gate knows them.
                 | "map:with" | "map:get" | "map:remove" | "map:entries" | "map:size" | "map:keys"

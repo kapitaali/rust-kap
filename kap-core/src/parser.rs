@@ -505,7 +505,13 @@ impl<'a> Parser<'a> {
                         // bare function reference (output3.kap:323 uses this form).
                         Token::OpenParen => {
                             self.advance(); // consume (
-                            let inner = self.parse_function_expr()?;
+                            // Use the *value* accumulator so a value group can be the left
+                            // operand of an operator inside the paren (e.g.
+                            // `⍞((x≡y) ⌷ renderer …)` — the inner fn is built via value-left
+                            // bind, which `parse_function_expr` does not do). The inner
+                            // expression parses to a function-typed Instr; the trailing `)`
+                            // terminates it.
+                            let inner = self.parse_value_kotlin()?;
                             self.expect(Token::CloseParen, "expected ) after ⍞(…)")?;
                             return self.finish_fn_call(inner, &mut left_args);
                         }
@@ -5217,7 +5223,12 @@ impl<'a> Parser<'a> {
                     // function atom (the caller's apply loop handles adverbs/applying).
                     Some(t) if matches!(t.token, Token::OpenParen) => {
                         self.advance(); // consume (
-                        let inner = self.parse_function_expr()?;
+                        // Value context: the inner fn may have a *value* group as an
+                        // operator's left operand (e.g. `(x≡y) ⌷ …`). `parse_value_kotlin`
+                        // builds it via value-left bind; the result is a function-typed
+                        // Instr returned as a bare atom (caller's apply loop handles
+                        // adverbs/applying).
+                        let inner = self.parse_value_kotlin()?;
                         self.expect(Token::CloseParen, "expected ) after ⍞(…)")?;
                         Ok(inner)
                     }
