@@ -850,6 +850,56 @@ impl<'a> Parser<'a> {
                     };
                     continue;
                 }
+                // Rank operator `f⍤rank` (Kotlin APLOperatorValueRightArg, engine.kt:494).
+                // Like ⍢/⍣ this is lexed as a plain Symbol, so it must be caught BEFORE the
+                // `binding -> break` below (which would otherwise treat `⍤` as an unknown
+                // operator and drop it, leaving it to strand as a bare symbol lookup ->
+                // "undefined symbol: ⍤"). The right operand is a VALUE expression: a single
+                // number, or a strand of numbers `⍤ 9 2` (absorbed into an Array spec).
+                if name == "⍤" && Self::is_function_expr(&cur) {
+                    self.advance(); // consume ⍤
+                    self.skip_newlines();
+                    let mut spec = self.parse_primary()?;
+                    loop {
+                        let more = matches!(
+                            self.peek().map(|t| &t.token),
+                            Some(Token::Literal(LiteralValue::Number(_)))
+                        );
+                        if !more {
+                            break;
+                        }
+                        let elem = self.parse_primary()?;
+                        if let Instr::Array { elements } = &mut spec {
+                            elements.push(elem);
+                        } else {
+                            spec = Instr::Array { elements: vec![spec, elem] };
+                        }
+                    }
+                    // Optional trailing data argument (statement boundary / close delim -> none).
+                    let data = if !self.at_statement_boundary()
+                        && self.peek().map(|t| &t.token) != Some(&Token::CloseParen)
+                        && self.peek().map(|t| &t.token) != Some(&Token::CloseBracket)
+                    {
+                        self.parse_apply()?
+                    } else {
+                        Instr::Empty
+                    };
+                    let value_op = Instr::ValueOp {
+                        func: Box::new(cur.clone()),
+                        op_name: "⍤".to_string(),
+                        operand: Box::new(spec),
+                    };
+                    cur = if !matches!(data, Instr::Empty) {
+                        Instr::Apply {
+                            fn_expr: Box::new(value_op),
+                            left: None,
+                            right: Box::new(data),
+                        }
+                    } else {
+                        value_op
+                    };
+                    continue;
+                }
                 // Fork postfix `f « g » h` (Kap 3-train): binds after a FUNCTION
                 // exactly like ⍣ — e.g. stat.kap `avg ⇐ +/«÷»≢` where the left
                 // member is the DERIVED reduce `+/`. Mirrors the legacy-path arm in
@@ -3198,15 +3248,40 @@ impl<'a> Parser<'a> {
         loop {
             let op = match self.peek().map(|t| &t.token) {
                 Some(Token::Literal(LiteralValue::Symbol { name, namespace: None }))
-                    if name == "⍢" || name == "⍣" =>
+                    if name == "⍢" || name == "⍣" || name == "⍤" =>
                 {
                     name.clone()
                 }
                 _ => break,
             };
-            self.advance(); // consume ⍢ / ⍣
+            self.advance(); // consume ⍢ / ⍣ / ⍤
             self.skip_newlines();
-            let operand = self.parse_function_atom()?;
+            let operand = if op == "⍤" {
+                // Rank-operator `⍤` takes a NUMERIC rank spec (a single number, or a
+                // strand of numbers `⍤ 9 2`). Absorb following numeric literals into a
+                // strand exactly like bind_operators_kotlin's ⍤ arm. We must NOT use
+                // parse_function_atom (that is for function-valued ops ⍢/⍣) and must NOT
+                // use parse_apply (it would strand across the trailing data argument).
+                let mut spec = self.parse_primary()?;
+                loop {
+                    let more = matches!(
+                        self.peek().map(|t| &t.token),
+                        Some(Token::Literal(LiteralValue::Number(_)))
+                    );
+                    if !more {
+                        break;
+                    }
+                    let elem = self.parse_primary()?;
+                    if let Instr::Array { elements } = &mut spec {
+                        elements.push(elem);
+                    } else {
+                        spec = Instr::Array { elements: vec![spec, elem] };
+                    }
+                }
+                spec
+            } else {
+                self.parse_function_atom()?
+            };
             atom = Instr::ValueOp {
                 func: Box::new(atom),
                 op_name: op,

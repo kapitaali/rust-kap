@@ -8668,6 +8668,10 @@ impl Engine {
         right: &Box<Instr>,
         env: &Rc<Environment>,
     ) -> Result<AplRef<APLValue>, AplError> {
+        let spec_ndim: usize = match rank_val {
+            APLValue::Array(a) => a.dimensions.len(),
+            _ => 0,
+        };
         let spec: Vec<i64> = match rank_val {
             APLValue::Number(n) => vec![n.as_long().map_err(AplError::runtime)?],
             APLValue::Array(a) => a
@@ -8692,6 +8696,13 @@ impl Engine {
                 ))
             }
         };
+        // A matrix/rank>1 spec is illegal (Kotlin raises "must be scalar or array of 1 to 3
+        // elements" via the `else -> raiseArgumentException()` arms in operator.kt:118/159).
+        if spec_ndim > 1 {
+            return Err(AplError::runtime(
+                "⍤: operator argument must be scalar or an array of 1 to 3 elements".into(),
+            ));
+        }
         // Split an argument into rank-k cells (Kotlin AxisMultiDimensionEnclosedValue):
         // the trailing k dims are the cell shape; the leading dims are the frame.
         let split_cells = |v: &APLValue, idx: i64| -> Result<(Vec<usize>, Vec<usize>, Vec<AplRef<APLValue>>), AplError> {
@@ -8706,15 +8717,34 @@ impl Engine {
                 other => (vec![], vec![Rc::new(other.clone())]),
             };
             let rank = dims.len();
-            let k = idx.max(0).min(rank as i64) as usize;
+            // Kotlin AxisMultiDimensionEnclosedValue (disclose.kt:56) computes the enclosed
+            // cell count as `dimensions.size - numDimensions`, i.e. frame rank = rank - k,
+            // with k = min(rank, idx) for non-negative idx. A negative idx counts from the
+            // end (`⍤¯2` on a rank-3 arg => rank 1). Plain `idx.max(0)` wrongly collapses
+            // an over-large positive rank to 0 instead of clamping to the argument rank.
+            let k = if idx < 0 {
+                ((idx + rank as i64) % (rank as i64).max(1)).max(0) as usize
+            } else {
+                (idx as usize).min(rank)
+            };
             let frame = dims[..rank - k].to_vec();
             let cell_dims = dims[rank - k..].to_vec();
             Ok((frame, cell_dims, elems))
         };
         match left {
             None => {
-                // Monadic: rank = spec[1] when 3 elements, else the single value.
-                let idx = if spec.len() == 3 { spec[1] } else { spec[0] };
+                // Monadic rank: Kotlin computeRankFromOpArg (operator.kt:102) selects
+                // from the rank-spec VALUE by its *length*:
+                //   scalar (len 1)        -> spec[0]
+                //   length-2 vector       -> spec[1]
+                //   length-3 vector        -> spec[0]
+                // (a length-1 vector is distinguished from a scalar in Kotlin, but both
+                // resolve to valueAt(0); the port's flat `spec` list matches on length.)
+                let idx = match spec.len() {
+                    2 => spec[1],
+                    3 => spec[0],
+                    _ => spec[0],
+                };
                 let rv = self.eval_instr(right, env)?.force(self)?;
                 let (frame, cell_dims, elems) = split_cells(rv.as_ref(), idx)?;
                 let cell_size: usize = cell_dims.iter().product();
@@ -8725,11 +8755,14 @@ impl Engine {
                     let r = self.eval_apply(func, &None, &Box::new(Instr::Value(cell_val)), env)?;
                     results.push(r);
                 }
-                // Disclose: frame dims × per-cell results (Kotlin discloseValue).
-                if frame.is_empty() {
-                    return Ok(results.into_iter().next().unwrap_or_else(|| Rc::new(APLValue::Null)));
-                }
-                self.make_simple_or_nested(frame.clone(), results)
+                // Kotlin applies `discloseValue(ForEachResult1Arg(...))` (operator.kt:94-95):
+                // disclose collapses the uniformly-shaped cells into one extra rank.
+                let assembled = if frame.is_empty() {
+                    results.into_iter().next().unwrap_or_else(|| Rc::new(APLValue::Null))
+                } else {
+                    self.make_simple_or_nested(frame.clone(), results)?
+                };
+                self.reveal(None, assembled)
             }
             Some(l) => {
                 let lv = self.eval_instr(l, env)?.force(self)?;
@@ -8778,12 +8811,15 @@ impl Engine {
                     )?;
                     results.push(r);
                 }
-                // Result frame: the non-singleton frame (Kotlin broadcasts a singleton).
+                // Kotlin applies `discloseValue(ForEachResult2Arg(...))` (operator.kt:174-175):
+                // disclose collapses the uniformly-shaped dyadic cells into one extra rank.
                 let frame = if ln == 1 { rframe } else { lframe };
-                if frame.is_empty() {
-                    return Ok(results.into_iter().next().unwrap_or_else(|| Rc::new(APLValue::Null)));
-                }
-                self.make_simple_or_nested(frame.clone(), results)
+                let assembled = if frame.is_empty() {
+                    results.into_iter().next().unwrap_or_else(|| Rc::new(APLValue::Null))
+                } else {
+                    self.make_simple_or_nested(frame.clone(), results)?
+                };
+                self.reveal(None, assembled)
             }
         }
     }
