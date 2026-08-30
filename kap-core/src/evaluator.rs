@@ -2503,25 +2503,12 @@ impl Engine {
             },
             // --- more builtins (Phase 6) ---
             "⌈" | "ceil" => match left_val {
-                None => self.scalar1(right_val, |x| x.ceil(), "⌈"),
-                Some(_) => self.num2(left_val, right_val, |a, b| {
-                    match a.numeric_cmp(&b) {
-                        Ok(Ordering::Greater) => a.clone(),
-                        Ok(_) => b.clone(),
-                        // Mismatched numeric kinds: fall back to the right operand.
-                        Err(_) => b.clone(),
-                    }
-                }, "⌈"),
+                None => self.ceil_floor_monadic(right_val, true, "⌈"),
+                Some(_) => self.ceil_floor_dyadic(left_val, right_val, true, "⌈"),
             },
             "⌊" | "floor" => match left_val {
-                None => self.scalar1(right_val, |x| x.floor(), "⌊"),
-                Some(_) => self.num2(left_val, right_val, |a, b| {
-                    match a.numeric_cmp(&b) {
-                        Ok(Ordering::Less) => a.clone(),
-                        Ok(_) => b.clone(),
-                        Err(_) => b.clone(),
-                    }
-                }, "⌊"),
+                None => self.ceil_floor_monadic(right_val, false, "⌊"),
+                Some(_) => self.ceil_floor_dyadic(left_val, right_val, false, "⌊"),
             },
             // `|`: dyadic = modulo; monadic = magnitude (absolute value).
             "|" | "mod" => match left_val {
@@ -2537,7 +2524,30 @@ impl Engine {
             },
             "*" | "⋆" => match left_val {
                 None => self.scalar1(right_val, |x| x.exp(), "⋆"),
-                Some(_) => self.num2(left_val, right_val, |a, b| a.pow(b), "⋆"),
+                Some(_) => {
+                    // Integer base with integer exponent: if the exponent's magnitude
+                    // exceeds what Kotlin computes exactly (u32), the result cannot fit
+                    // an int and Kotlin throws "Value does not fit in an int: <exp>".
+                    let overflow = match (left_val.as_ref().map(|l| l.as_ref()), right_val.as_ref()) {
+                        (Some(APLValue::Number(a)), APLValue::Number(b))
+                            if a.is_integer() && b.is_integer() =>
+                        {
+                            b.as_long()
+                                .map(|e| e.unsigned_abs() > u32::MAX as u64)
+                                .unwrap_or(true)
+                        }
+                        _ => false,
+                    };
+                    if overflow {
+                        if let APLValue::Number(b) = right_val.as_ref() {
+                            return Err(AplError::runtime(format!(
+                                "*: Value does not fit in an int: {}",
+                                b
+                            )));
+                        }
+                    }
+                    self.num2(left_val, right_val, |a, b| a.pow(b), "⋆")
+                }
             },
             "√" => match left_val {
                 // Monadic `√ y` = square root. Dyadic `a √ b` = b^(1/a) (nth root).
@@ -9762,6 +9772,128 @@ impl Engine {
             }
             _ => Err(AplError::runtime(format!("{} requires a number", sym))),
         }
+    }
+
+    /// Monadic ceiling (`⌈`) / floor (`⌊`): reject complex and non-finite arguments,
+    /// matching Kotlin's `CeilingAPLFunction` / `FloorAPLFunction` error texts.
+    fn ceil_floor_monadic(
+        &self,
+        right_val: AplRef<APLValue>,
+        ceil: bool,
+        sym: &str,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        match right_val.as_ref() {
+            APLValue::Number(x) => {
+                if x.is_complex() {
+                    return Err(AplError::runtime(if ceil {
+                        "⌈: Ceiling is not valid for complex values".into()
+                    } else {
+                        "⌊: Function does not support arguments of type: complex".into()
+                    }));
+                }
+                if let KapNumber::Double(d) = x {
+                    if d.is_nan() {
+                        // Kotlin normalises `0÷0` to `0` for both `⌈`/`⌊`.
+                        return Ok(Rc::new(APLValue::Number(KapNumber::Long(0))));
+                    }
+                    if d.is_infinite() {
+                        return Err(AplError::runtime(format!(
+                            "{}: Argument is not finite: {}",
+                            sym,
+                            if *d < 0.0 { "¯Infinity".to_string() } else { "Infinity".to_string() }
+                        )));
+                    }
+                }
+                let f = if ceil { x.ceil() } else { x.floor() };
+                Ok(Rc::new(APLValue::Number(f)))
+            }
+            APLValue::Array(a) => {
+                let mut out = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    match e.as_ref() {
+                        APLValue::Number(x) => {
+                            if x.is_complex() {
+                                return Err(AplError::runtime(if ceil {
+                                    "⌈: Ceiling is not valid for complex values".into()
+                                } else {
+                                    "⌊: Function does not support arguments of type: complex".into()
+                                }));
+                            }
+                            if let KapNumber::Double(d) = x {
+                                if d.is_nan() {
+                                    out.push(Rc::new(APLValue::Number(KapNumber::Long(0))));
+                                    continue;
+                                }
+                                if d.is_infinite() {
+                                    return Err(AplError::runtime(format!(
+                                        "{}: Argument is not finite: {}",
+                                        sym,
+                                        if *d < 0.0 { "¯Infinity".to_string() } else { "Infinity".to_string() }
+                                    )));
+                                }
+                            }
+                            let f = if ceil { x.ceil() } else { x.floor() };
+                            out.push(Rc::new(APLValue::Number(f)));
+                        }
+                        _ => return Err(AplError::runtime(format!("{} requires numbers", sym))),
+                    }
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    a.dimensions.clone(),
+                    ArrayData::Nested(out),
+                )))))
+            }
+            _ => Err(AplError::runtime(format!("{} requires a number", sym))),
+        }
+    }
+
+    /// Dyadic ceiling/floor: `L⌈R` returns the larger of L,R; `L⌊R` the smaller.
+    /// Rejects char operands (Kotlin "Incompatible argument types") and complex.
+    fn ceil_floor_dyadic(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+        ceil: bool,
+        sym: &str,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        // Char on either side → "Incompatible argument types. Left arg: char, Right arg: <n>".
+        let left_ref = left_val.as_ref().map(|l| l.as_ref());
+        if let Some(APLValue::Char(_)) = left_ref {
+            let rt = match right_val.as_ref() {
+                APLValue::Number(KapNumber::Long(_)) => "integer",
+                APLValue::Number(KapNumber::Double(_)) => "double",
+                APLValue::Number(KapNumber::BigInt(_)) => "bigint",
+                APLValue::Number(KapNumber::Rational(_)) => "rational",
+                APLValue::Number(KapNumber::Complex(_, im)) if *im == 0.0 => "complex",
+                APLValue::Char(_) => "char",
+                _ => "unknown",
+            };
+            return Err(AplError::runtime(format!(
+                "{}: Incompatible argument types. Left arg: char, Right arg: {}",
+                sym, rt
+            )));
+        }
+        if let APLValue::Char(_) = right_val.as_ref() {
+            let lt = match left_ref {
+                Some(APLValue::Number(KapNumber::Long(_))) => "integer",
+                Some(APLValue::Number(KapNumber::Double(_))) => "double",
+                Some(APLValue::Number(KapNumber::BigInt(_))) => "bigint",
+                Some(APLValue::Number(KapNumber::Rational(_))) => "rational",
+                Some(APLValue::Number(KapNumber::Complex(_, im))) if *im == 0.0 => "complex",
+                Some(APLValue::Char(_)) => "char",
+                _ => "unknown",
+            };
+            return Err(AplError::runtime(format!(
+                "{}: Incompatible argument types. Left arg: {}, Right arg: char",
+                sym, lt
+            )));
+        }
+        self.num2(left_val, right_val, |a, b| match a.numeric_cmp(&b) {
+            // Ceiling (`⌈`): keep the larger. Floor (`⌊`): keep the smaller.
+            Ok(Ordering::Greater) => if ceil { a.clone() } else { b.clone() },
+            Ok(_) => if ceil { b.clone() } else { a.clone() },
+            Err(_) => b.clone(),
+        }, sym)
     }
 
     /// Set difference / without: `L ~ R` removes from L all elements that appear in R.

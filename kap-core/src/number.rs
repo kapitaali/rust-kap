@@ -73,6 +73,26 @@ impl KapNumber {
         matches!(self, KapNumber::Complex(_, im) if *im != 0.0)
     }
 
+    /// True when the value is an integer type (Long / BigInt) or a Rational whose
+    /// denominator divides its numerator exactly. Used by `*`-overflow detection.
+    pub fn is_integer(&self) -> bool {
+        match self {
+            KapNumber::Long(_) | KapNumber::BigInt(_) => true,
+            KapNumber::Rational(v) => v.is_integer(),
+            _ => false,
+        }
+    }
+
+    /// True for the floating-point (Double) representation.
+    pub fn is_double(&self) -> bool {
+        matches!(self, KapNumber::Double(_))
+    }
+
+    /// True for the rational (BigRational) representation.
+    pub fn is_rational(&self) -> bool {
+        matches!(self, KapNumber::Rational(_))
+    }
+
     pub fn is_zero(&self) -> bool {
         match self {
             KapNumber::Long(v) => *v == 0,
@@ -161,6 +181,14 @@ impl KapNumber {
                 neg(format!("{}J{}", rs, ims))
             }
         }
+    }
+}
+
+impl std::fmt::Display for KapNumber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Non-readable form (plain ASCII minus signs) — used for error messages that
+        // must match the JVM oracle's "Value does not fit in an int: <n>" text.
+        write!(f, "{}", self.format(false))
     }
 }
 
@@ -578,21 +606,53 @@ impl KapNumber {
 
     /// Power (Kap `*`: `a * b` = a to the power of b). Integer powers of integers stay exact
     /// where possible; everything else falls back to f64 (or complex) arithmetic.
+    /// Oracle behaviour (math_functions.kt PowerAPLFunction):
+    /// - The result must fit an integer (Long) for integer base + integer non-negative
+    ///   exponent; if it would overflow (e.g. `10*1234567890123457`) Kotlin throws
+    ///   "Value does not fit in an int".
+    /// - Negative integer powers of an integer base yield a *rational* (`2*¯3 → 1/8`,
+    ///   not `0.125`).
     pub fn pow(&self, exp: &KapNumber) -> KapNumber {
         use KapNumber::*;
         match (self, exp) {
+            // Positive integer power of an integer base: stay exact via BigInt so large
+            // but representable results (`10*100`) are correct, and overflow (exponent
+            // too large to even attempt) errors like Kotlin.
             (Long(a), Long(b)) if *b >= 0 => {
                 if let Some(e) = u32::try_from(*b).ok() {
-                    return Long(a.saturating_pow(e));
+                    let big = num_bigint::BigInt::from(*a).pow(e);
+                    return bigint_to_kap(&big);
                 }
-                Double((*a as f64).powf(*b as f64))
+                // Exponent is a positive i64 too large to fit u32 — result cannot fit an int.
+                Double(f64::INFINITY)
             }
-            (Long(a), Long(b)) => Double((*a as f64).powf(*b as f64)),
-            (BigInt(a), Long(b)) => {
-                if let Some(e) = u32::try_from(*b).ok() {
-                    return BigInt(a.pow(e));
+            (Long(a), Long(b)) => {
+                // Negative integer power of an integer base → rational 1/(a^|b|).
+                if let Some(e) = u32::try_from(-*b).ok() {
+                    let denom = num_bigint::BigInt::from(*a).pow(e);
+                    return Rational(num_rational::BigRational::new(
+                        num_bigint::BigInt::from(1),
+                        denom,
+                    ));
                 }
-                Double(a.to_string().parse::<f64>().unwrap_or(f64::INFINITY).powf(*b as f64))
+                // Exponent magnitude too large to attempt as an exact integer power.
+                Double(f64::INFINITY)
+            }
+            (BigInt(a), Long(b)) if *b >= 0 => {
+                if let Some(e) = u32::try_from(*b).ok() {
+                    return bigint_to_kap(&a.pow(e));
+                }
+                Double(f64::INFINITY)
+            }
+            (BigInt(a), Long(b)) => {
+                if let Some(e) = u32::try_from(-*b).ok() {
+                    let denom = a.pow(e);
+                    return Rational(num_rational::BigRational::new(
+                        num_bigint::BigInt::from(1),
+                        denom,
+                    ));
+                }
+                Double(f64::INFINITY)
             }
             (Rational(a), Long(b)) if *b >= 0 => {
                 if let Some(e) = u32::try_from(*b).ok() {
