@@ -1093,16 +1093,34 @@ impl Engine {
                 Ok(result)
             }
             Instr::MemberDeref { object, member } => {
-                let obj = self.eval_instr(object, env)?;
-                let mem = self.eval_instr(member, env)?;
-                // Kotlin `MemberDereferenceInstruction.invoke2Arg`: for non-map
-                // objects (`LookupByAPLValueSupport`/`LookupByNameSupport` absent,
-                // e.g. plain arrays) the member is used as an INDEX — equivalent to
-                // `object[member]` index-select (the `else` branch:
-                // `listOf(member).unwrapDeferred().valueAt(array)`). The port currently
-                // lacks `APLMap`/`APLList` value types, so name/map member lookup
-                // (`object.name`) is unimplemented; index-style member access reuses
-                // `index_select`.
+                let obj = self.eval_instr(object, env)?.force(self)?;
+                let mem = self.eval_instr(member, env)?.force(self)?;
+                // Kotlin `MemberDereferenceInstruction` (lookup.kt:18-53): for a
+                // non-atomic array (rank > 0) the member is used as an INDEX whose
+                // length must EQUAL the array rank. A scalar member indexes only a
+                // rank-1 array; a rank-1 vector member must have length == rank.
+                // `Dimensions.indexFromPositionNegativeSupport` throws
+                // `Dimensions does not match` when `p.size != dimensions.size`
+                // (dimension.kt:84/105/123); a member of rank >= 2 throws
+                // `Index must be a scalar or 1-dimensional array` (lookup.kt:32).
+                // The shared `index_select` (bracket-index `x[y]`) permits
+                // `len <= rank` (partial axis select) and must NOT be changed for
+                // that path, so this rank-equality check lives only here.
+                let obj_rank = obj.dimensions().len();
+                if obj_rank > 0 {
+                    let mem_rank = mem.dimensions().len();
+                    if mem_rank > 1 {
+                        return Err(AplError::runtime(
+                            "Index must be a scalar or 1-dimensional array".to_string(),
+                        ));
+                    }
+                    let idx_len = if mem_rank == 0 { 1 } else { mem.element_count() };
+                    if idx_len != obj_rank {
+                        return Err(AplError::runtime("Dimensions does not match".to_string()));
+                    }
+                }
+                // rank-0 / atomic objects fall through to `index_select`, matching
+                // prior behaviour for enclosed scalars and numbers.
                 self.index_select(obj.as_ref(), mem.as_ref())
             }
             Instr::Guard { cond, truthy, falsy } => {
