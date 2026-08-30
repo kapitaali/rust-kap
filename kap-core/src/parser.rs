@@ -178,6 +178,12 @@ impl<'a> Parser<'a> {
                                 "match" | "find" | "finderror" | "findall" | "replace" | "split"
                                     | "compile"
                             ))
+                        // P3 `map:` namespace (builtins/map.kt): with/get/remove/entries/size/keys.
+                        || (ns == "map"
+                            && matches!(
+                                base,
+                                "with" | "get" | "remove" | "entries" | "size" | "keys"
+                            ))
                 }
                 None => false,
             }
@@ -468,42 +474,59 @@ impl<'a> Parser<'a> {
                     let tok = self
                         .peek()
                         .ok_or_else(|| self.err("expected a symbol after ⍞"))?;
-                    let (name, namespace) = match &tok.token {
+                    match &tok.token {
                         Token::Literal(LiteralValue::Symbol { name, namespace }) => {
-                            (name.clone(), namespace.clone())
-                        }
-                        _ => return Err(self.err("expected a symbol after ⍞")),
-                    };
-                    self.advance();
-                    let dr = Instr::DynamicRef { name, namespace };
-                    // A trailing adverb binds the dynamic ref as the derived
-                    // function's operand: `⍞fn¨ arr` = each over ⍞fn.
-                    if let Some(Token::Literal(LiteralValue::Symbol { name: adv, .. })) =
-                        self.peek().map(|t| &t.token)
-                    {
-                        if Self::is_adverb(adv) {
-                            let adv = adv.clone();
+                            let (name, namespace) = (name.clone(), namespace.clone());
                             self.advance();
-                            let dr = Instr::Derived {
-                                func: Box::new(dr),
-                                op: Box::new(Instr::Symbol {
-                                    name: adv,
-                                    namespace: None,
-                                }),
-                            };
+                            let dr = Instr::DynamicRef { name, namespace };
+                            // A trailing adverb binds the dynamic ref as the derived
+                            // function's operand: `⍞fn¨ arr` = each over ⍞fn.
+                            if let Some(Token::Literal(LiteralValue::Symbol { name: adv, .. })) =
+                                self.peek().map(|t| &t.token)
+                            {
+                                if Self::is_adverb(adv) {
+                                    let adv = adv.clone();
+                                    self.advance();
+                                    let dr = Instr::Derived {
+                                        func: Box::new(dr),
+                                        op: Box::new(Instr::Symbol {
+                                            name: adv,
+                                            namespace: None,
+                                        }),
+                                    };
+                                    return self.finish_fn_call(dr, &mut left_args);
+                                }
+                            }
                             return self.finish_fn_call(dr, &mut left_args);
                         }
+                        // `⍞(fnExpr)` — dynamic function reference from a parenthesised
+                        // FUNCTION expression (oracle: `⍞(+)` yields the `+` function as a
+                        // value). Parse the group as a function expr and treat it like a
+                        // bare function reference (output3.kap:323 uses this form).
+                        Token::OpenParen => {
+                            self.advance(); // consume (
+                            let inner = self.parse_function_expr()?;
+                            self.expect(Token::CloseParen, "expected ) after ⍞(…)")?;
+                            return self.finish_fn_call(inner, &mut left_args);
+                        }
+                        _ => return Err(self.err("expected a symbol after ⍞")),
                     }
-                    return self.finish_fn_call(dr, &mut left_args);
                 }
                 Token::LambdaToken => {
                     // `λ` (Kotlin processLambda, parser.kt:1204) — a function reference
-                    // operator. Always FUNCTION-SHAPED, so it must flow through
-                    // `finish_fn_call` (like `⍞`/`{…}` above) — otherwise it falls through
-                    // to the catch-all reset and loops. `parse_function_atom` handles the
-                    // `λfoo` / `λ(...)` / `λ{...}` forms.
+                    // operator. FUNCTION-SHAPED, but whether it applies or strands
+                    // depends on valence:
+                    //   • preceded by a value (`'a λfoo 'b`, `5 λ{⍵×2} 10`) → the λ is a
+                    //     FUNCTION VALUE in a strand (oracle: ⟨a function b⟩, ⟨5 function 10⟩);
+                    //     push it as data and keep accumulating the strand.
+                    //   • at the start of an expression (`λfoo 5`, `f ← λfoo`) → apply
+                    //     (or yield an ambivalent fn value), via finish_fn_call.
                     self.advance();
                     let lam = self.parse_function_atom()?;
+                    if !left_args.is_empty() {
+                        left_args.push(lam);
+                        continue;
+                    }
                     return self.finish_fn_call(lam, &mut left_args);
                 }
                 Token::OpenParen => {
@@ -2757,6 +2780,18 @@ impl<'a> Parser<'a> {
                 // function — treating it as one mis-parses e.g. `(3 (4 5))` and errors
                 // "expected a function in train". So gate the OpenParen case on its being a
                 // paren operator; every other function token is unaffected.
+                // A `λ`-reference following a value STRIPS as a function VALUE, not a
+                // dyadic operator (oracle: `'a λrenderNumber` -> ⟨a function⟩, NOT an
+                // application). Only `λ` is treated this way — a `{…}` block, train,
+                // paren-group, or operator symbol still triggers dyadic `L f R`.
+                let next_is_lambda = matches!(
+                    self.peek().map(|t| &t.token),
+                    Some(Token::LambdaToken)
+                );
+                if next_is_lambda {
+                    // fall through to the strand loop (2819), which collects the λ as
+                    // a value element of the strand.
+                } else {
                 let paren_group_is_fn = match self.peek().map(|t| &t.token) {
                     Some(Token::OpenParen) => self.next_is_paren_operator(),
                     // Non-paren tokens: defer to the generic function-token check.
@@ -2800,6 +2835,7 @@ impl<'a> Parser<'a> {
                         left: Some(Box::new(first)),
                         right: Box::new(right),
                     });
+                }
                 }
             }
         }
@@ -3132,9 +3168,16 @@ impl<'a> Parser<'a> {
             // 3-strand, and the QuotePrefix token itself opens a literal.
             Token::QuotePrefix => true,
             Token::Literal(LiteralValue::SymbolValue { .. }) => true,
-            // NOTE: LambdaToken deliberately NOT a strand operand — a lambda is a
-            // FUNCTION and applies to the preceding strand (`1 2 2 {≢⍵}⌸ v`), it
-            // never joins it as data.
+            // A `λ`-reference (`λfoo`, `λ{⍵}`) is a FUNCTION VALUE in strand position:
+            // the oracle strands it as data, e.g. `'a λ{⍵} 'b` -> ⟨a function b⟩,
+            // `5 λ{⍵×2} 10` -> ⟨5 function 10⟩, `1 2 3 λ{+/⍵}` -> ⟨1 2 3 function⟩.
+            // (This is how `output3.kap`'s `map:with 'kap:x λrenderY …` builds a
+            // [symbol, function] pair strand.) A `λ` at statement start still parses
+            // as a function atom that APPLIES (handled by parse_function_atom before
+            // the strand loop), so this only affects λ between two strand elements.
+            // NOTE: this concerns `λ` (LambdaToken). A `{ … }` block (OpenBrace) is a
+            // different token and is NOT a strand operand — it applies (e.g. `1 2 2 {≢⍵}⌸ v`).
+            Token::LambdaToken => true,
             // A bare symbol is a strand operand (so `a c` -> (a c)) UNLESS it names a
             // function — a function symbol in strand position is applied instead.
             Token::Literal(LiteralValue::Symbol { name, namespace }) => {
@@ -5167,6 +5210,16 @@ impl<'a> Parser<'a> {
                         } else {
                             unreachable!()
                         }
+                    }
+                    // `⍞(fnExpr)` — dynamic function reference from a parenthesised
+                    // function expression (oracle: `⍞(+)` yields the `+` function as a
+                    // value). Parse the group as a function expr and return it as a bare
+                    // function atom (the caller's apply loop handles adverbs/applying).
+                    Some(t) if matches!(t.token, Token::OpenParen) => {
+                        self.advance(); // consume (
+                        let inner = self.parse_function_expr()?;
+                        self.expect(Token::CloseParen, "expected ) after ⍞(…)")?;
+                        Ok(inner)
                     }
                     _ => Err(self.err("expected a function name after ⍞")),
                 }

@@ -22,6 +22,7 @@ pub mod ast;
 pub mod parser;
 pub mod evaluator;
 pub mod encoder;
+pub mod map;
 pub mod session;
 
 /// A persistent, REPL-like Kap evaluation context. State (variables, user
@@ -30,6 +31,7 @@ pub use session::Session;
 
 pub use number::KapNumber;
 pub use array::{ArrayData, KapArray};
+pub use map::KapMap;
 
 /// Shared-reference alias for Kap values. Locked per D1: single-threaded `Rc`.
 /// If parallelism is added later (Phase 7), change this one line to `Arc` and
@@ -92,6 +94,10 @@ pub enum APLValue {
         name: String,
         namespace: Option<String>,
     },
+    /// A native Kap hashmap (`APLMap`). Immutable; keyed by value-equal
+    /// (type-discriminating). Created by `map:with`, read by `map:get`, etc.
+    /// See `map.rs` / `builtins/map.kt`.
+    Map(KapMap),
 }
 
 impl APLValue {
@@ -124,6 +130,7 @@ impl APLValue {
             APLValue::UserFn { .. } => "lambda",
             APLValue::UserOp { .. } => "operator",
             APLValue::Symbol { .. } => "symbol",
+            APLValue::Map(_) => "map",
         }
     }
 
@@ -161,6 +168,7 @@ impl APLValue {
                 Some(ns) => format!("{}:{}", ns, name),
                 None => name.clone(),
             },
+            APLValue::Map(m) => format!("map[size={}]", m.len()),
         }
     }
 
@@ -190,6 +198,7 @@ impl APLValue {
                 Some(ns) => format!("{}:{}", ns, name),
                 None => name.clone(),
             },
+            APLValue::Map(m) => format!("map[size={}]", m.len()),
         }
     }
 
@@ -243,6 +252,7 @@ impl APLValue {
                 Some(ns) => format!("{}:{}", ns, name),
                 None => name.clone(),
             },
+            APLValue::Map(m) => format!("map[size={}]", m.len()),
         }
     }
 
@@ -271,6 +281,7 @@ impl APLValue {
                 Some(ns) => format!("{}:{}", ns, name),
                 None => name.clone(),
             },
+            APLValue::Map(m) => format!("map[size={}]", m.len()),
         }
     }
 

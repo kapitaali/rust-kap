@@ -12,6 +12,7 @@ use crate::ast::{SyntaxMacro, Instr, BooleanOpKind};
 use crate::lexer::tokenise;
 use crate::number::{bigint_to_kap, popcount_bigint, KapNumber};
 use crate::parser;
+use crate::map::KapMap;
 use crate::token::{LiteralValue, Token};
 use unicode_segmentation::UnicodeSegmentation;
 use std::cmp::Ordering;
@@ -1187,6 +1188,7 @@ impl Engine {
             APLValue::UserOp { .. } => true,
             APLValue::Deferred { .. } => false,
             APLValue::Symbol { .. } => true,
+            APLValue::Map(_) => true,
         }
     }
 
@@ -1962,6 +1964,103 @@ impl Engine {
                 let v = x.as_long().unwrap_or_else(|_| x.as_double() as i64);
                 KapNumber::Long(if v >= 2 && Self::is_prime_u64(v as u64) { 1 } else { 0 })
             }, "math:isPrime"),
+            // `map:` namespace (builtins/map.kt). Ground truth: `MapWithFunction`,
+            // `MapGetFunction`, `MapRemoveKeysFunction`, `MapKeyValuesFunction`,
+            // `MapSizeFunction`, `MapKeysFunction` registered at engine.kt:355-368.
+            // A map is an `APLValue::Map(KapMap)`. Keys are value-equal +
+            // type-discriminating (Kotlin `makeTypeQualifiedKey`).
+            "map:with" => {
+                // Monadic: build a fresh map from a key-value array (rank-1 even
+                // count, or rank-2 with 2 columns). Dyadic: update map `left` with
+                // pairs `right` (Kotlin eval2Arg: b.size>0 ⇒ updateValues, else a).
+                let pairs = self.map_pairs_from_kv(&right_val)?;
+                match left_val {
+                    None => Ok(Rc::new(APLValue::Map(KapMap::new(pairs)))),
+                    Some(lv) => {
+                        let base = match lv.as_ref() {
+                            APLValue::Map(m) => m.clone(),
+                            _ => return Err(AplError::runtime("map:with: Left argument must be a map".into())),
+                        };
+                        if pairs.is_empty() {
+                            Ok(Rc::new(APLValue::Map(base)))
+                        } else {
+                            Ok(Rc::new(APLValue::Map(base.with_pairs(&pairs))))
+                        }
+                    }
+                }
+            }
+            "map:get" => {
+                // Dyadic: `m map:get key` (explicit left) OR `map:get m key` (the
+                // two operands strand into the right arg — Kap's general `f a b` →
+                // dyadic form). Both resolve to (map, key).
+                let (map, key) = if let Some(lv) = left_val.as_ref() {
+                    match lv.as_ref() {
+                        APLValue::Map(m) => (m.clone(), right_val.force(self)?),
+                        _ => return Err(AplError::runtime("map:get: Left argument must be a map".into())),
+                    }
+                } else {
+                    // Stranded form `map:get m key`: right is a 2-element array.
+                    match right_val.as_ref() {
+                        APLValue::Array(a) if a.dimensions.len() == 1 && a.element_count() == 2 => {
+                            let elems = a.elements();
+                            let m = match elems[0].as_ref() {
+                                APLValue::Map(m) => m.clone(),
+                                _ => return Err(AplError::runtime("map:get: First argument must be a map".into())),
+                            };
+                            (m, elems[1].clone())
+                        }
+                        _ => return Err(AplError::runtime("map:get needs two arguments".into())),
+                    }
+                };
+                match map.lookup(&key) {
+                    Some(v) => Ok(v),
+                    None => Ok(Rc::new(APLValue::Null)),
+                }
+            }
+            "map:remove" => {
+                // Dyadic: `m map:remove keys` (explicit left) OR `map:remove m keys`
+                // (stranded 2-element right: map + key/keys array).
+                let (map, keys) = if let Some(lv) = left_val.as_ref() {
+                    match lv.as_ref() {
+                        APLValue::Map(m) => (m.clone(), self.flat_elements(&right_val.force(self)?)),
+                        _ => return Err(AplError::runtime("map:remove: Left argument must be a map".into())),
+                    }
+                } else {
+                    match right_val.as_ref() {
+                        APLValue::Array(a) if a.dimensions.len() == 1 && a.element_count() == 2 => {
+                            let elems = a.elements();
+                            let m = match elems[0].as_ref() {
+                                APLValue::Map(m) => m.clone(),
+                                _ => return Err(AplError::runtime("map:remove: First argument must be a map".into())),
+                            };
+                            (m, vec![elems[1].clone()])
+                        }
+                        _ => return Err(AplError::runtime("map:remove needs two arguments".into())),
+                    }
+                };
+                Ok(Rc::new(APLValue::Map(map.without(&keys))))
+            }
+            "map:entries" => {
+                let map = match right_val.as_ref() {
+                    APLValue::Map(m) => m.clone(),
+                    _ => return Err(AplError::runtime("map:entries: Argument must be a map".into())),
+                };
+                Ok(Rc::new(map.to_array()))
+            }
+            "map:size" => {
+                let map = match right_val.as_ref() {
+                    APLValue::Map(m) => m.clone(),
+                    _ => return Err(AplError::runtime("map:size: Argument must be a map".into())),
+                };
+                Ok(Rc::new(APLValue::Number(KapNumber::Long(map.len() as i64))))
+            }
+            "map:keys" => {
+                let map = match right_val.as_ref() {
+                    APLValue::Map(m) => m.clone(),
+                    _ => return Err(AplError::runtime("map:keys: Argument must be a map".into())),
+                };
+                Ok(Rc::new(map.keys_array()))
+            }
             // `int:formatRational` (fmt-rational.kt): dyadic only — `decimals f v`
             // renders rational v with `decimals` decimal places, returning the 2-element
             // array [string, exact-flag]. Monadic call errors with Kotlin text.
@@ -3193,6 +3292,9 @@ impl Engine {
                 | "⍣"
                 | "throw"
                 | "int:libInitialised"
+                // Namespaced `map:` natives (builtins/map.kt): admitted via is_known_fn
+                // at parse time; listed here so the eval-time late gate knows them.
+                | "map:with" | "map:get" | "map:remove" | "map:entries" | "map:size" | "map:keys"
 )
  }
 
@@ -8228,6 +8330,9 @@ impl Engine {
             APLValue::Deferred { .. } => {
                 Err(AplError::runtime("cannot use a deferred value as an array element".into()))
             }
+            APLValue::Map(_) => {
+                Err(AplError::runtime("cannot use a map as an array element".into()))
+            }
         }
     }
 
@@ -9590,6 +9695,71 @@ impl Engine {
         match v.as_ref() {
             APLValue::Array(a) => a.elements(),
             other => vec![Rc::new(other.clone())],
+        }
+    }
+
+    /// Build `(key, value)` pairs from a key-value array argument to `map:with`,
+    /// porting Kotlin `ensureKeyValuesArray` + `MapWithFunction.pairsToMapContent`.
+    /// Accepts a rank-1 array with an EVEN element count, or a rank-2 array with
+    /// 2 columns. Each key/value is `collapse`d (a length-1 enclosed array is
+    /// unwrapped) per Kotlin `v.valueAt(..).collapse()`.
+    fn map_pairs_from_kv(&self, v: &AplRef<APLValue>) -> Result<Vec<(Rc<APLValue>, Rc<APLValue>)>, AplError> {
+        let val = v.force(self)?;
+        let arr = match val.as_ref() {
+            APLValue::Array(a) => a,
+            _ => {
+                return Err(AplError::runtime(
+                    "map:with: value should be either a rank-1 array with an even element count or a rank-2 array with 2 columns".into(),
+                ))
+            }
+        };
+        let dims = &arr.dimensions;
+        let elems = arr.elements();
+        let collapse = |e: AplRef<APLValue>| -> Rc<APLValue> {
+            if let APLValue::Array(a) = e.as_ref() {
+                if a.dimensions.is_empty() && a.element_count() == 1 {
+                    return a.elements().into_iter().next().unwrap_or(e);
+                }
+            }
+            e
+        };
+        match dims.len() {
+            1 => {
+                if dims[0] % 2 != 0 {
+                    return Err(AplError::runtime(
+                        "map:with: value should be either a rank-1 array with an even element count or a rank-2 array with 2 columns".into(),
+                    ));
+                }
+                let mut pairs = Vec::with_capacity(dims[0] / 2);
+                let mut i = 0;
+                while i + 1 < elems.len() {
+                    let k = collapse(elems[i].clone());
+                    let val = collapse(elems[i + 1].clone());
+                    pairs.push((k, val));
+                    i += 2;
+                }
+                Ok(pairs)
+            }
+            2 => {
+                if dims[1] != 2 {
+                    return Err(AplError::runtime(
+                        "map:with: value should be either a rank-1 array with an even element count or a rank-2 array with 2 columns".into(),
+                    ));
+                }
+                let cols = dims[0];
+                let mut pairs = Vec::with_capacity(cols);
+                let mut i = 0;
+                while i + 1 < elems.len() {
+                    let k = collapse(elems[i].clone());
+                    let val = collapse(elems[i + 1].clone());
+                    pairs.push((k, val));
+                    i += 2;
+                }
+                Ok(pairs)
+            }
+            _ => Err(AplError::runtime(
+                "map:with: value should be either a rank-1 array with an even element count or a rank-2 array with 2 columns".into(),
+            )),
         }
     }
 

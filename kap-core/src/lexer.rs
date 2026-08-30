@@ -61,13 +61,14 @@ pub fn tokenise(src: &str) -> Vec<SpannedToken> {
                 i += 1;
                 col += 1;
             }
-            // Emit a Newline token so the continuation joins the current statement
-            // (skipped by the parser between operands, not a statement separator).
-            out.push(SpannedToken {
-                token: Token::Newline,
-                line: start_line,
-                col: start_col,
-            });
+            // A backtick line-continuation joins the next line INTO the current
+            // statement with NO separator token (Kotlin's lexer strips the backtick
+            // and joins the source lines, so `f ` \n 'x` becomes `f 'x` — the operand
+            // attaches directly). Emitting a Newline here (a prior approach) broke
+            // operand attachment: `map:with ` \n "a" 1` parsed `map:with` as a bare
+            // VALUE instead of an application. By emitting nothing, the continued
+            // tokens are adjacent just like an inline `map:with "a" 1`.
+            continue;
         }
         // character literal: @...
         if c == '@' {
