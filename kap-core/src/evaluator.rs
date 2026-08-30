@@ -5018,20 +5018,23 @@ impl Engine {
                 _ => specs.push(DimSpec::Fixed(*v)),
             },
             // Kotlin reshape.kt:249-257 — an empty (rank-1, size-0) left shape (`⍬`)
-            // returns the first element of the right arg, enclosed.
+            // returns the first element of the *arrayified* right arg, enclosed exactly
+            // ONCE via `EnclosedAPLValue.make`. `arrayify()` raises a scalar to a 1-D
+            // array (so `⍬⍴5 → 5`, depth 0) and `valueAt(0)` then discloses the box for
+            // an enclosed right arg (so `⍬⍴⊂1 2 3 → (1 2 3)`, depth 1 — NOT double-boxed).
+            // Mimic that by returning the element at position 0 of `arrayify(b)` without
+            // adding any further boxing.
             APLValue::Null => {
                 let b = right_val.force(self)?;
-                // Kotlin reshape.kt:249-257 — an empty left shape (`⍬`) returns the
-                // first element of the right arg, enclosed. If the right arg is itself
-                // empty/Null, the default value (0) is used. An atomic element is
-                // returned as a scalar (depth 0), matching `⊂`/enclose (oracle
-                // `⍬⍴5 → 5`, depth 0).
                 let first: Rc<APLValue> = match b.as_ref() {
                     APLValue::Array(a) if a.element_count() == 0 => {
                         Rc::new(APLValue::Number(KapNumber::Long(0)))
                     }
                     APLValue::Null => Rc::new(APLValue::Number(KapNumber::Long(0))),
                     _ => {
+                        // Mirror Kotlin `arrayify(b).valueAt(0)`: a scalar becomes a
+                        // 1-element array first, then we take element 0 (which for an
+                        // enclosed value is the inner value disclosed once).
                         let b_arr = match b.as_ref() {
                             APLValue::Array(a) => a.elements(),
                             other => vec![Rc::new(other.clone())],
@@ -5039,17 +5042,7 @@ impl Engine {
                         b_arr[0].clone()
                     }
                 };
-                match first.as_ref() {
-                    APLValue::Number(_) | APLValue::Char(_) | APLValue::Null => {
-                        return Ok(first)
-                    }
-                    _ => {
-                        return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                            vec![],
-                            ArrayData::Nested(vec![first]),
-                        )))))
-                    }
-                }
+                return Ok(first);
             }
             APLValue::Str(s) => {
                 // A string as a reshape shape means its length as a single dimension
