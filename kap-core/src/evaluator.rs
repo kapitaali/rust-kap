@@ -5271,7 +5271,23 @@ impl Engine {
                         ArrayData::Nested(elems),
                     )))));
                 }
-                // Higher rank: use join_by_axis (Kotlin joinByAxis, :188).
+                // Higher rank: use join_by_axis (Kotlin joinByAxis, :188). Kotlin
+                // promotes a lower-rank argument by inserting a length-1 axis at the
+                // concatenation axis so the two arrays share rank before joining
+                // (concatenate-array.kt:236-247). The port mirrors that here so a
+                // whole-array concat against a rank-1 argument extends rather than errors.
+                let a = if b_dims.len() == a_dims.len() + 1 {
+                    self.reshape_insert_axis(&a, default_axis)?
+                } else {
+                    a
+                };
+                let b = if a_dims.len() == b_dims.len() + 1 {
+                    self.reshape_insert_axis(&b, default_axis)?
+                } else {
+                    b
+                };
+                let a_dims = a.dimensions();
+                let b_dims = b.dimensions();
                 self.join_by_axis(
                     &a.elements(),
                     &a_dims,
@@ -5392,6 +5408,24 @@ impl Engine {
             &b_dims,
             na,
         )
+    }
+
+    /// Insert a length-1 axis at `axis` in `v`, reshaping its elements in place
+    /// (Kotlin `joinByAxis` :236-247 `makeResizedArray(a1.dimensions.insert(axis, 1), a1)`).
+    /// The element sequence is unchanged because the new axis has length 1.
+    fn reshape_insert_axis(
+        &self,
+        v: &AplRef<APLValue>,
+        axis: usize,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let dims = v.dimensions();
+        let mut new_dims = dims.to_vec();
+        new_dims.insert(axis, 1);
+        let elems = v.elements();
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            new_dims,
+            ArrayData::Nested(elems),
+        )))))
     }
 
     /// Concatenate two arrays of equal rank along `axis` (Kotlin `joinByAxis`). Dims must

@@ -484,6 +484,12 @@ fn curated_kap_parity() {
         ("((2 3⍴⍳6),[0.5]9)[;1]", "(9 9 9 9 9 9)"),
         // Error rows (harness cannot assert): 1 ,[0.5] 2 -> ",: Both arguments
         // are scalar"; m,[3]m+10 -> "Axis 3 is not valid. Expected: 2".
+        // Default-axis whole-array extension (Kotlin joinByAxis :236-247): a lower-rank
+        // argument is promoted by inserting a length-1 axis at the concat axis, so a
+        // rank-2 against a rank-1 extends rather than errors. Oracle-verified 2026-08-30.
+        ("(2 2⍴⍳4) , 10 20", "(0 1 10 2 3 20)"),
+        ("(2 2⍴⍳4) , 5", "(0 1 5 2 3 5)"),
+        ("⍴ (2 2⍴⍳4) , 10 20", "(2 3)"),
         // Indexing into a string (bracket indexing) — returns char scalars.
         ("\"abcdef\"[2]", "@c"),
         ("\"abcdef\"[0 2]", "\"ac\""),
