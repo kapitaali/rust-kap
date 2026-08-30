@@ -866,6 +866,9 @@ fn curated_kap_parity() {
         ("≡,5", "1"),
         ("≡⊂,5", "2"),
         ("≡ 1 2 3", "1"),
+        // Multi-enclose keeps adding a depth level for non-scalars (was 2, oracle 3).
+        ("≡⊂⊂ 1 2 3", "3"),
+        ("≡⊂⊂ 5", "0"),
         // --- `⊂` enclose: primitive returns unchanged, non-primitive becomes 0-d box ---
         ("⊂5", "5"),
         ("⍴⊂5", "()"),

@@ -6658,13 +6658,14 @@ impl Engine {
 
     fn enclose(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
         let v = right_val.force(self)?;
-        // Enclose: a primitive value (scalar number, char, string, null) is returned
-        // *unchanged* — its depth stays 0 and it does not become a box. A non-primitive
-        // value (array) becomes a 0-dimensional array containing the value. Mirrors
-        // Kap's `EncloseAPLFunction`. So `⊂5 → 5` and `≡⊂5 → 0`, while `,5` (a 1-element
-        // vector) is non-primitive and `⊂,5` is a 0-D box of depth 2.
+        // Enclose (Kotlin EncloseAPLFunction.eval1Arg → EnclosedAPLValue.make):
+        // a value is wrapped into a 0-dimensional array UNLESS it is already a
+        // genuine scalar (number/char/null). A string (rank-1) and any array or
+        // rank-0 box are wrapped — enclosing an enclosed value adds a level
+        // (oracle: `≡⊂⊂1 2 3` → 3, `≡⊂⊂"abc"` → 3). Only atoms pass through
+        // unchanged (`⊂5 → 5`, `≡⊂⊂5 → 0`).
         match v.as_ref() {
-            APLValue::Number(_) | APLValue::Char(_) | APLValue::Str(_) | APLValue::Null => Ok(v),
+            APLValue::Number(_) | APLValue::Char(_) | APLValue::Null => Ok(v),
             _ => Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
                 vec![],
                 ArrayData::Nested(vec![v]),
@@ -9476,6 +9477,10 @@ impl Engine {
                 }
                 max + 1
             }
+            // A string is a rank-1 array of chars, so its depth is 1 (oracle:
+            // `≡"abc"` → 1, `≡⊂"abc"` → 2). Only genuine scalars (number/char)
+            // have depth 0.
+            APLValue::Str(_) => 1,
             _ => 0,
         }
     }
