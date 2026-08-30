@@ -2429,6 +2429,29 @@ impl Engine {
                 // 1 for the first occurrence of each distinct element, else 0.
                 None => {
                     let v = right_val.force(self)?;
+                    // Kotlin NotEqualsAPLFunction.eval1Arg: when rank > 1, the
+                    // mask is over MAJOR CELLS (trailing rank-1 dims), not raveled
+                    // elements. `≠ 3 2⍴…` → 3 cells → length-3 mask.
+                    let dims = v.dimensions();
+                    if dims.len() > 1 {
+                        let (frame, cell_dims, elems) = self.split_major_cells(&v)?;
+                        let cell_size: usize = cell_dims.iter().product::<usize>().max(1);
+                        let cells: Vec<Vec<AplRef<APLValue>>> =
+                            elems.chunks(cell_size).map(|c| c.to_vec()).collect();
+                        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                        let mut out: Vec<i64> = Vec::with_capacity(cells.len());
+                        for cell in &cells {
+                            let key = self.cell_key(cell);
+                            let first = seen.insert(key);
+                            out.push(if first { 1 } else { 0 });
+                        }
+                        let mut mdims = frame.clone();
+                        mdims.push(out.len());
+                        return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                            mdims,
+                            ArrayData::Long(out),
+                        )))));
+                    }
                     let elems: Vec<AplRef<APLValue>> = match v.as_ref() {
                         APLValue::Array(a) => a.elements(),
                         APLValue::Str(s) => {
@@ -10633,6 +10656,52 @@ impl Engine {
             }
             return Ok(Rc::new(APLValue::Str(out)));
         }
+        // Kotlin GenericIntersectionUnionFunctionImpl.eval2Arg (unique.kt:6-56):
+        // if either arg's collapsed rank > 1, operate over MAJOR CELLS (trailing
+        // rank-1 dimensions) and re-disclose; otherwise arrayify and union as
+        // vectors. The rank-1 path is just `members_of` of the arrayified args.
+        let l_dims = l.dimensions();
+        let r_dims = r.dimensions();
+        if l_dims.len() > 1 || r_dims.len() > 1 {
+            // Split each arg into major cells: leading dims form the frame, the
+            // trailing (rank-1) dims form each cell's shape.
+            let (l_frame, l_cell_dims, l_elems) = self.split_major_cells(&l)?;
+            let (_r_frame, r_cell_dims, r_elems) = self.split_major_cells(&r)?;
+            // Kotlin unique.kt:20-40 — the leading axis (frame) may differ, but
+            // every major cell must have the SAME trailing shape on both sides.
+            // Otherwise throw the exact dimensions error (∩ uses the same text).
+            if l_cell_dims != r_cell_dims {
+                return Err(AplError::runtime(format!(
+                    "∪: All but the first axis needs to have the same dimensions. Ranks: A={:?}, B={:?}",
+                    l_dims, r_dims
+                )));
+            }
+            // Cells are equal only when their shapes AND contents match.
+            let l_cell_size: usize = l_cell_dims.iter().product::<usize>().max(1);
+            let r_cell_size: usize = r_cell_dims.iter().product::<usize>().max(1);
+            let l_cells: Vec<Vec<AplRef<APLValue>>> = l_elems.chunks(l_cell_size).map(|c| c.to_vec()).collect();
+            let r_cells: Vec<Vec<AplRef<APLValue>>> = r_elems.chunks(r_cell_size).map(|c| c.to_vec()).collect();
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut out: Vec<AplRef<APLValue>> = Vec::new();
+            for cell in &l_cells {
+                let key = self.cell_key(cell);
+                seen.insert(key);
+                out.push(self.make_cell(l_cell_dims.clone(), cell)?);
+            }
+            for cell in &r_cells {
+                let key = self.cell_key(cell);
+                if seen.insert(key) {
+                    out.push(self.make_cell(l_cell_dims.clone(), cell)?);
+                }
+            }
+            // Re-disclose: frame dims × number of result cells.
+            let mut dims = l_frame.clone();
+            dims.push(out.len());
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                dims,
+                ArrayData::Nested(out),
+            )))));
+        }
         let a = self.members_of(&l);
         let b = self.members_of(&r);
         let mut seen = std::collections::HashSet::new();
@@ -10652,6 +10721,56 @@ impl Engine {
             vec![out.len()],
             ArrayData::Nested(out),
         )))))
+    }
+
+    /// Split a value into its major cells: returns (frame_dims, cell_dims, flat_elems).
+    /// Mirrors Kotlin `AxisMultiDimensionEnclosedValue(a, rank-1)`: the trailing
+    /// (rank-1) dimensions are the cell shape, the leading dimensions the frame.
+    fn split_major_cells(
+        &self,
+        v: &AplRef<APLValue>,
+    ) -> Result<(Vec<usize>, Vec<usize>, Vec<AplRef<APLValue>>), AplError> {
+        let dims = v.dimensions();
+        let elems = v.elements();
+        let rank = dims.len();
+        let cell_dims = if rank >= 1 { dims[1..].to_vec() } else { vec![] };
+        let frame = if rank >= 1 { dims[..1].to_vec() } else { vec![] };
+        Ok((frame, cell_dims, elems))
+    }
+
+    /// Cell dims of a value (helper for the union major-cell path).
+    fn r_cell_dims_(v: &AplRef<APLValue>) -> Vec<usize> {
+        let dims = v.dimensions();
+        let rank = dims.len();
+        if rank >= 1 { dims[1..].to_vec() } else { vec![] }
+    }
+
+    /// Type-qualified key for a whole cell (shape + contents), used to decide
+    /// cell uniqueness in `∪`/`∩` major-cell paths.
+    fn cell_key(&self, cell: &[AplRef<APLValue>]) -> String {
+        let mut s = String::new();
+        for e in cell {
+            s.push_str(&Self::type_qualified_key(e.as_ref()));
+            s.push('|');
+        }
+        s
+    }
+
+    /// Rebuild a nested cell value from its dims + elements.
+    fn make_cell(
+        &self,
+        cell_dims: Vec<usize>,
+        cell: &[AplRef<APLValue>],
+    ) -> Result<AplRef<APLValue>, AplError> {
+        if cell_dims.is_empty() {
+            // rank-0 cell: a single element.
+            Ok(cell.first().cloned().unwrap_or_else(|| Rc::new(APLValue::Null)))
+        } else {
+            Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                cell_dims,
+                ArrayData::Nested(cell.to_vec()),
+            )))))
+        }
     }
 
     /// `∩`: dyadic intersection. Faithful to Kotlin `IntersectionAPLFunction`.
