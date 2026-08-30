@@ -2467,7 +2467,7 @@ impl Engine {
                 None => self.tally(right_val),
                 Some(l) => {
                     let eq =
-                        Self::type_equal(l.force(self)?.as_ref(), right_val.force(self)?.as_ref());
+                        Self::total_equal(l.force(self)?.as_ref(), right_val.force(self)?.as_ref());
                     Ok(Rc::new(APLValue::Number(KapNumber::Long(if eq {
                         0
                     } else {
@@ -2527,7 +2527,7 @@ impl Engine {
             "|" | "mod" => match left_val {
                 None => self.scalar1(
                     right_val,
-                    |x| match x.numeric_cmp(&KapNumber::Long(0)) {
+                    |x| match x.numeric_cmp(&KapNumber::Long(0), false) {
                         Ok(std::cmp::Ordering::Less) => x.neg(),
                         _ => x.clone(),
                     },
@@ -4375,8 +4375,19 @@ impl Engine {
         sym: &str,
     ) -> Result<AplRef<APLValue>, AplError> {
         let a = left_val.ok_or_else(|| AplError::runtime(format!("{} needs two args", sym)))?;
+        // `=`/`≠` use value-equality (Kotlin `numericCompareEquals` / `compareEqualsComplexToSingleValue`):
+        // a complex with im≠0 only equals an identical complex, and never errors. The
+        // ordering operators (`<`/`>`/`≤`/`≥`) throw on complex via `numeric_cmp`.
+        if matches!(sym, "=" | "≠") {
+            let eq = match (a.as_ref(), right_val.as_ref()) {
+                (APLValue::Number(x), APLValue::Number(y)) => Self::numbers_value_equal(x, y),
+                _ => return Err(AplError::runtime(format!("{} requires numbers", sym))),
+            };
+            let r = if (sym == "=") == eq { 1 } else { 0 };
+            return Ok(Rc::new(APLValue::Number(KapNumber::Long(r))));
+        }
         let ord = match (a.as_ref(), right_val.as_ref()) {
-            (APLValue::Number(x), APLValue::Number(y)) => x.numeric_cmp(y).map_err(|e| {
+            (APLValue::Number(x), APLValue::Number(y)) => x.numeric_cmp(y, false).map_err(|e| {
                 AplError::runtime(e)
             })?,
             _ => {
@@ -4413,7 +4424,12 @@ impl Engine {
         let cmp_cells = |x: &APLValue, y: &APLValue| -> Option<bool> {
             match (x, y) {
                 (APLValue::Number(a), APLValue::Number(b)) => {
-                    a.numeric_cmp(b).ok().map(|o| pred(o))
+                    if matches!(sym, "=" | "≠") {
+                        // Value equality: complex never errors (mirrors Kotlin `numericCompareEquals`).
+                        Some(Self::numbers_value_equal(a, b) == (sym == "="))
+                    } else {
+                        a.numeric_cmp(b, false).ok().map(|o| pred(o))
+                    }
                 }
                 // Char-vs-char compares by codepoint; char-vs-number is an
                 // incompatible-type error in Kotlin (`< requires numbers`-class).
@@ -4538,13 +4554,14 @@ impl Engine {
         let b = right_val.force(self)?;
         let ord = match (a.as_ref(), b.as_ref()) {
             (APLValue::Number(x), APLValue::Number(y)) => {
-                x.numeric_cmp(y).map_err(|e| AplError::runtime(e))?
+                // `cmp` uses type discrimination (Kotlin CompareObjectsFunction).
+                // `number_ordering` mirrors compareTotalOrdering: never errors on complex
+                // (a complex with im≠0 sorts by type position after Double).
+                KapNumber::number_ordering(x, y)
             }
-            (APLValue::Char(x), APLValue::Char(y)) => x.cmp(y),
-            // String vs String: lexicographic by codepoint (Real Kap `compareTotalOrdering`).
-            (APLValue::Str(x), APLValue::Str(y)) => x.cmp(y),
-            // Cross-kind (e.g. Number vs Str): defer to the general total-ordering rule,
-            // which orders number < char < string < null and compares equal kinds by value.
+            // Char vs Char, Str vs Str, Array vs Array, List vs List, and all cross-kind
+            // comparisons defer to the faithful total-ordering rule (td=true), which
+            // handles rank-first array compare and Kap's typeSortOrder.
             _ => match a.total_cmp(b.as_ref()) {
                 Some(o) => o,
                 None => {
@@ -9409,7 +9426,7 @@ impl Engine {
             }
             Some(l) => {
                 let eq =
-                    Self::type_equal(l.force(self)?.as_ref(), right_val.force(self)?.as_ref());
+                    Self::total_equal(l.force(self)?.as_ref(), right_val.force(self)?.as_ref());
                 Ok(Rc::new(APLValue::Number(KapNumber::Long(if eq {
                     1
                 } else {
@@ -9444,6 +9461,34 @@ impl Engine {
     /// (which are value-equal and merge numeric kinds), `≡` requires the *same type*. So
     /// `10 ≡ 10.0` is 0 (Long vs Double), `(1 2) ≡ (1 2.0)` is 0. Primitive kinds (number/
     /// char/string/null/symbol) must also match exactly; arrays compare shape + element-wise.
+    /// Type-discriminating match (`≡`/`≢`): `1` iff `a` and `b` are deeply equal with
+    /// their exact Kap types, i.e. `compareEqualsTotalOrdering(td=true)` is true. Unlike
+    /// `type_equal` (which does plain kind+value equality and collapses `-0.0`/`0.0`),
+    /// this routes through `total_cmp(td=true)` so that `¯0.0 ≡ 0.0` is `0` (oracle).
+    fn total_equal(a: &APLValue, b: &APLValue) -> bool {
+        match (a, b) {
+            (APLValue::Number(x), APLValue::Number(y)) => {
+                KapNumber::number_ordering(x, y) == Ordering::Equal
+            }
+            (APLValue::Char(x), APLValue::Char(y)) => x == y,
+            (APLValue::Str(x), APLValue::Str(y)) => x == y,
+            (APLValue::Null, APLValue::Null) => true,
+            (APLValue::Symbol { name: n1, namespace: ns1 }, APLValue::Symbol { name: n2, namespace: ns2 }) => {
+                n1 == n2 && ns1 == ns2
+            }
+            (APLValue::Array(x), APLValue::Array(y)) | (APLValue::List(x), APLValue::List(y)) => {
+                if x.dimensions != y.dimensions {
+                    return false;
+                }
+                let xe = x.elements();
+                let ye = y.elements();
+                xe.len() == ye.len()
+                    && xe.iter().zip(ye.iter()).all(|(p, q)| Self::total_equal(p.as_ref(), q.as_ref()))
+            }
+            _ => false,
+        }
+    }
+
     fn type_equal(a: &APLValue, b: &APLValue) -> bool {
         match (a, b) {
             (APLValue::Number(x), APLValue::Number(y)) => {
@@ -9483,7 +9528,16 @@ impl Engine {
     /// (value-equal; numeric kinds merged) — NOT by `≡`/`≢` which use `type_equal`.
     fn deep_equal(a: &APLValue, b: &APLValue) -> bool {
         match (a, b) {
-            (APLValue::Number(x), APLValue::Number(y)) => x.numeric_cmp(y).map(|o| o == Ordering::Equal).unwrap_or(false),
+            (APLValue::Number(x), APLValue::Number(y)) => {
+                // Value-level equality (td=false), mirroring Kotlin's `compareEquals`
+                // which delegates complex handling to `compareEqualsComplexToSingleValue`:
+                // a complex with non-zero imaginary only equals an identical complex.
+                match (x, y) {
+                    (KapNumber::Complex(ar, ai), KapNumber::Complex(br, bi)) => ar == br && ai == bi,
+                    (KapNumber::Complex(_, ai), _) | (_, KapNumber::Complex(_, ai)) if *ai != 0.0 => false,
+                    _ => x.numeric_cmp(y, false).map_or(false, |o| o == Ordering::Equal),
+                }
+            }
             (APLValue::Char(x), APLValue::Char(y)) => x == y,
             (APLValue::Str(x), APLValue::Str(y)) => x == y,
             (APLValue::Null, APLValue::Null) => true,
@@ -9503,6 +9557,19 @@ impl Engine {
                         .all(|(p, q)| Self::deep_equal(p.as_ref(), q.as_ref()))
             }
             _ => false,
+        }
+    }
+
+    /// Value equality for two `KapNumber`s mirroring Kotlin `numericCompareEquals` /
+    /// `compareEqualsComplexToSingleValue` (used by `=`/`≠`, `typeDiscrimination=false`):
+    /// a complex with non-zero imaginary only equals an identical complex; otherwise both
+    /// are value-compared (which merges numeric kinds). Never errors — unlike `numeric_cmp`
+    /// which throws on an im≠0 complex.
+    fn numbers_value_equal(x: &KapNumber, y: &KapNumber) -> bool {
+        match (x, y) {
+            (KapNumber::Complex(ar, ai), KapNumber::Complex(br, bi)) => ar == br && ai == bi,
+            (KapNumber::Complex(_, ai), _) | (_, KapNumber::Complex(_, ai)) if *ai != 0.0 => false,
+            _ => x.numeric_cmp(y, false).map_or(false, |o| o == Ordering::Equal),
         }
     }
 
@@ -9901,7 +9968,7 @@ impl Engine {
                 sym, lt
             )));
         }
-        self.num2(left_val, right_val, |a, b| match a.numeric_cmp(&b) {
+        self.num2(left_val, right_val, |a, b| match a.numeric_cmp(&b, false) {
             // Ceiling (`⌈`): keep the larger. Floor (`⌊`): keep the smaller.
             Ok(Ordering::Greater) => if ceil { a.clone() } else { b.clone() },
             Ok(_) => if ceil { b.clone() } else { a.clone() },

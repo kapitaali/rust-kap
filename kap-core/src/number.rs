@@ -107,33 +107,255 @@ impl KapNumber {
         !self.is_zero()
     }
 
-    /// Total-order comparison across number kinds, mirroring `number.kt`'s `numericCompare`.
-    /// Complex values are NOT orderable → returns `Err` (Kap throws
-    /// `APLArgumentComplexOrderingException`).
-    pub fn numeric_cmp(&self, other: &KapNumber) -> Result<Ordering, String> {
+    /// Numeric value as an exact `BigRational` (Long/BigInt -> denominator 1;
+    /// Double -> `double_to_rational`; Complex -> real part only).
+    pub fn as_rational(&self) -> BigRational {
+        match self {
+            KapNumber::Long(v) => BigRational::new(num_bigint::BigInt::from(*v), num_bigint::BigInt::from(1)),
+            KapNumber::BigInt(v) => BigRational::new(v.clone(), num_bigint::BigInt::from(1)),
+            KapNumber::Rational(v) => v.clone(),
+            KapNumber::Double(v) => Self::double_to_rational(*v),
+            KapNumber::Complex(re, _) => BigRational::new(num_bigint::BigInt::from(*re as i64), num_bigint::BigInt::from(1)),
+        }
+    }
+
+    /// Numeric value as `num_bigint::BigInt` (Long -> BigInt; BigInt -> self).
+    pub fn as_bigint(&self) -> num_bigint::BigInt {
+        match self {
+            KapNumber::Long(v) => num_bigint::BigInt::from(*v),
+            KapNumber::BigInt(v) => v.clone(),
+            _ => unreachable!("as_bigint called on non-integral number"),
+        }
+    }
+
+    /// Convert a finite Double to a `BigRational` exactly, mirroring Kotlin
+    /// `Double.rationalise()`. Uses the IEEE-754 bit pattern (sign, biased exponent,
+    /// mantissa) so a value like `1.6` becomes exactly `8/5`, not a lossy f64 ratio.
+    fn double_to_rational(v: f64) -> BigRational {
+        if v.is_infinite() || v.is_nan() {
+            return BigRational::new(num_bigint::BigInt::from(0), num_bigint::BigInt::from(1));
+        }
+        let bits = v.to_bits();
+        let sign = if bits >> 63 == 1 { -1i64 } else { 1i64 };
+        let exp_biased = ((bits >> 52) & 0x7ff) as i32;
+        let mant = bits & 0xfffffffffffff; // 52-bit fraction
+        let (numer, denom): (num_bigint::BigInt, num_bigint::BigInt) =
+            if exp_biased == 0 {
+                // subnormal: value = ±(mant) * 2^(-1074)
+                (num_bigint::BigInt::from(sign) * num_bigint::BigInt::from(mant), num_bigint::BigInt::from(1) << 1074)
+            } else {
+                let exp = exp_biased - 1075; // unbiased exponent for the (1+mant/2^52) form
+                let top = num_bigint::BigInt::from(1) << 52 | num_bigint::BigInt::from(mant);
+                let (n, d) = if exp >= 0 {
+                    (num_bigint::BigInt::from(sign) * top * (num_bigint::BigInt::from(1) << exp), num_bigint::BigInt::from(1))
+                } else {
+                    (num_bigint::BigInt::from(sign) * top, num_bigint::BigInt::from(1) << (-exp))
+                };
+                (n, d)
+            };
+        BigRational::new(numer, denom)
+    }
+
+    /// Total-order comparison across number kinds, mirroring `number.kt`'s
+    /// `numericCompare(reference, typeDiscrimination)`.
+    ///
+    /// When `type_discrimination` is true (used by `cmp`/`≡`/`≢`/`⍒⍋`), a numeric tie is
+    /// broken by the *type*: `-0.0` sorts before `0`/`0.0`, and an equal-but-different-kind
+    /// comparison returns `-1`. When false (used by `=`/`≠`/`<`/`>`), value equality wins
+    /// so `10 = 10.0` and `0.5 = 1r2` are both true.
+    ///
+    /// Complex values with non-zero imaginary are NOT orderable → returns `Err` (Kap
+    /// throws `APLArgumentComplexOrderingException`).
+    pub fn numeric_cmp(
+        &self,
+        other: &KapNumber,
+        type_discrimination: bool,
+    ) -> Result<Ordering, String> {
         use KapNumber::*;
         // Complex with non-zero imaginary is not orderable.
-        if self.is_complex() || other.is_complex() {
+        if (self.is_complex() && self.as_complex().1 != 0.0) || (other.is_complex() && other.as_complex().1 != 0.0) {
             return Err("complex numbers are not orderable".to_string());
         }
-        // Compare by converting both to BigRational when possible; fall back to f64.
-        let to_rat = |n: &KapNumber| -> Option<BigRational> {
-            match n {
-                Long(v) => Some(BigRational::new(num_bigint::BigInt::from(*v), num_bigint::BigInt::from(1))),
-                BigInt(v) => Some(BigRational::new(v.clone(), num_bigint::BigInt::from(1))),
-                Rational(v) => Some(v.clone()),
-                // Double/Complex: fall through to f64 comparison below.
-                Double(_) | Complex(..) => None,
+        // Normalize any complex with zero imaginary to its real part for ordering.
+        let a = match self {
+            Complex(re, 0.0) => Double(*re),
+            other => other.clone(),
+        };
+        let b = match other {
+            Complex(re, 0.0) => Double(*re),
+            other => other.clone(),
+        };
+        // Delegate Long/BigInt/Rational/Double per the Kotlin `numericCompare` switch.
+        let res = match (&a, &b) {
+            (Long(x), Long(y)) => x.cmp(y),
+            (Long(x), BigInt(y)) => num_bigint::BigInt::from(*x).cmp(y),
+            (Long(x), Rational(y)) => BigRational::new(num_bigint::BigInt::from(*x), num_bigint::BigInt::from(1)).cmp(y),
+            (Long(x), Double(y)) => Self::cmp_double_long(*y, *x, type_discrimination).reverse(),
+            (BigInt(x), Long(y)) => x.cmp(&num_bigint::BigInt::from(*y)),
+            (BigInt(x), BigInt(y)) => x.cmp(y),
+            (BigInt(x), Rational(y)) => BigRational::new(x.clone(), num_bigint::BigInt::from(1)).cmp(y),
+            (BigInt(x), Double(y)) => Self::cmp_double_bigint(*y, x, type_discrimination).reverse(),
+            (Rational(x), Long(y)) => x.cmp(&BigRational::new(num_bigint::BigInt::from(*y), num_bigint::BigInt::from(1))),
+            (Rational(x), BigInt(y)) => x.cmp(&BigRational::new(y.clone(), num_bigint::BigInt::from(1))),
+            (Rational(x), Rational(y)) => x.cmp(y),
+            (Rational(x), Double(y)) => Self::cmp_double_rational(*y, x, type_discrimination).reverse(),
+            (Double(x), Long(y)) => Self::cmp_double_long(*x, *y, type_discrimination),
+            (Double(x), BigInt(y)) => Self::cmp_double_bigint(*x, y, type_discrimination),
+            (Double(x), Rational(y)) => Self::cmp_double_rational(*x, y, type_discrimination),
+            (Double(x), Double(y)) => {
+                if type_discrimination {
+                    x.total_cmp(y)
+                } else if x < y {
+                    Ordering::Less
+                } else if x > y {
+                    Ordering::Greater
+                } else {
+                    Ordering::Equal
+                }
+            }
+            _ => {
+                return Err("complex numbers are not orderable".to_string());
             }
         };
-        match (to_rat(self), to_rat(other)) {
-            (Some(a), Some(b)) => Ok(a.cmp(&b)),
-            _ => {
-                // At least one side is Double; compare as f64.
-                let a = self.as_double();
-                let b = other.as_double();
-                a.partial_cmp(&b).ok_or_else(|| "NaN in comparison".to_string())
+        // Type discrimination is handled entirely inside the per-kind arms below
+        // (each `cmp_double_*` returns `Less` on a td-tie, and the `(Long|BigInt|
+        // Rational, Double)` arms negate that result to mirror Kotlin's `-compareDoubleTo*`)
+        // — so no extra post-hoc flip is needed here.
+        Ok(res)
+    }
+
+    /// Kap numeric type sort position (Kotlin `typeSortOrder`): Long=0, BigInt=1,
+    /// Rational=2, Double=3, Complex=4.
+    fn type_position(&self) -> usize {
+        match self {
+            KapNumber::Long(_) => 0,
+            KapNumber::BigInt(_) => 1,
+            KapNumber::Rational(_) => 2,
+            KapNumber::Double(_) => 3,
+            KapNumber::Complex(_, _) => 4,
+        }
+    }
+
+    /// True when this number can be value-compared (Kotlin `numericCompareValid`):
+    /// finite, and a complex only when its imaginary part is zero.
+    fn numeric_compare_valid(&self) -> bool {
+        match self {
+            KapNumber::Complex(_, im) => *im == 0.0,
+            KapNumber::Double(d) => d.is_finite(),
+            _ => true,
+        }
+    }
+
+    /// Total-ordering comparison between two `KapNumber`s, mirroring Kotlin's
+    /// `compareTotalOrdering` (used by `cmp` and `≡`/`≢` with typeDiscrimination=true).
+    ///
+    /// Kotlin short-circuits when *both* operands are `numericCompareValid`; a complex with
+    /// non-zero imaginary is **not** valid, which makes the pair fall through to the
+    /// type-position branch (Complex=4, after Double=3) — so `2j3 cmp 1` → Greater and
+    /// `cmp` never errors on complex. Only complex-vs-complex goes through component
+    /// comparison (`compareSameType`). The `numeric_cmp` helper above is the value-level
+    /// compare and must not be called for an invalid (im≠0) complex here.
+    pub fn number_ordering(a: &KapNumber, b: &KapNumber) -> Ordering {
+        let a_valid = a.numeric_compare_valid();
+        let b_valid = b.numeric_compare_valid();
+        if a_valid && b_valid {
+            if let Ok(o) = a.numeric_cmp(b, true) {
+                return o;
             }
+        }
+        if let (KapNumber::Complex(ar, ai), KapNumber::Complex(br, bi)) = (a, b) {
+            // compareSameType for complex: imag first, then real (NaN-aware).
+            let im = Self::cmp_doubles_nan(*ai, *bi);
+            if im != Ordering::Equal {
+                return im;
+            }
+            return Self::cmp_doubles_nan(*ar, *br);
+        }
+        // Distinct kinds (or an invalid complex) → by Kap type sort position
+        // (Long=0, BigInt=1, Rational=2, Double=3, Complex=4).
+        a.type_position().cmp(&b.type_position())
+    }
+
+    /// NaN-aware double compare matching Kotlin `compareDoublesNaNAware`.
+    fn cmp_doubles_nan(a: f64, b: f64) -> Ordering {
+        if a.is_nan() {
+            if b.is_nan() {
+                Ordering::Equal
+            } else {
+                Ordering::Greater
+            }
+        } else if b.is_nan() {
+            Ordering::Less
+        } else {
+            a.total_cmp(&b)
+        }
+    }
+
+    /// Whether two numbers are of exactly the same Kap numeric kind.
+    fn same_kind(a: &KapNumber, b: &KapNumber) -> bool {
+        matches!((a, b),
+            (KapNumber::Long(_), KapNumber::Long(_))
+            | (KapNumber::Double(_), KapNumber::Double(_))
+            | (KapNumber::BigInt(_), KapNumber::BigInt(_))
+            | (KapNumber::Rational(_), KapNumber::Rational(_)))
+    }
+
+    /// `Double` (a) vs `Long` (b): mirrors Kotlin `compareDoubleToLong`.
+    /// The td-tiebreak (`res==0 && !sameKind → Less`) is applied uniformly to both
+    /// the integer path and the rational path; the `-0.0` vs `0` case is handled
+    /// explicitly first because casting `-0.0` to `i64` yields `0` and would tie.
+    fn cmp_double_long(a: f64, b: i64, td: bool) -> Ordering {
+        if !a.is_finite() {
+            return if a > 0.0 { Ordering::Greater } else { Ordering::Less };
+        }
+        if td && a == -0.0 && b == 0 {
+            return Ordering::Less;
+        }
+        let r = if a.fract() == 0.0 && a >= i64::MIN as f64 && a <= i64::MAX as f64 {
+            (a as i64).cmp(&b)
+        } else {
+            Self::double_to_rational(a).cmp(&BigRational::new(num_bigint::BigInt::from(b), num_bigint::BigInt::from(1)))
+        };
+        if td && r == Ordering::Equal {
+            Ordering::Less
+        } else {
+            r
+        }
+    }
+
+    /// `Double` (a) vs `BigInt` (b): mirrors Kotlin `compareDoubleToBigint`.
+    fn cmp_double_bigint(a: f64, b: &num_bigint::BigInt, td: bool) -> Ordering {
+        if !a.is_finite() {
+            return if a > 0.0 { Ordering::Greater } else { Ordering::Less };
+        }
+        if td && a == -0.0 && *b == num_bigint::BigInt::from(0) {
+            return Ordering::Less;
+        }
+        let r = if a.fract() == 0.0 && a >= i64::MIN as f64 && a <= i64::MAX as f64 {
+            num_bigint::BigInt::from(a as i64).cmp(b)
+        } else {
+            Self::double_to_rational(a).cmp(&BigRational::new(b.clone(), num_bigint::BigInt::from(1)))
+        };
+        if td && r == Ordering::Equal {
+            Ordering::Less
+        } else {
+            r
+        }
+    }
+
+    /// `Double` (a) vs `Rational` (b): mirrors Kotlin `compareDoubleToRational`.
+    fn cmp_double_rational(a: f64, b: &BigRational, td: bool) -> Ordering {
+        if !a.is_finite() {
+            return if a > 0.0 { Ordering::Greater } else { Ordering::Less };
+        }
+        if td && a == -0.0 && *b == BigRational::new(num_bigint::BigInt::from(0), num_bigint::BigInt::from(1)) {
+            return Ordering::Less;
+        }
+        let r = Self::double_to_rational(a).cmp(b);
+        if td && r == Ordering::Equal {
+            Ordering::Less
+        } else {
+            r
         }
     }
 
@@ -170,14 +392,12 @@ impl KapNumber {
                 }
             }
             KapNumber::Complex(re, im) => {
-                // APL `J` notation: `re Jim`.
+                // APL `J` notation: `re Jim` (Kotlin `formatComplex`).
+                // A zero imaginary part still renders `J0.0` (e.g. `2j0` -> `2.0J0.0`),
+                // and a positive imaginary part carries NO `+` sign (e.g. `2j3÷1j1`
+                // -> `2.5J0.5`).
                 let rs = format_double(*re);
                 let ims = format_double(*im);
-                let ims = if ims.starts_with('-') {
-                    ims
-                } else {
-                    format!("+{}", ims)
-                };
                 neg(format!("{}J{}", rs, ims))
             }
         }
@@ -306,61 +526,75 @@ impl KapNumber {
         }
     }
 
-    /// Division. Integer/integer -> Rational (Kap rule: `4 ÷ 2` is `2`, but `1 ÷ 2` is
-    /// `1r2`); float inputs -> Double; complex -> complex divide.
+    /// Division. Faithful port of Kotlin `DivAPLFunction.combine2Arg` /
+    /// `numericRelationOperation2` dispatch order:
+    /// Long/Long -> Long or Rational; ANY Complex operand -> complex divide;
+    /// ANY Double operand -> double divide (0.0/0.0 -> 0.0); Rational -> rational
+    /// divide (divisor zero -> 0); BigInt -> bigint divide (divisor zero -> 0).
+    /// Division by zero follows the oracle: real/0 -> 0, Double/0 -> Infinity
+    /// (0.0/0.0 -> 0.0), complex/0 -> NaNJNaN unless both are exactly zero -> 0.0.
     pub fn div(&self, other: &KapNumber) -> KapNumber {
         use KapNumber::*;
-        // Integer ÷ integer where the divisor divides evenly -> integer result.
+        // Long ÷ Long special-cased (matches Kotlin's fnLong branch).
         if let (Long(a), Long(b)) = (self, other) {
-            if *b != 0 && a % b == 0 {
+            if *b == 0 {
+                return Long(0);
+            }
+            if *a == i64::MIN && *b == -1 {
+                return BigInt(num_bigint::BigInt::from(i64::MAX) + num_bigint::BigInt::from(1));
+            }
+            if a % b == 0 {
                 return Long(a / b);
             }
-            if *b == 0 {
-                return Rational(BigRational::new(num_bigint::BigInt::from(0), num_bigint::BigInt::from(0)));
-            }
-            return Rational(BigRational::new(num_bigint::BigInt::from(*a), num_bigint::BigInt::from(*b)));
+            return Rational(BigRational::new(
+                num_bigint::BigInt::from(*a),
+                num_bigint::BigInt::from(*b),
+            ));
         }
-        match (self, other) {
-            (Long(a), Double(b)) | (Double(b), Long(a)) => Double(*a as f64 / *b),
-            (Double(a), Double(b)) => Double(a / b),
-            (BigInt(a), BigInt(b)) => {
-                if *b == num_bigint::BigInt::from(0) {
-                    return Rational(BigRational::new(num_bigint::BigInt::from(0), num_bigint::BigInt::from(0)));
-                }
-                Rational(BigRational::new(a.clone(), b.clone()))
+        // Complex operand (either side) -> complex divide. Match the *variant* so that
+        // `0j0` (which has im == 0) still routes here, not into the bigint path.
+        if matches!(self, Complex(_, _)) || matches!(other, Complex(_, _)) {
+            let (ar, ai) = self.as_complex();
+            let (br, bi) = other.as_complex();
+            let both_zero = ar == 0.0 && ai == 0.0 && br == 0.0 && bi == 0.0;
+            if both_zero {
+                return Double(0.0);
             }
-            (Long(a), BigInt(b)) | (BigInt(b), Long(a)) => {
-                Rational(BigRational::new(num_bigint::BigInt::from(*a), b.clone()))
+            let den = br * br + bi * bi;
+            if den == 0.0 {
+                return Complex(f64::NAN, f64::NAN);
             }
-            (Rational(a), Rational(b)) => Rational(a / b),
-            (Long(a), Rational(b)) | (Rational(b), Long(a)) => {
-                Rational(BigRational::new(num_bigint::BigInt::from(*a), num_bigint::BigInt::from(1)) / b)
-            }
-            (Complex(ar, ai), Complex(br, bi)) => {
-                // (a+bi)/(c+di) = ((ac+bd) + (bc-ad)i) / (c^2+d^2)
-                let den = br * br + bi * bi;
-                if den == 0.0 {
-                    return Complex(0.0, 0.0);
-                }
-                Complex((ar * br + ai * bi) / den, (ai * br - ar * bi) / den)
-            }
-            (Long(a), Complex(br, bi)) | (Complex(br, bi), Long(a)) => {
-                let den = br * br + bi * bi;
-                if den == 0.0 {
-                    return Complex(0.0, 0.0);
-                }
-                let x = *a as f64;
-                Complex((x * br) / den, (x * -bi) / den)
-            }
-            (Double(a), Complex(br, bi)) | (Complex(br, bi), Double(a)) => {
-                let den = br * br + bi * bi;
-                if den == 0.0 {
-                    return Complex(0.0, 0.0);
-                }
-                Complex(a / br, -a / bi)
-            }
-            _ => Double(self.as_double() / other.as_double()),
+            return Complex((ar * br + ai * bi) / den, (ai * br - ar * bi) / den);
         }
+        // Double operand (either side) -> double divide.
+        if self.is_double() || other.is_double() {
+            let a = self.as_double();
+            let b = other.as_double();
+            if a == 0.0 && b == 0.0 {
+                return Double(0.0);
+            }
+            return Double(a / b);
+        }
+        // Rational operand (either side) -> rational divide.
+        if self.is_rational() || other.is_rational() {
+            let a = self.as_rational();
+            let b = other.as_rational();
+            if *b.numer() == num_bigint::BigInt::from(0) {
+                return Long(0);
+            }
+            return Rational(a / b);
+        }
+        // BigInt ÷ BigInt.
+        let a = self.as_bigint();
+        let b = other.as_bigint();
+        if b == num_bigint::BigInt::from(0) {
+            return Long(0);
+        }
+        if (&a % &b) == num_bigint::BigInt::from(0) {
+            return BigInt(&a / &b);
+        }
+        Rational(BigRational::new(a, num_bigint::BigInt::from(1))
+            / BigRational::new(b, num_bigint::BigInt::from(1)))
     }
 
     /// Parse a Kap numeric *string* (from `⍎"…"` / `parseStringToNumber`) into a `KapNumber`.
@@ -847,12 +1081,12 @@ mod tests {
     fn comparison_across_types() {
         // 1 (Long) == 1.0 (Double)
         assert_eq!(
-            KapNumber::Long(1).numeric_cmp(&KapNumber::Double(1.0)).unwrap(),
+            KapNumber::Long(1).numeric_cmp(&KapNumber::Double(1.0), false).unwrap(),
             Ordering::Equal
         );
         // 2 (Long) < 2.1 (Double)
         assert_eq!(
-            KapNumber::Long(2).numeric_cmp(&KapNumber::Double(2.1)).unwrap(),
+            KapNumber::Long(2).numeric_cmp(&KapNumber::Double(2.1), false).unwrap(),
             Ordering::Less
         );
     }
@@ -860,6 +1094,7 @@ mod tests {
     #[test]
     fn complex_not_orderable() {
         let c = KapNumber::Complex(1.0, 1.0);
-        assert!(c.numeric_cmp(&KapNumber::Long(1)).is_err());
+        assert!(c.numeric_cmp(&KapNumber::Long(1), false).is_err());
     }
 }
+

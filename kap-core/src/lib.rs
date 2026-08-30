@@ -506,51 +506,99 @@ impl APLValue {
         }
     }
 
-    /// Cross-kind total-order comparison, mirroring Kotlin `compareTotalOrdering`.
-    /// Two numeric values (any mix of Long/BigInt/Rational/Double/Complex) compare
-    /// numerically; two chars compare by codepoint; two arrays compare recursively;
-    /// otherwise distinct types order by Kap's `typeSortOrder`
-    /// (number < char < array < null). Complex numbers are not orderable → `None`.
-    /// Used by the dyadic `⍸` (interval) form which searches boundaries across kinds.
+    /// Cross-kind total-order comparison, mirroring Kotlin `compareTotalOrdering`
+    /// (with `typeDiscrimination = true`, as all of Kap's sorting/grade/match/`cmp`
+    /// paths use td=true). Two numeric values (any mix of Long/BigInt/Rational/
+    /// Double/Complex) compare numerically with type discrimination; two chars compare
+    /// by codepoint; two strings/arrays compare by rank then element-wise
+    /// (`compareAPLArrays`); two lists compare element-wise; otherwise distinct types
+    /// order by Kap's `typeSortOrder` (number < char < symbol < array < list < null).
+    /// Non-orderable pairs (incl. complex) → `None`.
     pub fn total_cmp(&self, other: &APLValue) -> Option<Ordering> {
+        use std::cmp::Ordering::*;
         use APLValue::*;
-        // Number vs Number → numeric.
+        // Number vs Number → Kotlin compareTotalOrdering (type discrimination, never errors
+        // on complex; a complex with im≠0 sorts by type position after Double).
         if let (Number(a), Number(b)) = (self, other) {
-            return a.numeric_cmp(b).ok();
+            return Some(KapNumber::number_ordering(a, b));
         }
-        // Char vs Char → codepoint.
-        if let (Char(a), Char(b)) = (self, other) {
-            return Some(a.cmp(b));
-        }
-        // Array vs Array → recursive flat element comparison (first mismatch wins;
-        // shorter array is "less" at the first missing index).
-        if let (Array(a), Array(b)) = (self, other) {
-            let ea = a.elements();
-            let eb = b.elements();
-            let n = ea.len().min(eb.len());
-            for i in 0..n {
-                if let Some(o) = ea[i].total_cmp(&eb[i]) {
-                    if o != Ordering::Equal {
+        match (self, other) {
+            (Char(a), Char(b)) => Some(a.cmp(b)),
+            // String or array vs string or array → rank-first, then element-wise
+            // (Kotlin compareAPLArrays: lower rank is "less"; equal rank-1 →
+            // lexicographic by element; higher rank → dimension-vector then elements).
+            (Str(_), Str(_))
+            | (Str(_), Array(_))
+            | (Array(_), Str(_))
+            | (Array(_), Array(_)) => {
+                let ea = self.elements();
+                let eb = other.elements();
+                let ra = self.rank();
+                let rb = other.rank();
+                if ra != rb {
+                    return Some(ra.cmp(&rb));
+                }
+                if ra == 1 && rb == 1 {
+                    let n = ea.len().min(eb.len());
+                    for i in 0..n {
+                        let o = ea[i].total_cmp(&eb[i])?;
+                        if o != Equal {
+                            return Some(o);
+                        }
+                    }
+                    return Some(ea.len().cmp(&eb.len()));
+                }
+                let dcmp = self.dimensions().cmp(&other.dimensions());
+                if dcmp != Equal {
+                    return Some(dcmp);
+                }
+                let n = ea.len().min(eb.len());
+                for i in 0..n {
+                    let o = ea[i].total_cmp(&eb[i])?;
+                    if o != Equal {
                         return Some(o);
                     }
                 }
+                Some(ea.len().cmp(&eb.len()))
             }
-            return Some(ea.len().cmp(&eb.len()));
+            // List vs List → element-wise (Kotlin APLList.compareSameType).
+            (List(_), List(_)) => {
+                let ea = self.elements();
+                let eb = other.elements();
+                let n = ea.len().min(eb.len());
+                for i in 0..n {
+                    let o = ea[i].total_cmp(&eb[i])?;
+                    if o != Equal {
+                        return Some(o);
+                    }
+                }
+                Some(ea.len().cmp(&eb.len()))
+            }
+            (Null, Null) => Some(Equal),
+            (Symbol { name: n1, namespace: ns1 }, Symbol { name: n2, namespace: ns2 }) => {
+                Some(ns1.cmp(ns2).then(n1.cmp(n2)))
+            }
+            // Distinct types → by Kap type sort order (typeSortOrder in types.kt):
+            // Long/BigInt/Rational/Double/Complex=0..4, Char=5, Symbol=6, Array=7,
+            // Map=8, List=9, Timestamp=10, Nil=11. Numbers are handled above; here we
+            // assign a position per remaining kind and order by the difference.
+            _ => {
+                let pos = |v: &APLValue| -> Option<usize> {
+                    match v {
+                        Number(_) => Some(0),
+                        Char(_) => Some(5),
+                        Symbol { .. } => Some(6),
+                        Str(_) | Array(_) => Some(7),
+                        List(_) => Some(9),
+                        Null => Some(11),
+                        _ => None,
+                    }
+                };
+                let pa = pos(self)?;
+                let pb = pos(other)?;
+                Some(pa.cmp(&pb))
+            }
         }
-        // Distinct types → by Kap type sort order.
-        let pos = |v: &APLValue| -> Option<usize> {
-            match v {
-                Number(_) => Some(0),
-                Char(_) => Some(5),
-                Array(_) => Some(7),
-                List(_) => Some(8),
-                Null => Some(11),
-                _ => None,
-            }
-        };
-        let pa = pos(self)?;
-        let pb = pos(other)?;
-        Some(pa.cmp(&pb))
     }
 }
 
