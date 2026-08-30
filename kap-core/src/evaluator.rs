@@ -5410,25 +5410,61 @@ impl Engine {
                 return self.adverb_inverse_with_proto(inner, left, right, env, &proto_val);
             }
         }
-        let fname = match func.as_ref() {
-            Instr::Symbol { name, .. } => name.clone(),
+        let (fname, _inv_axis) = match func.as_ref() {
+            Instr::Symbol { name, .. } => (name.clone(), None),
             // An axis-applied function (`⌽[0]˝`, i.e. `(f[k])˝`) keeps its axis:
             // Kotlin binds ˝ to the AxisValAssignedFunctionDirect and evalInverse
             // threads the axis through. Unwrap to the inner fn name.
-            Instr::AxisApplied { func: inner, .. } => match inner.as_ref() {
-                Instr::Symbol { name, .. } => name.clone(),
-                _ => {
-                    return Err(AplError::runtime(
-                        "˝: inverse not supported for this function".into(),
-                    ))
+            Instr::AxisApplied { func: inner, axis } => (
+                match inner.as_ref() {
+                    Instr::Symbol { name, .. } => name.clone(),
+                    _ => {
+                        return Err(AplError::runtime(
+                            "˝: inverse not supported for this function".into(),
+                        ))
+                    }
+                },
+                Some(axis),
+            ),
+            // Trains (Kotlin FunctionCallChain). A 2-member train is one of:
+            //   - left-bind `(v f)`: funcs[0] is a VALUE → inverse is
+            //     `underlying.evalInverse2ArgB(v, a)` (Kotlin LeftAssignedFunction;
+            //     funcs[1] keeps the bound `v` as left arg).
+            //   - atop `(f g)`: funcs[0] is a FUNCTION → inverse is
+            //     `g˝(f˝ a)` (Kotlin Chain2.evalInverse1Arg :600).
+            // A 3+ member train (fork) has NO evalInverse* override in Kotlin
+            // (FunctionCallChain.Chain3), so it inherits the base-class throw.
+            Instr::Train { funcs, .. } => {
+                if funcs.len() == 2 {
+                    if Self::is_value(&funcs[0]) {
+                        return self.adverb_inverse(
+                            &Box::new(funcs[1].clone()),
+                            &Some(Box::new(funcs[0].clone())),
+                            right,
+                            env,
+                        );
+                    } else {
+                        let mid =
+                            self.adverb_inverse(&Box::new(funcs[0].clone()), &None, right, env)?;
+                        return self.adverb_inverse(
+                            &Box::new(funcs[1].clone()),
+                            &None,
+                            &Box::new(Instr::Value(mid)),
+                            env,
+                        );
+                    }
                 }
-            },
+                return Err(AplError::runtime(
+                    "˝: inverse not supported for this function".into(),
+                ));
+            }
             _ => {
                 return Err(AplError::runtime(
                     "˝: inverse not supported for this function".into(),
                 ))
             }
         };
+        let _ = _inv_axis;
         match fname.as_str() {
             "⌽" | "⊖" => match left {
                 // Monadic reverse is its own inverse.
@@ -5539,16 +5575,53 @@ impl Engine {
                     self.eval_apply(func, &Some(l.clone()), right, env)
                 }
             },
-            // `-` negate is its own inverse (Kotlin SubAPLFunction evalInverse1Arg
-            // = itself; oracle: (-˝) 5 → -5). Monadic only.
-            "-" => match left {
+            // `-` is its own inverse (Kotlin SubAPLFunction.evalInverse1Arg = itself;
+            // oracle: (-˝) 5 → -5, (1-)˝ 5 → -4). Both monadic and left-bound forward `-`.
+            "-" => self.eval_apply(func, left, right, env),
+            // `+` `×` `÷` have scalar inverses (Kotlin Add/Div/Mul evalInverse* rules).
+            // For a left-bound train `(v f)˝`, Kotlin's LeftAssignedFunction.evalInverse1Arg
+            // computes `underlying.evalInverse2ArgB(leftArg, a)`:
+            //   + : b - a   ⇒ a - left   (left + result = a)
+            //   × : b ÷ a   ⇒ a ÷ left   (left × result = a)
+            //   ÷ : a × b   ⇒ left × a   (left ÷ result = a; Div evalInverse2ArgA)
+            // `×` has NO monadic inverse in Kotlin (MulAPLFunction defines no
+            // evalInverse1Arg; oracle `(×)˝ 6` errors). `+`/`-`/`-`/`÷` monadic
+            // forward (identity/self-inverse). `×` needs `left` to invert.
+            "+" | "÷" => match left {
                 None => self.eval_apply(func, &None, right, env),
-                Some(_) => Err(AplError::runtime(
-                    "-˝: inverse of this function is not supported".into(),
+                Some(l) => {
+                    let new_op = match fname.as_str() {
+                        "+" => Instr::Symbol { name: "-".to_string(), namespace: None },
+                        "×" => Instr::Symbol { name: "÷".to_string(), namespace: None },
+                        "÷" => Instr::Symbol { name: "×".to_string(), namespace: None },
+                        _ => unreachable!(),
+                    };
+                    // argument order per Kotlin evalInverse2ArgB/A:
+                    //   + : (a) - (left)      × : (a) ÷ (left)      ÷ : (left) × (a)
+                    let (new_left, new_right) = if fname == "÷" {
+                        (Some(l.clone()), right.clone())
+                    } else {
+                        (Some(right.clone()), l.clone())
+                    };
+                    self.eval_apply(&new_op, &new_left, &new_right, env)
+                }
+            },
+            // `×` has a DYADIC inverse only (Kotlin MulAPLFunction.evalInverse2ArgB
+            // = `b ÷ a`; no evalInverse1Arg). Monadic `(×)˝ y` errors per oracle.
+            "×" => match left {
+                None => Err(AplError::runtime(
+                    "×: Function does not have an inverse".into(),
                 )),
+                Some(l) => {
+                    let new_op = Instr::Symbol { name: "÷".to_string(), namespace: None };
+                    // `(×)˝` with left-bound `v`: solver is `v × result = a`
+                    // ⇒ result = a ÷ v (Kotlin Mul evalInverse2ArgB = divFn(b, a) = b÷a,
+                    // i.e. right arg ÷ left arg). So feed `right ÷ left`.
+                    self.eval_apply(&new_op, &Some(right.clone()), &l.clone(), env)
+                }
             },
             other => Err(AplError::runtime(format!(
-                "{}˝: inverse of this function is not supported",
+                "{}: Function does not have an inverse",
                 other
             ))),
         }

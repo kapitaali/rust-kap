@@ -1026,10 +1026,22 @@ impl<'a> Parser<'a> {
                     right_fn,
                 };
             } else {
-                if self.at_statement_boundary() {
-                    // Not an error — the adverb is stranded as a bare function value.
-                    // e.g. `+/` is a valid derived function value. Break and let
-                    // finish_fn_call handle the "no right arg" case.
+                // A pure adverb (¨ ⌸ ⍨ ˝ …) POSTFIX-binds to its LEFT function, so it
+                // must bind even when immediately followed by a closing delimiter that
+                // belongs to an ENCLOSING group — e.g. in `((1+)˝)` the `˝` follows the
+                // inner `(1+)` and precedes the OUTER `)`. Treating that `)` as a
+                // statement boundary silently dropped the adverb (the port evaluated
+                // `(1+) 8` → 9 instead of the inverse → 7). Only a genuine statement
+                // terminator (newline / separator / EOF) strands the adverb as a bare
+                // function value.
+                let at_real_end = match self.peek() {
+                    None => true,
+                    Some(t) => matches!(
+                        t.token,
+                        Token::Newline | Token::StatementSeparator | Token::EndOfFile
+                    ),
+                };
+                if at_real_end {
                     break;
                 }
                 // Explicit axis on a reduce/scan derived fn (`+/[0] x`): Kotlin binds
