@@ -401,6 +401,14 @@ fn num_digits_only(s: &str) -> Option<BigInt> {
 }
 
 /// Map a `BigInt` to the smallest `KapNumber` variant that holds it exactly.
+/// Two's-complement population count for a non-negative `BigInt` (matches Kotlin's
+/// `BigInt.popcnt()`). Caller must pass the unsigned magnitude; for negative inputs
+/// Kotlin uses `popcnt(-1 - a)`, which the caller computes before calling here.
+pub fn popcount_bigint(v: &BigInt) -> u64 {
+    // Count set bits across the little-endian byte view.
+    v.to_bytes_le().1.iter().map(|byte| byte.count_ones() as u64).sum()
+}
+
 pub fn bigint_to_kap(v: &BigInt) -> KapNumber {
     if let Ok(l) = v.to_string().parse::<i64>() {
         KapNumber::Long(l)

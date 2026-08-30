@@ -10,7 +10,7 @@
 use crate::array::{ArrayData, KapArray};
 use crate::ast::{SyntaxMacro, Instr, BooleanOpKind};
 use crate::lexer::tokenise;
-use crate::number::{bigint_to_kap, KapNumber};
+use crate::number::{bigint_to_kap, popcount_bigint, KapNumber};
 use crate::parser;
 use crate::token::{LiteralValue, Token};
 use unicode_segmentation::UnicodeSegmentation;
@@ -9039,14 +9039,20 @@ impl Engine {
     }
 
     /// Bitwise adverb `f∵` (Kotlin `BitwiseOp` → `deriveBitwise()`, bitwise_ops.kt).
-    /// Derives the BITWISE variant of the scalar function operand:
-    ///   ∧∵ and · ∨∵ or · ⍲∵ nand · ⍱∵ nor · ≠∵ xor · =∵ xnor
-    ///   <∵ a.inv()&b · >∵ a&b.inv() · ≤∵ a.inv()\|b · ≥∵ a\|b.inv()
-    ///   ~∵ not/inv (monadic) · ⌽∵ shift (a=shift count, b<<a) · ⍴∵ bit-length (monadic)
-    /// All operands must be integers (Long, BigInt, or integer-valued Rational);
-    /// anything else errors with Kotlin's exact text
-    /// "∵: Bitwise calls can only be performed on integers". A glyph whose scalar fn
-    /// has no bitwise variant (e.g. !∵) → "<f>: Function does not support bitwise operations".
+    /// Derives the BITWISE variant of the scalar function operand. Each scalar fn's
+    /// `deriveBitwise()` maps to one of the `Bitwise*Function` classes; the table
+    /// below is the *verified* glyph→operation mapping captured from the Kotlin
+    /// oracle (`kap-jvm-text`):
+    ///   dyadic: ×∵ ∧∵ → AND(a&b) · ∨∵ → OR(a|b) · +∵ ≠∵ -∵ → XOR(a^b)
+    ///           =∵ → XNOR(!(a^b)) · ⍲∵ → NAND(!(a&b)) · ⍱∵ → NOR(!(a|b))
+    ///           <∵ → (~a)&b · >∵ → a&(~b) · ≤∵ → (~a)|b · ≥∵ → a|(~b)
+    ///           ⌽∵ → shift (a = shift count, b << a; negative count right-shifts)
+    ///   monadic: ~∵ → NOT(~b) · ⍴∵ → bit-length(b) · ⍸∵ → popcount(b, two's-complement)
+    /// All other glyphs have NO bitwise variant: dyadic ⇒ "<f>: Function does not
+    /// support bitwise operations"; monadic ⇒ "∵: Function cannot be called with
+    /// one argument" (matches Kotlin's `Unimplemented1ArgException` surfaced as the
+    /// operator's arity error). Non-integer operands ⇒ "∵: Bitwise calls can only
+    /// be performed on integers".
     fn adverb_bitwise(
         &self,
         func: &Instr,
@@ -9055,7 +9061,6 @@ impl Engine {
         env: &AplRef<Environment>,
     ) -> Result<AplRef<APLValue>, AplError> {
         use KapNumber::*;
-        // Which bitwise operation the derived fn performs.
         let op_name = match func {
             Instr::Symbol { name, .. } => name.clone(),
             _ => return Err(AplError::runtime("bitwise operand must be a function".into())),
@@ -9083,71 +9088,44 @@ impl Engine {
                 )),
             }
         };
-        let mk = |b: num_bigint::BigInt| -> APLValue {
-            APLValue::Number(bigint_to_kap(&b))
-        };
-        let binop = |a: &num_bigint::BigInt,
-                     b: &num_bigint::BigInt|
-         -> Option<num_bigint::BigInt> {
-            use num_bigint::BigInt;
+        let mk = |b: num_bigint::BigInt| -> APLValue { APLValue::Number(bigint_to_kap(&b)) };
+        use num_bigint::BigInt as BI;
+        // Dyadic bigint op; None ⇒ glyph has no bitwise variant.
+        let binop = |a: &BI, b: &BI| -> Option<BI> {
+            use num_traits::ToPrimitive;
             let res = match op_name.as_str() {
-                "∧" => Some(a & b),
-                "∨" => Some(a | b),
-                "⍲" => Some(!(a & b)),
-                "⍱" => Some(!(a | b)),
-                "≠" => Some(a ^ b),
-                "=" => Some(!(a ^ b)),
-                "<" => Some(!a & b),
-                ">" => Some(a & !b),
-                "≤" => Some(!a | b),
-                "≥" => Some(a | !b),
+                "×" | "∧" => a & b,
+                "∨" => a | b,
+                "+" | "≠" | "-" => a ^ b,
+                "=" => !(a ^ b),
+                "⍲" => !(a & b),
+                "⍱" => !(a | b),
+                "<" => (!a) & b,
+                ">" => a & (!b),
+                "≤" => (!a) | b,
+                "≥" => a | (!b),
                 "⌽" => {
-                    // Shift: count = a (must fit i64); value = b << a. Negative
-                    // counts RIGHT-shift (Kotlin BigInt.shl semantics), so a
-                    // negative count must not hit num-bigint's panicking `<<`.
-                    use num_traits::ToPrimitive;
                     let shift = a.to_i64()?;
                     if shift >= 0 {
-                        Some(b << shift)
+                        b << shift
                     } else {
-                        Some(b >> shift.unsigned_abs())
+                        b >> shift.unsigned_abs()
                     }
                 }
-                _ => None,
+                _ => return None,
             };
-            res.map(|x| x)
+            Some(res)
         };
-        // Monadic ops: ~∵ (inv), ⍴∵ (bit length).
-        let monadic = match left {
-            None => true,
-            Some(_) => false,
-        };
+        // Monadic ops: only ~∵ (NOT), ⍴∵ (bit-length), ⍸∵ (popcount) are defined.
+        let monadic = left.is_none();
         if monadic {
+            if !matches!(op_name.as_str(), "~" | "⍴" | "⍸") {
+                return Err(AplError::runtime(
+                    "∵: Function cannot be called with one argument".into(),
+                ));
+            }
             let v = self.eval_instr(right, env)?.force(self)?;
-            // Element-wise for arrays.
-            return self.map_scalar_or_array(&v, &|elem: &APLValue| -> Result<APLValue, AplError> {
-                let b = to_bigint(elem)?;
-                match op_name.as_str() {
-                    "~" => Ok(mk(!b)),
-                    "⍴" => {
-                        // Kotlin BitwiseBitLengthFunctionImpl: negative values
-                        // measure a.inv() (the unsigned magnitude pattern).
-                        let bits = if b.sign() == num_bigint::Sign::Minus {
-                            (!b).bits() as i64
-                        } else {
-                            b.bits() as i64
-                        };
-                        Ok(APLValue::Number(Long(bits)))
-                    }
-                    "!" => Err(AplError::runtime(
-                        "!: Function does not support bitwise operations".into(),
-                    )),
-                    _ => Err(AplError::runtime(format!(
-                        "{}: Function cannot be called with one argument",
-                        op_name
-                    ))),
-                }
-            });
+            return self.apply_bitwise_monadic(&v, &op_name);
         }
         let lv = match left.as_deref() {
             Some(l) => self.eval_instr(l, env)?.force(self)?,
@@ -9168,6 +9146,86 @@ impl Engine {
                 ))),
             }
         })
+    }
+
+    /// Monadic bitwise apply: element-wise per Kotlin's derived single-arg fn,
+    /// recursing into nested arrays (preserving shape). Only `~∵`/`⍴∵`/`⍸∵`.
+    fn apply_bitwise_monadic(
+        &self,
+        v: &APLValue,
+        op_name: &str,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        use KapNumber::*;
+        use num_bigint::BigInt as BI;
+        let to_bigint = |e: &APLValue| -> Result<BI, AplError> {
+            match e {
+                APLValue::Number(n) => match n {
+                    Long(l) => Ok(BI::from(*l)),
+                    BigInt(b) => Ok(b.clone()),
+                    Rational(r) => {
+                        if *r.denom() == BI::from(1u32) {
+                            Ok(r.numer().clone())
+                        } else {
+                            Err(AplError::runtime(
+                                "∵: Bitwise calls can only be performed on integers".into(),
+                            ))
+                        }
+                    }
+                    _ => Err(AplError::runtime(
+                        "∵: Bitwise calls can only be performed on integers".into(),
+                    )),
+                },
+                _ => Err(AplError::runtime(
+                    "∵: Bitwise calls can only be performed on integers".into(),
+                )),
+            }
+        };
+        let one = |elem: &APLValue| -> Result<APLValue, AplError> {
+            let b = to_bigint(elem)?;
+            match op_name {
+                "~" => Ok(APLValue::Number(bigint_to_kap(&!b))),
+                "⍴" => {
+                    let bits = if b.sign() == num_bigint::Sign::Minus {
+                        (!&b).bits() as i64
+                    } else {
+                        b.bits() as i64
+                    };
+                    Ok(APLValue::Number(Long(bits)))
+                }
+                "⍸" => {
+                    let u = if b.sign() == num_bigint::Sign::Minus {
+                        (-&b) - BI::from(1u32)
+                    } else {
+                        b
+                    };
+                    Ok(APLValue::Number(Long(popcount_bigint(&u) as i64)))
+                }
+                _ => unreachable!(),
+            }
+        };
+        match v {
+            APLValue::Array(a) => {
+                let mut out = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    out.push(self.apply_bitwise_monadic(&e, op_name)?);
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    a.dimensions.clone(),
+                    ArrayData::Nested(out),
+                )))))
+            }
+            APLValue::Str(s) => {
+                let mut out = Vec::with_capacity(s.len());
+                for c in s.chars() {
+                    out.push(Rc::new(one(&APLValue::Char(c))?));
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![s.len()],
+                    ArrayData::Nested(out),
+                )))))
+            }
+            other => Ok(Rc::new(one(other)?)),
+        }
     }
 
     /// Each `f¨array` (monadic) or `a f¨ b` (dyadic, element-wise with scalar extension).
