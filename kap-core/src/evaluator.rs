@@ -705,6 +705,16 @@ impl Engine {
                     ArrayData::Nested(vals),
                 )))))
             }
+            Instr::ArrayWithShape { dims, elements } => {
+                let mut vals = Vec::with_capacity(elements.len());
+                for e in elements {
+                    vals.push(self.eval_instr(e, env)?);
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    dims.clone(),
+                    ArrayData::Nested(vals),
+                )))))
+            }
             Instr::List { elements } => {
                 // A `;`-separated list literal `(1;2;3)`. Evaluates to an
                 // APLValue::List — distinct from a space-stranded array. A Kap
@@ -4153,6 +4163,18 @@ impl Engine {
         f: impl Fn(&KapNumber, &KapNumber) -> KapNumber,
         sym: &str,
     ) -> Result<AplRef<APLValue>, AplError> {
+        // Delegate to the non-generic impl so nested-cell recursion (`(A B)+(C D)`)
+        // can re-enter with a `&dyn Fn` instead of infinitely monomorphizing.
+        self.num2_impl(left_val, right_val, &f, sym)
+    }
+
+    fn num2_impl(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+        f: &dyn Fn(&KapNumber, &KapNumber) -> KapNumber,
+        sym: &str,
+    ) -> Result<AplRef<APLValue>, AplError> {
         let a = left_val.ok_or_else(|| AplError::runtime(format!("{} needs two args", sym)))?;
         match (a.as_ref(), right_val.as_ref()) {
             (APLValue::Number(x), APLValue::Number(y)) => {
@@ -4251,11 +4273,16 @@ impl Engine {
                     )));
                 }
                 for (i, e) in xa.elements().into_iter().enumerate() {
-                    // Bounds-guard each cell (a ragged/short vector must not panic on index).
                     if let (APLValue::Number(x), Some(APLValue::Number(y))) =
                         (e.as_ref(), ye.get(i).map(|y| y.as_ref()))
                     {
                         out.push(Rc::new(APLValue::Number(f(x, y))));
+                    } else if let Some(y) = ye.get(i) {
+                        // Recurse into nested cells (e.g. a nested matrix where each
+                        // cell is itself an array). Kotlin `+` is element-wise at every
+                        // depth, so `(A B)+(C D)` adds A+C and B+D pairwise. `&f`
+                        // re-borrows the `Fn` closure so it can be applied per cell.
+                        out.push(self.num2_impl(Some(e.clone()), y.clone(), f, sym)?);
                     }
                 }
                 Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
@@ -5288,12 +5315,14 @@ impl Engine {
                 };
                 let a_dims = a.dimensions();
                 let b_dims = b.dimensions();
+                let join_name = if is_table { "⍪" } else { "," };
                 self.join_by_axis(
                     &a.elements(),
                     &a_dims,
                     &b.elements(),
                     &b_dims,
                     default_axis,
+                    join_name,
                 )
             }
         }
@@ -5388,6 +5417,7 @@ impl Engine {
                 &b1.elements(),
                 &b1.dimensions(),
                 na,
+                ",",
             );
         }
         // Plain integer-axis concatenation.
@@ -5407,6 +5437,7 @@ impl Engine {
             &b.elements(),
             &b_dims,
             na,
+            ",",
         )
     }
 
@@ -5439,17 +5470,19 @@ impl Engine {
         b_elems: &[AplRef<APLValue>],
         b_dims: &[usize],
         axis: usize,
+        name: &str,
     ) -> Result<AplRef<APLValue>, AplError> {
         if a_dims.len() != b_dims.len() {
-            return Err(AplError::runtime(
-                ",[axis]: ranks of A and B are different".into(),
-            ));
+            return Err(AplError::runtime(format!(
+                "{}: ranks of A and B are different",
+                name
+            )));
         }
         for i in 0..a_dims.len() {
             if i != axis && a_dims[i] != b_dims[i] {
                 return Err(AplError::runtime(format!(
-                    ",[axis]: dimensions at axis {} do not match: {:?} vs {:?}",
-                    i, a_dims, b_dims
+                    "{}: Dimensions at axis {} does not match: {:?} compared to {:?}",
+                    name, axis, a_dims, b_dims
                 )));
             }
         }
@@ -8156,7 +8189,10 @@ impl Engine {
                 for e in a.elements() {
                     elems.push(self.apl_to_instr(e.as_ref())?);
                 }
-                Ok(Instr::Array { elements: elems })
+                Ok(Instr::ArrayWithShape {
+                    dims: a.dimensions.clone(),
+                    elements: elems,
+                })
             }
             APLValue::List(a) => {
                 let mut elems = Vec::with_capacity(a.element_count());

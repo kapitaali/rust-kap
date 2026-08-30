@@ -34,6 +34,12 @@ pub enum Instr {
     },
     /// An array/vector literal: `[a;b;c]` (explicit) or a stranded vector `a b c`.
     Array { elements: Vec<Instr> },
+    /// Like `Array`, but carries an explicit `dims` vector. Used ONLY by
+    /// `Evaluator::apl_to_instr` when round-tripping an already-evaluated
+    /// `APLValue::Array` back into an `Instr` (e.g. as a reduce/scan/inner-product
+    /// fold operand). The parser never emits this, so parser strands stay rank-1.
+    /// `elements` is the **ravel** of the array (row-major), matching `dims`.
+    ArrayWithShape { dims: Vec<usize>, elements: Vec<Instr> },
     /// A `;`-separated *list* literal: `(1;2;3)`. Distinct from `Array` (which is
     /// space-stranded) because Kap's destructuring assignment `(a;b;c)←RHS`
     /// requires the RHS to be a *list* (`;`-separated), not a plain array.
