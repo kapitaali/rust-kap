@@ -848,6 +848,12 @@ impl Environment {
                 reg.declare_const("kap", name);
                 reg.ns_define("kap", name, Rc::new(APLValue::Str(val.to_string())));
             }
+            // Kap's `null` symbol (Kotlin `APLNullValue`) — the APL null, equivalent
+            // to `⍬` (the port's `APLValue::Null`). `fhelp.kap` / `standard-lib.kap`
+            // reference it (`fhelpFn ← null`). Bind it as a constant to Null so the
+            // symbol resolves like the oracle (`null` and `⍬` both evaluate to 0).
+            reg.declare_const("default", "null");
+            reg.ns_define("default", "null", Rc::new(APLValue::Null));
         }
         env
     }

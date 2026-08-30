@@ -2103,12 +2103,21 @@ impl Engine {
             // (`'kap:altVectorOutput`, i.e. Symbol{name, namespace:"kap"}); keyword-form
             // symbols (`:foo`) are NOT registered parameters in the text-mode build.
             "sysparam" => {
-                let name_of = |v: &APLValue| -> Option<(String, String)> {
+                // The parameter name is a SYMBOL VALUE (`'kap:rendererParameters`).
+                // Return the FULLY-QUALIFIED name (`ns:name`, with `default` as the
+                // implicit namespace for unqualified symbols) so the comparisons below
+                // match the qualified forms Kap uses. (A prior build stripped the
+                // namespace, so `sysparam 'kap:rendererParameters` never matched the
+                // `"kap:rendererParameters"` allow-list and every `kap:` sysparam call
+                // errored — fixed here.)
+                let name_of = |v: &APLValue| -> Option<String> {
                     match v {
-                        APLValue::Symbol { name, namespace } => Some((
-                            name.clone(),
-                            namespace.clone().unwrap_or_else(|| "default".to_string()),
-                        )),
+                        APLValue::Symbol { name, namespace } => {
+                            let ns = namespace
+                                .clone()
+                                .unwrap_or_else(|| "default".to_string());
+                            Some(format!("{}:{}", ns, name))
+                        }
                         _ => None,
                     }
                 };
@@ -2122,16 +2131,18 @@ impl Engine {
                             ))
                         })?;
                         let known = matches!(
-                            key.0.as_str(),
+                            key.as_str(),
                             "kap:altVectorOutput"
                                 | "kap:rendererParameters"
                                 | "kap:renderer"
                                 | "default:altVectorOutput"
+                                | "default:rendererParameters"
+                                | "default:renderer"
                         );
                         if !known {
                             return Err(AplError::runtime(format!(
                                     "sysparam: System parameter not found: :{}",
-                                    key.0
+                                    key
                                 )));
                         }
                         Ok(right_val)
@@ -2143,7 +2154,7 @@ impl Engine {
                                 right_val.format_value()
                             ))
                         })?;
-                        match key.0.as_str() {
+                        match key.as_str() {
                             "kap:altVectorOutput" | "default:altVectorOutput" => {
                                 Ok(Rc::new(APLValue::Number(KapNumber::Long(1))))
                             }
@@ -2161,9 +2172,15 @@ impl Engine {
                                     ArrayData::Nested(vec![row(200, 50), row(60, 10)]),
                                 )))))
                             }
+                            "kap:renderer" | "default:renderer" => {
+                                // Monadic lookup of the current renderer function.
+                                // The text-mode port has no renderer registry, so return
+                                // Null (the oracle returns the bound renderer function).
+                                Ok(Rc::new(APLValue::Null))
+                            }
                             other => Err(AplError::runtime(format!(
                                 "sysparam: System parameter not found: :{}",
-                                other.split_once(':').map(|(_, b)| b).unwrap_or(other)
+                                other
                             ))),
                         }
                     }
