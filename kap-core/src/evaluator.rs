@@ -2461,7 +2461,20 @@ impl Engine {
                 None => self.shape(right_val),
                 Some(l) => self.reshape(l, right_val),
             },
-            "≢" | "tally" => self.tally(right_val),
+            // `≢`/`tally`: monadic → size/tally; dyadic → compare-not-equal (negated
+            // `≡` type-equal, per Kotlin CompareNotEqualFunction.eval2Arg).
+            "≢" | "tally" => match left_val {
+                None => self.tally(right_val),
+                Some(l) => {
+                    let eq =
+                        Self::type_equal(l.force(self)?.as_ref(), right_val.force(self)?.as_ref());
+                    Ok(Rc::new(APLValue::Number(KapNumber::Long(if eq {
+                        0
+                    } else {
+                        1
+                    }))))
+                }
+            },
             "⊃" | "first" => self.reveal(left_val, right_val),
             "," => self.catenate(left_val, right_val, false),
             "⍪" => self.catenate(left_val, right_val, true),
