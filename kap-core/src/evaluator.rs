@@ -4664,7 +4664,13 @@ impl Engine {
         for bref in &b_elems {
             let mut found = not_found;
             for (i, aelem) in a_elems.iter().enumerate() {
-                if aelem.total_cmp(bref.as_ref()) == Some(Ordering::Equal) {
+                // Kotlin FindIndexArray1DLeftArg.findFromRef uses
+                // compareEqualsTotalOrdering(ref, typeDiscrimination=false) — VALUE
+                // equality that merges numeric kinds (Long 2 == Double 2.0 == Rational
+                // 1r2 == zero-imag Complex 2j0). `deep_equal` mirrors that (numbers via
+                // numeric_cmp(td=false)); `total_cmp` is type-STRICT and would make
+                // `2 1.0 1 ⍳ 1.0 1 4` return (1 2 3) instead of oracle (1 1 3).
+                if Self::deep_equal(aelem.as_ref(), bref.as_ref()) {
                     found = i as i64;
                     break;
                 }
@@ -11732,8 +11738,10 @@ impl Engine {
         let b = right_val.force(self)?;
 
         // Scalar B (rank 0): compare A and B, return 1 or 0.
+        // Kotlin MemberFunction/find uses compareEqualsTotalOrdering(td=false) — VALUE
+        // equality merging numeric kinds (3 == 3.0). `deep_equal` mirrors that.
         if b.rank() == 0 {
-            let eq = a.total_cmp(&b).map(|o| o == Ordering::Equal).unwrap_or(false);
+            let eq = Self::deep_equal(a.as_ref(), b.as_ref());
             let v = if eq { 1i64 } else { 0i64 };
             return Ok(Rc::new(APLValue::Number(KapNumber::Long(v))));
         }
@@ -11883,12 +11891,9 @@ impl Engine {
                     .sum();
 
                 let b_elem = &b_elems[b_flat];
-                if a_elem
-                    .as_ref()
-                    .total_cmp(b_elem.as_ref())
-                    .map(|o| o == Ordering::Equal)
-                    .unwrap_or(false)
-                {
+                // Kotlin find uses compareEqualsTotalOrdering(td=false) — VALUE equality
+                // merging numeric kinds (3 == 3.0). `deep_equal` mirrors that.
+                if Self::deep_equal(a_elem.as_ref(), b_elem.as_ref()) {
                     // match
                 } else {
                     match_found = false;
