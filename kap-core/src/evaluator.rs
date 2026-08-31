@@ -9211,6 +9211,9 @@ impl Engine {
         let unsupported = || {
             AplError::runtime("under not supported for function".to_string())
         };
+        if std::env::var("KAP_DEBUG_UNDER").is_ok() {
+            eprintln!("UNDER base={:?} wrapper={:?} left={:?}", base, wrapper, left);
+        }
         // Axis-qualified take/drop under (`↑[k]`/`↓[k]`) is DYADIC: the left arg
         // supplies the take/drop count (Kotlin 2-arg evalWithStructuralUnder2Arg).
         if let Some((is_take, count, axis)) = self.under_take_drop_spec_axis(wrapper, env, left)? {
@@ -9255,6 +9258,102 @@ impl Engine {
         }
         if left.is_some() {
             return Err(unsupported());
+        }
+        // ATOP / COMPOSE under (2-train `Chain2(f0,f1)` = `f0(f1(x))`, instr.kt:608):
+        //   Chain2(f0,f1).under(baseFn, a) = f1.under( λx. f0.under(baseFn,x), a )
+        // For a Chain2 of two structural-under-capable leaves (take/drop/identity),
+        // this reduces to: overlay apply_under_op(base, f0, f1(a))  into  a at f1's region.
+        // The outer `f1` selects its region of `a`; the inner `f0` is applied (recursively,
+        // via apply_under_op) to `f1(a)` with the SAME base — matching Kotlin's nested
+        // structuralUnder. Only fires for genuine 2-trains where BOTH members are
+        // function-expressions (a value-left-bound take/drop `Train[v, ↑]` is a leaf, not
+        // a compose, and must fall through to the overlay block below).
+        if let Instr::Train { funcs, .. } = wrapper {
+            if funcs.len() == 2
+                && self.is_under_compose_leaf(&funcs[0])
+                && self.is_under_compose_leaf(&funcs[1])
+            {
+                let f0 = &funcs[0];
+                let f1 = &funcs[1];
+                let a = self.eval_instr(right, env)?.force(self)?;
+                let src_dims = Self::value_dims(&a);
+                if src_dims.is_empty() {
+                    return Err(unsupported());
+                }
+                let rank = src_dims.len();
+                // Inner: f0.under(base, f1(a)). Reuse apply_under_op (handles nested
+                // take/drop/identity/compose leaves via the same machinery).
+                let f1a = self.eval_apply(f1, &None, right, env)?;
+                if std::env::var("KAP_DEBUG_UNDER").is_ok() {
+                    eprintln!("ATOP f0={:?} f1={:?} a={:?} f1a={:?}", f0, f1, src_dims, Self::value_dims(&f1a));
+                }
+                let inner = self.apply_under_op(
+                    base,
+                    f0,
+                    &None,
+                    &Box::new(Instr::Value(f1a.clone())),
+                    env,
+                )?;
+                if std::env::var("KAP_DEBUG_UNDER").is_ok() {
+                    eprintln!("ATOP inner_dims={:?} a_dims={:?}", Self::value_dims(&inner), src_dims);
+                }
+                // Outer region: f1's selected region of `a` (mirrors the overlay block
+                // at 9328-9357). A take/drop f1 resolves to per-axis counts via
+                // under_take_drop_spec; identity `⊢`/`⊣` selects the whole array.
+                if let Instr::Symbol { name, namespace: None } = f1 {
+                    if *name == "⊢" || *name == "⊣" {
+                        return Ok(inner);
+                    }
+                }
+                if let Some((is_take, counts)) = self.under_take_drop_spec(f1, env)? {
+                    let mut sel_dims = Vec::with_capacity(rank);
+                    let mut offset = Vec::with_capacity(rank);
+                    for i in 0..rank {
+                        let n = src_dims[i];
+                        match counts.get(i).copied() {
+                            None => {
+                                sel_dims.push(n);
+                                offset.push(0);
+                            }
+                            Some(c) if is_take => {
+                                let keep = (c.unsigned_abs() as usize).min(n);
+                                sel_dims.push(keep);
+                                offset.push(if c >= 0 { 0 } else { n - keep });
+                            }
+                            Some(c) => {
+                                let d = (c.unsigned_abs() as usize).min(n);
+                                sel_dims.push(n - d);
+                                offset.push(if c >= 0 { d } else { 0 });
+                            }
+                        }
+                    }
+                    if std::env::var("KAP_DEBUG_UNDER").is_ok() {
+                        eprintln!("ATOP OUTER f1={:?} a_dims={:?} inner_dims={:?} sel_dims={:?} offset={:?}", f1, src_dims, Self::value_dims(&inner), sel_dims, offset);
+                    }
+                    let r = {
+                        // `inner` may be stored nested (row-vectors) while `a` is
+                        // flat-raveled; `overlay_replacement` reads its replacement as a
+                        // one-level flat ravel, so deep-flatten `inner` to match `a`'s
+                        // representation before overlaying.
+                        let inner_flat = self.deep_flatten(&inner);
+                        let inner_dims = Self::value_dims(&inner);
+                        // Use make_simple_or_nested (flat ravel) so the replacement has
+                        // the SAME flat representation as `a`; build_nested would re-nest
+                        // rows and break overlay_replacement's one-level flat read.
+                        let inner_ravel = self.make_simple_or_nested(inner_dims, inner_flat)?;
+                        self.overlay_replacement(&a, &sel_dims, &inner_ravel, &offset)?
+                    };
+                    if std::env::var("KAP_DEBUG_UNDER").is_ok() {
+                        let rf = self.flat_elements(&r);
+                        eprintln!("ATOP result_flat.len={} first3_dims={:?}", rf.len(), rf.iter().take(3).map(|v| Self::value_dims(v)).collect::<Vec<_>>());
+                    }
+                    return Ok(r);
+                }
+                // f1 is a structural-under-capable leaf we don't yet specialise (e.g.
+                // axis-qualified take/drop) — fall through to unsupported rather than
+                // silently misbehave.
+                return Err(unsupported());
+            }
         }
         // v = wrapper(a)
         let wa = self.eval_apply(wrapper, &None, right, env)?;
@@ -9490,6 +9589,29 @@ impl Engine {
             Instr::AxisApplied { func, .. }
             if matches!(func.as_ref(), Instr::Symbol { name, namespace: None }
                 if name == "↑" || name == "↓"))
+    }
+
+    /// True when `f` is a structural-under leaf the 2-train COMPOSE block in
+    /// `apply_under_op` can specialise via overlay: a bare/axis/left-bound
+    /// take/drop, or identity (`⊢`/`⊣`). Anything else (reshape, generic
+    /// inverse-capable wrapper) is NOT intercepted — it falls through to the
+    /// reshape/inverse paths so we don't regress cases the inverse machinery
+    /// already handles (e.g. `(1↑2 2⍴)` which is take-under-reshape).
+    fn is_under_compose_leaf(&self, f: &Instr) -> bool {
+        match f {
+            Instr::Symbol { name, namespace: None } => {
+                matches!(name.as_str(), "↑" | "↓" | "⊢" | "⊣")
+            }
+            Instr::AxisApplied { func, .. } => {
+                matches!(func.as_ref(), Instr::Symbol { name, namespace: None }
+                    if name == "↑" || name == "↓")
+            }
+            Instr::Train { funcs, .. } if funcs.len() == 2 => {
+                matches!(funcs[1], Instr::Symbol { ref name, namespace: None }
+                    if name == "↑" || name == "↓")
+            }
+            _ => false,
+        }
     }
 
     /// If `wrapper` is an axis-qualified take/drop (`↑[k]`/`↓[k]`), return
@@ -10200,6 +10322,27 @@ impl Engine {
             APLValue::Array(a) => a.elements(),
             other => vec![Rc::new(other.clone())],
         }
+    }
+
+    /// Deep ravel: flatten `v` to a single flat vector of scalars (rank-0 leaves),
+    /// row-major, regardless of whether `v` is stored flat or nested. Used to
+    /// normalise a structural-under result (which may be nested) before feeding it
+    /// as the `replacement` argument to `overlay_replacement` (which reads its
+    /// replacement as a one-level flat ravel alongside `src`).
+    fn deep_flatten(&self, v: &AplRef<APLValue>) -> Vec<AplRef<APLValue>> {
+        let mut out = Vec::new();
+        let elems = match v.as_ref() {
+            APLValue::Array(a) => a.elements(),
+            other => return vec![Rc::new(other.clone())],
+        };
+        for e in elems {
+            if matches!(e.as_ref(), APLValue::Array(_)) {
+                out.extend(self.deep_flatten(&e));
+            } else {
+                out.push(e.clone());
+            }
+        }
+        out
     }
 
     /// Build `(key, value)` pairs from a key-value array argument to `map:with`,
