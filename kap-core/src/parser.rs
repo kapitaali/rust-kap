@@ -4721,7 +4721,7 @@ impl<'a> Parser<'a> {
     /// or a catenate `,`.
     fn parse_function_atom(&mut self) -> Result<Instr, AplError> {
         let t = self.peek().ok_or_else(|| self.err("expected a function in train"))?;
-        match &t.token {
+        let result = (match &t.token {
             Token::ApplyToken => {
                 // `⍞name`: a dynamic function reference — the value bound to `name`
                 // is used as a function. Parse the following symbol into a `DynamicRef`.
@@ -4893,8 +4893,32 @@ impl<'a> Parser<'a> {
                     None => Err(self.err("λ: unexpected end of input")),
                 }
             }
-            _ => Err(self.err("expected a function in train")),
+            _ => return Err(self.err("expected a function in train")),
+        })?;
+        // parseAxis (parser.rs main loop :1045): a trailing `[axis]` after a
+        // function atom qualifies the function. The `⍢` operator's operand is parsed
+        // via parse_function_atom (line 848), so without this, `↑[1]` in
+        // `(1+)⍢↑[1]` would drop the axis and reach apply_under_op as bare `↑`.
+        if let Some(Token::OpenBracket) = self.peek().map(|t| &t.token) {
+            let axis_ok = matches!(
+                &result,
+                Instr::Symbol { name, .. }
+                    if matches!(
+                        name.as_str(),
+                        "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖" | "↑" | "↓"
+                    )
+            );
+            if axis_ok {
+                self.advance();
+                let axis = self.parse_apply()?;
+                self.expect(Token::CloseBracket, "expected ] after axis specifier")?;
+                return Ok(Instr::AxisApplied {
+                    func: Box::new(result),
+                    axis: Box::new(axis),
+                });
+            }
         }
+        Ok(result)
     }
 
     /// Whether an expression is a *function* suitable for a train operand.
