@@ -9211,6 +9211,33 @@ impl Engine {
         let unsupported = || {
             AplError::runtime("under not supported for function".to_string())
         };
+        // Axis-qualified take/drop under (`↑[k]`/`↓[k]`) is DYADIC: the left arg
+        // supplies the take/drop count (Kotlin 2-arg evalWithStructuralUnder2Arg).
+        if let Some((is_take, count, axis)) = self.under_take_drop_spec_axis(wrapper, env, left)? {
+            let left_for_wrapper = left.clone();
+            let a = self.eval_instr(right, env)?.force(self)?;
+            let src_dims = Self::value_dims(&a);
+            if src_dims.is_empty() || axis >= src_dims.len() {
+                return Err(unsupported());
+            }
+            let wa = self.eval_apply(wrapper, &left_for_wrapper, right, env)?;
+            let bwa = self.eval_apply(base, &None, &Box::new(Instr::Value(wa.clone())), env)?;
+            let n = src_dims[axis];
+            let (sel_dim, off) = if is_take {
+                let keep = (count.unsigned_abs() as usize).min(n);
+                (keep, if count >= 0 { 0 } else { n - keep })
+            } else {
+                let d = (count.unsigned_abs() as usize).min(n);
+                (n - d, if count >= 0 { d } else { 0 })
+            };
+            let sel_dims: Vec<usize> = (0..src_dims.len())
+                .map(|i| if i == axis { sel_dim } else { src_dims[i] })
+                .collect();
+            let offset: Vec<usize> = (0..src_dims.len())
+                .map(|i| if i == axis { off } else { 0 })
+                .collect();
+            return self.overlay_replacement(&a, &sel_dims, &bwa, &offset);
+        }
         if left.is_some() {
             return Err(unsupported());
         }
@@ -9220,38 +9247,92 @@ impl Engine {
         let bwa = self.eval_apply(base, &None, &Box::new(Instr::Value(wa.clone())), env)?;
 
         // OVERLAY family: if the wrapper is a take/drop, splice `bwa` back into the
-        // original argument instead of applying an inverse (drop.kt:84/:351).
+        // original argument instead of applying an inverse (drop.kt:84/:351). A
+        // dyadic left arg supplies the take/drop COUNT (Kotlin's 2-arg
+        // BARE MONADIC TAKE (`↑`) under: Kotlin's monadic "first" selects the
+        // FIRST CELL (a single element), NOT the first leading-axis slice
+        // (drop.kt:84 → replacementDimensions = [1,1,…]). The port's monadic `↑`
+        // returns the first ROW (rank n−1), so we must not route this through the
+        // generic take-overlay (rank mismatch on matrices). Instead: transform the
+        // first cell and write it straight back (a 1-element flat splice).
+        if let Instr::Symbol { name, namespace: None } = wrapper {
+            if name == "↑" {
+                let a = self.eval_instr(right, env)?.force(self)?;
+                let src_dims = Self::value_dims(&a);
+                if src_dims.is_empty() {
+                    return Err(unsupported());
+                }
+                let a_flat = self.flat_elements(&a);
+                if a_flat.is_empty() {
+                    return Ok(a);
+                }
+                let first = a_flat[0].clone();
+                let updated =
+                    self.eval_apply(base, &None, &Box::new(Instr::Value(first)), env)?;
+                let mut out = a_flat.clone();
+                out[0] = updated;
+                return self.build_nested(&out, &src_dims);
+            }
+        }
+
+        // OVERLAY family: if the wrapper is a take/drop, splice `bwa` back into the
+        // original argument instead of applying an inverse (drop.kt:84/:351). A
+        // dyadic left arg supplies the take/drop COUNT (Kotlin's 2-arg
+        // evalWithStructuralUnder2Arg, under_take_drop_spec_axis).
         if let Some((is_take, counts)) = self.under_take_drop_spec(wrapper, env)? {
+            let left_for_wrapper = if self.take_drop_wants_left(wrapper) {
+                left.clone()
+            } else {
+                None
+            };
             let a = self.eval_instr(right, env)?.force(self)?;
             let src_dims = Self::value_dims(&a);
             if src_dims.is_empty() {
                 return Err(unsupported());
             }
             let rank = src_dims.len();
+            let wa = self.eval_apply(wrapper, &left_for_wrapper, right, env)?;
+            // Re-derive bwa against the wrapper's actual result (handles dyadic count).
+            let bwa = if left_for_wrapper.is_some() {
+                self.eval_apply(base, &None, &Box::new(Instr::Value(wa.clone())), env)?
+            } else {
+                bwa.clone()
+            };
             // Selected-region shape + its offset in the source. Mirrors
             // TakeArrayValue/DropArrayValue.replaceForUnder (drop.kt:174/:260):
             // a POSITIVE take selects from the front (offset 0); a NEGATIVE take
             // selects the tail (offset = n + count). For drop it is inverted — a
-            // positive drop leaves the tail (offset = count).
+            // positive drop leaves the tail (offset = count). A BARE monadic `↑`
+            // selects the FIRST CELL along EVERY axis (drop.kt:84
+            // `replacementDimensions = [1,1,…]`), so every axis keeps 1; a bare `↓`
+            // is just `1↓` (drop 1 from the front of axis 0) and uses the normal
+            // count logic below (not the all-axes rule).
+            let bare = matches!(wrapper,
+                Instr::Symbol { name, namespace: None } if name == "↑");
             let mut sel_dims = Vec::with_capacity(rank);
             let mut offset = Vec::with_capacity(rank);
             for i in 0..rank {
                 let n = src_dims[i];
                 let c = counts.get(i).copied();
-                match c {
-                    None => {
-                        sel_dims.push(n);
-                        offset.push(0);
-                    }
-                    Some(c) if is_take => {
-                        let keep = (c.unsigned_abs() as usize).min(n);
-                        sel_dims.push(keep);
-                        offset.push(if c >= 0 { 0 } else { n - keep });
-                    }
-                    Some(c) => {
-                        let d = (c.unsigned_abs() as usize).min(n);
-                        sel_dims.push(n - d);
-                        offset.push(if c >= 0 { d } else { 0 });
+                if bare {
+                    sel_dims.push(1);
+                    offset.push(0);
+                } else {
+                    match c {
+                        None => {
+                            sel_dims.push(n);
+                            offset.push(0);
+                        }
+                        Some(c) if is_take => {
+                            let keep = (c.unsigned_abs() as usize).min(n);
+                            sel_dims.push(keep);
+                            offset.push(if c >= 0 { 0 } else { n - keep });
+                        }
+                        Some(c) => {
+                            let d = (c.unsigned_abs() as usize).min(n);
+                            sel_dims.push(n - d);
+                            offset.push(if c >= 0 { d } else { 0 });
+                        }
                     }
                 }
             }
@@ -9385,6 +9466,59 @@ impl Engine {
         self.eval_apply(&inv_wrapper, &None, &Box::new(Instr::Value(bwa)), env)
     }
 
+    /// True when `wrapper` is an axis-qualified take/drop (`↑[k]`/`↓[k]`) whose
+    /// COUNT comes from the dyadic left arg of the under-fn (Kotlin 2-arg
+    /// `evalWithStructuralUnder2Arg`). Only then does `apply_under_op` thread
+    /// `left` into the wrapper evaluation.
+    fn take_drop_wants_left(&self, wrapper: &Instr) -> bool {
+        matches!(wrapper,
+            Instr::AxisApplied { func, .. }
+            if matches!(func.as_ref(), Instr::Symbol { name, namespace: None }
+                if name == "↑" || name == "↓"))
+    }
+
+    /// If `wrapper` is an axis-qualified take/drop (`↑[k]`/`↓[k]`), return
+    /// `(is_take, count, axis)` so `apply_under_op` can drive the overlay path
+    /// with the count supplied by the dyadic left arg (operator.kt `⍢` 2-arg
+    /// form: `count (baseFn)⍢(take[axis]) array`). The `count` defaults to 1 when
+    /// there is no left arg. Returns `None` for any other wrapper.
+    fn under_take_drop_spec_axis(
+        &self,
+        wrapper: &Instr,
+        env: &AplRef<Environment>,
+        left: &Option<Box<Instr>>,
+    ) -> Result<Option<(bool, i64, usize)>, AplError> {
+        if let Instr::AxisApplied { func, axis } = wrapper {
+            if let Instr::Symbol { name, namespace: None } = func.as_ref() {
+                let is_take = match name.as_str() {
+                    "↑" => true,
+                    "↓" => false,
+                    _ => return Ok(None),
+                };
+                let axis_val = self.eval_instr(axis, env)?.force(self)?;
+                let axis_i = match axis_val.as_ref() {
+                    APLValue::Number(n) => n
+                        .as_long()
+                        .map_err(|e| AplError::runtime(e))?
+                        .max(0) as usize,
+                    _ => return Ok(None),
+                };
+                let count = match left {
+                    Some(l) => {
+                        let lv = self.eval_instr(l, env)?.force(self)?;
+                        match lv.as_ref() {
+                            APLValue::Number(n) => n.as_long().map_err(|e| AplError::runtime(e))?,
+                            _ => return Ok(None),
+                        }
+                    }
+                    None => 1,
+                };
+                return Ok(Some((is_take, count, axis_i)));
+            }
+        }
+        Ok(None)
+    }
+
     /// If `wrapper` is a take/drop derived function (`3↑`, `10↓`, bare `↑`/`↓`),
     /// return `(is_take, counts)` so `apply_under_op` can use the OVERLAY rule
     /// (drop.kt:84/:351) instead of an inverse. Returns `None` for any other
@@ -9398,14 +9532,12 @@ impl Engine {
         // `(10↓)` and `(¯1↑)` parse (the value binds as the fn's left argument).
         match wrapper {
             Instr::Symbol { name, namespace: None } if name == "↑" || name == "↓" => {
-                // Bare monadic `↑`/`↓`: Kotlin's monadic drop removes 1 along the
-                // leading axis; monadic take is "first" and is NOT the overlay
-                // form, so only `↓` qualifies here.
-                if name == "↓" {
-                    Ok(Some((false, vec![1])))
-                } else {
-                    Ok(None)
-                }
+                // Bare monadic `↑`/`↓` under: Kotlin's monadic "first"/"drop-first"
+                // selects the FIRST CELL along EVERY axis (drop.kt:84/:351
+                // evalWithStructuralUnder1Arg → replacementDimensions = [1,1,…]),
+                // NOT a leading-axis slice. So every axis gets count 1. The overlay
+                // branch treats each `1` as "keep 1" on that axis.
+                Ok(Some((name == "↑", vec![1])))
             }
             Instr::Train { funcs, reverse: false, compose: false } if funcs.len() == 2 => {
                 let fname = match &funcs[1] {
