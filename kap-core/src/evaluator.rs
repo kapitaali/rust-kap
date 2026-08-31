@@ -5784,6 +5784,41 @@ impl Engine {
                 return self.adverb_inverse_with_proto(inner, left, right, env, &proto_val);
             }
         }
+        // Resolve a user-fn alias to its underlying primitive BEFORE dispatching,
+        // so `a⇐- ⋄ (10×)⍢(1 a⍨)` (where `a⍨` = `-⍨`) reaches the `-` inverse rule
+        // instead of erroring "`a`: Function does not have an inverse".
+        let resolved_owned: Option<Box<Instr>> =
+            if let Instr::Symbol { name, namespace: None } = func.as_ref() {
+                self.resolve_under_leaf_name(func, env).map(|resolved| {
+                    Box::new(Instr::Symbol {
+                        name: resolved,
+                        namespace: None,
+                    })
+                })
+            } else if let Instr::Derived { func: inner, op } = func.as_ref() {
+                if matches!(op.as_ref(), Instr::Symbol { name, namespace: None } if name == "⍨") {
+                    self.resolve_under_leaf_name(inner, env).map(|resolved| {
+                        Box::new(Instr::Derived {
+                            func: Box::new(Instr::Symbol {
+                                name: resolved,
+                                namespace: None,
+                            }),
+                            op: Box::new(Instr::Symbol {
+                                name: "⍨".to_string(),
+                                namespace: None,
+                            }),
+                        })
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+        let func: &Box<Instr> = match &resolved_owned {
+            Some(b) => b,
+            None => func,
+        };
         let (fname, _inv_axis) = match func.as_ref() {
             Instr::Symbol { name, .. } => (name.clone(), None),
             // An axis-applied function (`⌽[0]˝`, i.e. `(f[k])˝`) keeps its axis:
@@ -9270,8 +9305,8 @@ impl Engine {
         // a compose, and must fall through to the overlay block below).
         if let Instr::Train { funcs, .. } = wrapper {
             if funcs.len() == 2
-                && self.is_under_compose_leaf(&funcs[0])
-                && self.is_under_compose_leaf(&funcs[1])
+                && self.is_under_compose_leaf(&funcs[0], env)
+                && self.is_under_compose_leaf(&funcs[1], env)
             {
                 let f0 = &funcs[0];
                 let f1 = &funcs[1];
@@ -9597,10 +9632,52 @@ impl Engine {
     /// inverse-capable wrapper) is NOT intercepted — it falls through to the
     /// reshape/inverse paths so we don't regress cases the inverse machinery
     /// already handles (e.g. `(1↑2 2⍴)` which is take-under-reshape).
-    fn is_under_compose_leaf(&self, f: &Instr) -> bool {
+    /// Resolve `f` to its effective function symbol, following a user-fn alias
+    /// (`a ⇐ ↑` stores `UserFn{ body: Symbol(↑) }`). Used by the take/drop-under
+    /// recognisers so a bound alias like `(1 a)` is treated exactly like `(1 ↑)`.
+    /// Also sees through the commute adverb `⍨` (`a⍨` → `a`).
+    /// Returns `Some("↑"|"↓"|"⊢"|"⊣")` when `f` is (or aliases) a take/drop/identity
+    /// leaf, `None` otherwise.
+    fn resolve_under_leaf_name(&self, f: &Instr, env: &AplRef<Environment>) -> Option<String> {
         match f {
             Instr::Symbol { name, namespace: None } => {
-                matches!(name.as_str(), "↑" | "↓" | "⊢" | "⊣")
+                // A named user fn aliasing a primitive (`a⇐↑`).
+                if let Some(v) = env.lookup(name, &None) {
+                    if let APLValue::UserFn { body, .. } = v.as_ref() {
+                        if let Instr::Symbol { name, namespace: None } = body.as_ref() {
+                            return Some(name.clone());
+                        }
+                    }
+                }
+                None
+            }
+            // `a⍨` (commute) resolves to `a`.
+            Instr::Derived { func, op } if matches!(op.as_ref(),
+                Instr::Symbol { name, namespace: None } if name == "⍨") =>
+            {
+                self.resolve_under_leaf_name(func, env)
+            }
+            _ => None,
+        }
+    }
+
+    /// True when `f` is a structural-under leaf the 2-train COMPOSE block in
+    /// `apply_under_op` can specialise via overlay: a bare/axis/left-bound
+    /// take/drop, or identity (`⊢`/`⊣`); also a user-fn alias to one (`a⇐↑`).
+    /// Anything else (reshape, generic inverse-capable wrapper) is NOT
+    /// intercepted — it falls through to the reshape/inverse paths so we don't
+    /// regress cases the inverse machinery already handles.
+    fn is_under_compose_leaf(&self, f: &Instr, env: &AplRef<Environment>) -> bool {
+        match f {
+            Instr::Symbol { name, namespace: None } => {
+                if matches!(name.as_str(), "↑" | "↓" | "⊢" | "⊣") {
+                    return true;
+                }
+                // user-fn alias to a primitive leaf
+                match self.resolve_under_leaf_name(f, env) {
+                    Some(resolved) => matches!(resolved.as_str(), "↑" | "↓" | "⊢" | "⊣"),
+                    None => false,
+                }
             }
             Instr::AxisApplied { func, .. } => {
                 matches!(func.as_ref(), Instr::Symbol { name, namespace: None }
@@ -9676,12 +9753,31 @@ impl Engine {
                 // branch treats each `1` as "keep 1" on that axis.
                 Ok(Some((name == "↑", vec![1])))
             }
+            // Bare user-fn alias to `↑`/`↓` (`a⇐↑ ⋄ (100+)⍢a`), monadic form.
+            Instr::Symbol { name, namespace: None }
+                if name != "↑" && name != "↓"
+                    && matches!(
+                        self.resolve_under_leaf_name(wrapper, env).as_deref(),
+                        Some("↑") | Some("↓")
+                    ) =>
+            {
+                let is_take = matches!(self.resolve_under_leaf_name(wrapper, env).as_deref(), Some("↑"));
+                Ok(Some((is_take, vec![1])))
+            }
             Instr::Train { funcs, reverse: false, compose: false } if funcs.len() == 2 => {
+                // `funcs[1]` is normally a literal `↑`/`↓`, but it may be a user
+                // symbol aliasing one (`a⇐↑ ⋄ (1 a)`) or a commute of one
+                // (`a⇐- ⋄ (1 a⍨)`). Resolve the alias / unwrap `⍨`.
                 let fname = match &funcs[1] {
-                    Instr::Symbol { name, namespace: None } => name.as_str(),
-                    _ => return Ok(None),
+                    Instr::Symbol { name, namespace: None } if name == "↑" || name == "↓" => {
+                        name.clone()
+                    }
+                    other => match self.resolve_under_leaf_name(other, env) {
+                        Some(resolved) => resolved,
+                        None => return Ok(None),
+                    },
                 };
-                let is_take = match fname {
+                let is_take = match fname.as_str() {
                     "↑" => true,
                     "↓" => false,
                     _ => return Ok(None),
