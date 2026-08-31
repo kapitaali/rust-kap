@@ -2685,6 +2685,18 @@ impl Engine {
                 None => self.from_list(right_val),
                 Some(_) => Err(AplError::runtime("fromList: Function cannot be called with two arguments".into())),
             },
+            // `comp` / `collapse` — Kotlin CompFunction (div_functions.kt:76), monadic-only.
+            // `eval1Arg` returns `a.collapse()` (types.kt CollapsedArrayImpl). Semantics
+            // (oracle-verified): preserve the OUTER dimensions, recursively collapse each
+            // element; scalars (number/char/null) stop, arrays/nested boxes are opened one
+            // level. So `comp 1 2 3` → `⟨1 2 3⟩` (rank 1), `comp ⊂ 1 2 3` → a rank-0 box of
+            // `⟨1 2 3⟩` (depth 2, `⍴` ⍬), `comp ⊂⊂ 1 2 3` → depth 3, `comp (1 2)(3 4)` →
+            // `⟨⟨1 2⟩ ⟨3 4⟩⟩`, `comp 3 0 ⍴ 3` → a 3×0 array (`⍴` `⟨3 0⟩`); `comp ⊂⊂⊂…` keeps
+            // adding depth (does NOT reduce it — it discloses the inner value, not the box).
+            "comp" => match left_val {
+                None => self.collapse(right_val),
+                Some(_) => Err(AplError::runtime("comp: Function cannot be called with two arguments".into())),
+            },
             // `⫇` / `group` — Kotlin GroupFunction (group-index.kt). Left `L` is a rank-1
             // vector of group indices (negative => element skipped). Right `R` has major
             // axis == length(L); each index selects into R's major cells. Returns a vector
@@ -3328,6 +3340,10 @@ impl Engine {
                 // Namespaced `map:` natives (builtins/map.kt): admitted via is_known_fn
                 // at parse time; listed here so the eval-time late gate knows them.
                 | "map:with" | "map:get" | "map:remove" | "map:entries" | "map:size" | "map:keys"
+                // `comp` / `collapse` (monadic builtin, div_functions.kt): admitted at
+                // parse time via is_primitive_op; listed here so the eval-time late gate
+                // knows it (two-gate rule).
+                | "comp"
 )
  }
 
@@ -6973,6 +6989,56 @@ impl Engine {
             }
             _ => Err(AplError::runtime("fromList: Argument is not a list".into())),
         }
+    }
+
+    /// Kap's `comp` / `collapse` (Kotlin `CompFunction`, div_functions.kt:76 →
+    /// `a.collapse()` → `APLArray.collapseInt`/`CollapsedArrayImpl.make` in types.kt).
+    /// Monadic only.
+    ///
+    /// Faithful port of Kotlin `collapseInt(withDiscard=false)`:
+    ///   * an array of rank 0 → `EnclosedAPLValue.make(valueAt(0).collapse())` — i.e.
+    ///     disclose the single boxed element and collapse THAT (so `comp ⊂⊂ 1 2 3`
+    ///     stays depth 3, and `comp ⍬` → `⍬`, not `0`).
+    ///   * a rank>0 array → `CollapsedArrayImpl.make(v)`: preserve the outer
+    ///     dimensions, and collapse *each* inner element once (so `comp (1 2)(3 4)`
+    ///     → `⟨⟨1 2⟩ ⟨3 4⟩⟩`, and `comp 3 0 ⍴ 3` keeps shape `⟨3 0⟩`).
+    ///   * non-arrays (scalar/string/Null) → returned unchanged (collapseInt identity).
+    fn collapse(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        let v = right_val.force(self)?;
+        match v.as_ref() {
+            APLValue::Array(a) if a.dimensions.is_empty() => {
+                // rank-0 array: disclose element 0 (Kotlin `v.valueAt(0)`), collapse
+                // THAT, then re-enclose it (Kotlin `EnclosedAPLValue.make(...)`). The
+                // re-enclose is a no-op for atoms/Null (`comp ⍬ → ⍬`) but adds the box
+                // for an array inner (`comp ⊂ 1 2 3` → a rank-0 box of `⟨1 2 3⟩`, and
+                // `comp ⊂⊂ 1 2 3` → depth 3).
+                let mut elems = a.elements();
+                let inner = elems.remove(0);
+                let collapsed = self.collapse(inner)?;
+                self.enclose(collapsed)
+            }
+            APLValue::Array(a) => {
+                // rank>0 array: collapse each element, preserving outer dims.
+                let dims = a.dimensions.clone();
+                let inner = a.elements();
+                let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(inner.len());
+                for e in inner {
+                    out.push(self.collapse_one(e)?);
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    dims,
+                    ArrayData::Nested(out),
+                )))))
+            }
+            // Scalars, strings, and Null collapse to themselves unchanged.
+            other => Ok(Rc::new(other.clone())),
+        }
+    }
+
+    /// Collapse a single element of a rank>0 array one level (the body of
+    /// `CollapsedArrayImpl.make`): `orig.valueAt(i).collapse()` for each member.
+    fn collapse_one(&self, e: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        self.collapse(e)
     }
 
     /// Kap's `⫇` / `group` (Kotlin `GroupFunction`, group-index.kt). Left `L` is a rank-1

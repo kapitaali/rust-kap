@@ -3239,6 +3239,7 @@ impl<'a> Parser<'a> {
                 | "⍕" | "format" | "⍎" | "execute" | "typeof"
                 | "namespace" | "import" | "declare" | "use" | "isLocallyBound"
                 | "throw"
+                | "comp"
         )
     }
 
