@@ -9258,6 +9258,120 @@ impl Engine {
             return self.overlay_replacement(&a, &sel_dims, &bwa, &offset);
         }
 
+        // TAKE/DROP-OF-RESHAPE family: `(1↑2 2⍴)` = take with count 1 whose argument
+        // is itself a reshape `(2 2⍴)`. The Kotlin path is Atop(take, reshape).under1
+        // (operator.kt:325) → `take.evalWithStructuralUnder2Arg(baseFn, reshape(a),
+        // a)` → take-overlay where the OVERLAY TARGET is the ORIGINAL `a` and the
+        // selected region is a leading (count ≥ 0) or trailing (count < 0) prefix of
+        // `a`'s flat whose WIDTH equals the flat size of `wa` (the wrapper applied to
+        // `a`). Because the inner reshape changes rank, `baseFn(wa)` is spliced FLAT
+        // into that region (Kotlin TakeArrayValue.replaceForUnder against the original
+        // source, which ranks `updated` down to `a`'s rank and overlays the leading
+        // cell(s)). The width is taken from `bwa`'s actual flat length (which equals
+        // `wa`'s), so rank differences between port and oracle are harmless.
+        if let Some((_is_take, counts, _)) = self.under_take_drop_spec_inner(wrapper, env)? {
+            let a = self.eval_instr(right, env)?.force(self)?;
+            let src_dims = Self::value_dims(&a);
+            let a_flat = self.flat_elements(&a);
+            let b_flat = self.flat_elements(&bwa);
+            let c = counts.get(0).copied().unwrap_or(0);
+            let k_total = b_flat.len();
+            if k_total > a_flat.len() {
+                return Err(AplError::runtime(
+                    "under replacement size does not match selected region".into(),
+                ));
+            }
+            let mut out = a_flat.clone();
+            if c >= 0 {
+                for (i, v) in b_flat.iter().enumerate().take(k_total) {
+                    out[i] = v.clone();
+                }
+            } else {
+                for (i, v) in b_flat.iter().enumerate().take(k_total) {
+                    out[a_flat.len() - k_total + i] = v.clone();
+                }
+            }
+            return self.build_nested(&out, &src_dims);
+        }
+
+        // RESHAPE family: a left-bound reshape wrapper `(dims ⍴)` takes the RESIZE
+        // rule (reshape.kt:336 `evalWithStructuralUnder2Arg`), NOT an inverse. The
+        // Kotlin path is `LeftAssignedFunction.evalWithStructuralUnder1Arg` →
+        // `reshape.evalWithStructuralUnder2Arg(baseFn, dims, b)`, where `b` is the
+        // ORIGINAL right arg: v = dims ⍴ b; updated = baseFn(v); the result is then
+        // `b`'s shape, with `updated` spliced into the leading `⍴v` elements and the
+        // tail of `b` (past that count) appended when `⍴b > ⍴v`.
+        if let Some(shape_counts) = self.under_reshape_spec(wrapper, env)? {
+            let b = self.eval_instr(right, env)?.force(self)?;
+            let b_dims = Self::value_dims(&b);
+            let b_content = match b.as_ref() {
+                APLValue::Array(a) => a.element_count() as i64,
+                APLValue::Null => 0,
+                _ => 1,
+            };
+            // Build the bound shape as a value to feed `reshape`.
+            let shape_val = self.build_nested(
+                &shape_counts
+                    .iter()
+                    .map(|c| Rc::new(APLValue::Number(KapNumber::Long(*c))))
+                    .collect::<Vec<_>>(),
+                &[shape_counts.len()],
+            )?;
+            let under_value = self.reshape(shape_val.clone(), b.clone())?;
+            let updated = self.eval_apply(base, &None, &Box::new(Instr::Value(under_value.clone())), env)?;
+            let uv_dims = Self::value_dims(&updated);
+            let uv_content = match updated.as_ref() {
+                APLValue::Array(a) => a.element_count() as i64,
+                APLValue::Null => 0,
+                _ => 1,
+            };
+            if uv_dims != Self::value_dims(&under_value) {
+                return Err(AplError::runtime(
+                    "Result does not have the same dimensions as input".into(),
+                ));
+            }
+            if b_content < uv_content {
+                return Err(AplError::runtime(
+                    "When performing an operation under a reshape, the new shape must be smaller than or equal to the original shape".into(),
+                ));
+            }
+            if b_content == uv_content {
+                // Reshape `updated` back to `b`'s ORIGINAL shape.
+                let b_shape_val = self.build_nested(
+                    &b_dims
+                        .iter()
+                        .map(|c| Rc::new(APLValue::Number(KapNumber::Long(*c as i64))))
+                        .collect::<Vec<_>>(),
+                    &[b_dims.len()],
+                )?;
+                return self.reshape(b_shape_val, updated);
+            }
+            // Else: result shape = `b_dims`; lead with `updated` flattened to
+            // `uv_content`, then the tail of `b` past `uv_content` (Kotlin
+            // Concatenated1DArrays of `makeResizedArray(uvContent, updated)` and
+            // `DropArrayValue(uvContent, makeResizedArray(bContent, b))`).
+            let uv_flat = self.flat_elements(&updated);
+            let b_flat = self.flat_elements(&b);
+            let tail = if (uv_content as usize) < b_flat.len() {
+                &b_flat[uv_content as usize..]
+            } else {
+                &[][..]
+            };
+            let mut combined: Vec<AplRef<APLValue>> = Vec::with_capacity(uv_flat.len() + tail.len());
+            combined.extend(uv_flat);
+            combined.extend_from_slice(tail);
+            let result = self.build_nested(&combined, &[combined.len()])?;
+            // Reshape the concatenation to `b`'s original shape.
+            let b_shape_val = self.build_nested(
+                &b_dims
+                    .iter()
+                    .map(|c| Rc::new(APLValue::Number(KapNumber::Long(*c as i64))))
+                    .collect::<Vec<_>>(),
+                &[b_dims.len()],
+            )?;
+            return self.reshape(b_shape_val, result);
+        }
+
         // INVERSE family: res = wrapper⁻¹(res'). Reuse the port's generic inverse
         // machinery (the same evalInverse* dispatch the `˝` adverb uses), which
         // covers the math/⍉/⍨ wrappers that call inversibleStructuralUnder1Arg.
@@ -9312,6 +9426,118 @@ impl Engine {
             }
             _ => Ok(None),
         }
+    }
+
+    /// If `wrapper` is a left-bound reshape (`(2 2⍴)`, `(¯1 3⍴)`…) — a value-train
+    /// whose inner fn is `⍴` — return the bound shape vector so `apply_under_op`
+    /// can use the RESIZE rule (reshape.kt:336 `evalWithStructuralUnder2Arg`)
+    /// instead of an inverse. Returns `None` for any other wrapper.
+    fn under_reshape_spec(
+        &self,
+        wrapper: &Instr,
+        env: &AplRef<Environment>,
+    ) -> Result<Option<Vec<i64>>, AplError> {
+        // `Train[value, Symbol ⍴]` is how `(2 2⍴)` parses (the shape binds as the
+        // fn's left argument, matching `LeftAssignedFunction` in Kotlin).
+        if let Instr::Train { funcs, reverse: false, compose: false } = wrapper {
+            if funcs.len() == 2 {
+                let fname = match &funcs[1] {
+                    Instr::Symbol { name, namespace: None } => name.as_str(),
+                    _ => return Ok(None),
+                };
+                if fname != "⍴" {
+                    return Ok(None);
+                }
+                let v = self.eval_instr(&funcs[0], env)?.force(self)?;
+                return match self.count_vector(v) {
+                    Ok(counts) => Ok(Some(counts)),
+                    Err(_) => Ok(None),
+                };
+            }
+        }
+        Ok(None)
+    }
+
+    /// Like `under_take_drop_spec`, but also peels a take/drop whose ARGUMENT is
+    /// itself a left-bound reshape — `(1↑2 2⍴)` = take-of-reshape. Returns
+    /// `(is_take, counts, _)` so `apply_under_op` can drive the take-overlay path
+    /// against the ORIGINAL right arg. Returns `None` for any other wrapper.
+    ///
+    /// Two parse shapes are accepted (both mean take-of-reshape):
+    ///  * flat 3-train `count ↑ reshapeTrain` (`funcs = [value, ↑/↓, reshapeTrain]`)
+    ///  * 2-train of trains `TakeTrain ReshapeTrain` (`funcs = [[value, ↑/↓], [value, ⍴]]`)
+    fn under_take_drop_spec_inner(
+        &self,
+        wrapper: &Instr,
+        env: &AplRef<Environment>,
+    ) -> Result<Option<(bool, Vec<i64>, Vec<i64>)>, AplError> {
+        let take_reshape = |take_func: &Instr, shape_func: &Instr| -> Option<(bool, Vec<i64>, Vec<i64>)> {
+            // take_func: a left-bound take/drop `Train[value, ↑/↓]`.
+            let (is_take, counts) = match take_func {
+                Instr::Train { funcs, reverse: false, compose: false } if funcs.len() == 2 => {
+                    let fname = match &funcs[1] {
+                        Instr::Symbol { name, namespace: None } => name.as_str(),
+                        _ => return None,
+                    };
+                    let is_take = match fname {
+                        "↑" => true,
+                        "↓" => false,
+                        _ => return None,
+                    };
+                    (is_take, funcs[0].clone())
+                }
+                _ => return None,
+            };
+            // shape_func: a left-bound reshape `Train[value, ⍴]`.
+            let shape = match shape_func {
+                Instr::Train { funcs, reverse: false, compose: false } if funcs.len() == 2 => {
+                    match &funcs[1] {
+                        Instr::Symbol { name, namespace: None } if name == "⍴" => funcs[0].clone(),
+                        _ => return None,
+                    }
+                }
+                _ => return None,
+            };
+            // Evaluate the bound count + shape; bail to None on any non-int.
+            None.map(|_: ()| (is_take, Vec::new(), Vec::new()))
+                .or_else(|| {
+                    let cv = match self.eval_instr(&counts, env).and_then(|v| v.force(self)) {
+                        Ok(v) => v,
+                        Err(_) => return None,
+                    };
+                    let counts = match self.count_vector(cv) {
+                        Ok(c) => c,
+                        Err(_) => return None,
+                    };
+                    let sv = match self.eval_instr(&shape, env).and_then(|v| v.force(self)) {
+                        Ok(v) => v,
+                        Err(_) => return None,
+                    };
+                    let shape = match self.count_vector(sv) {
+                        Ok(s) => s,
+                        Err(_) => return None,
+                    };
+                    Some((is_take, counts, shape))
+                })
+        };
+        if let Instr::Train { funcs, reverse: false, compose: false } = wrapper {
+            if funcs.len() == 3 {
+                // flat: `count ↑ reshapeTrain`
+                if let Instr::Symbol { name, namespace: None } = &funcs[1] {
+                    if name == "↑" || name == "↓" {
+                        if let Some(r) = take_reshape(&funcs[0], &funcs[2]) {
+                            return Ok(Some(r));
+                        }
+                    }
+                }
+            } else if funcs.len() == 2 {
+                // nested: `TakeTrain ReshapeTrain`
+                if let Some(r) = take_reshape(&funcs[0], &funcs[1]) {
+                    return Ok(Some(r));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Power operator `f⍣n` / `f⍣g` (Kotlin PowerAPLOperator, operator.kt:7-65).
