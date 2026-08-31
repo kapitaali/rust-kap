@@ -5174,10 +5174,15 @@ impl Engine {
             // array (so `⍬⍴5 → 5`, depth 0) and `valueAt(0)` then discloses the box for
             // an enclosed right arg (so `⍬⍴⊂1 2 3 → (1 2 3)`, depth 1 — NOT double-boxed).
             // Mimic that by returning the element at position 0 of `arrayify(b)` without
-            // adding any further boxing.
+            // adding any further boxing. The right arg's "is it an array" question is
+            // decided by KapArray semantics: a genuine scalar is rank 0 and gets wrapped
+            // to a 1-element array; `⍬` (Null, rank 0) is Kap's empty array and yields
+            // the empty-array prototype (`⍬⍴⍬ → ⍬`).
             APLValue::Null => {
                 let b = right_val.force(self)?;
                 let first: Rc<APLValue> = match b.as_ref() {
+                    // `⍬⍴⍬` (or any empty right arg): Kap's empty array prototype is 0,
+                    // and `EnclosedAPLValue.make(0)` returns the rank-0 box `⍬`.
                     APLValue::Array(a) if a.element_count() == 0 => {
                         Rc::new(APLValue::Number(KapNumber::Long(0)))
                     }
@@ -5194,6 +5199,20 @@ impl Engine {
                     }
                 };
                 return Ok(first);
+            }
+            // A scalar KEYWORD symbol left arg (`:match ⍴ 1 2 3 4`) is ALSO a computed
+            // dimension (Kotlin reshape.kt:259-271, `findSizeCalculationMethod(v0)` on
+            // the scalar left value). Only the known :match/:fill/:truncate/:recycle
+            // keywords are accepted; any other scalar symbol errors verbatim.
+            APLValue::Symbol { name, namespace } if namespace.as_deref() == Some("keyword") => {
+                match method_of(dims_val.as_ref()) {
+                    Some(Ok(m)) => specs.push(DimSpec::Computed(m)),
+                    _ => {
+                        return Err(AplError::runtime(
+                            "⍴: Wanted a value of type number. Got: symbol".into(),
+                        ))
+                    }
+                }
             }
             APLValue::Str(s) => {
                 // A string as a reshape shape means its length as a single dimension
@@ -5236,8 +5255,15 @@ impl Engine {
             APLValue::Array(a) => a.elements(),
             other => vec![Rc::new(other.clone())],
         };
+        // Kotlin `b.size`: an array contributes its element count; `⍬` (Null, Kap's
+        // empty array) has size 0, NOT 1. A genuine scalar (rank 0, non-⍬) is treated
+        // as a 1-element argument by `arrayify`, so size 1. This matters for computed
+        // dimensions: `⍬`-right reshapes resolve the computed dim to 0 (MATCH/TRUNCATE)
+        // or 1 (FILL/RECYCLE), and the "array arguments" guard below must NOT reject
+        // `⍬` (Kotlin's `APLEmptyArray` is a valid rank-1 size-0 array).
         let b_size = match data.as_ref() {
             APLValue::Array(a) => a.element_count() as i64,
+            APLValue::Null => 0,
             _ => 1,
         };
         let total_fixed: i64 = specs
@@ -5276,13 +5302,19 @@ impl Engine {
                 })
                 .collect()
         };
-        // Kotlin reshape.kt:294-296: a computed dimension requires the right
-        // arg to be an array (not a scalar). Throws BEFORE any divisibility check.
+        // Kotlin reshape.kt:294-296: a computed dimension rejects the right arg ONLY
+        // when it is a rank-0 *non-scalar* (an enclosed box like `⊂1 2 3`, whose
+        // dimensions are empty but which is not a primitive scalar) — `bDimensions.size
+        // == 0` AND `b` is a boxed array. A genuine scalar (rank 0) and `⍬`/Null (Kap's
+        // empty array, effectively a rank-1 size-0 array) are BOTH accepted: a scalar
+        // right arg yields a 1-element computed shape, and `⍬` yields size 0.
         if computed_count == 1 {
-            if data.dimensions().is_empty() {
-                return Err(AplError::runtime(
-                    "Calculated dimensions can only be used with array arguments".into(),
-                ));
+            if let APLValue::Array(a) = data.as_ref() {
+                if a.dimensions.is_empty() {
+                    return Err(AplError::runtime(
+                        "Calculated dimensions can only be used with array arguments".into(),
+                    ));
+                }
             }
         }
         // MATCH requires divisibility (Kotlin :312-320, error verbatim).
