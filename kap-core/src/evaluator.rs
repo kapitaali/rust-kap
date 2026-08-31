@@ -9238,6 +9238,21 @@ impl Engine {
                 .collect();
             return self.overlay_replacement(&a, &sel_dims, &bwa, &offset);
         }
+        // IDENTITY under (`⊢`): Kotlin's `IdentityAPLFunction` (array_functions.kt:61)
+        // is a no-op wrapper — `evalWithStructuralUnder1Arg` = `baseFn(a)` and
+        // `evalWithStructuralUnder2Arg` = `baseFn(b)` (the left arg `a` is IGNORED;
+        // identity is its own inverse and overlays nothing). So `f ⍢ ⊢ x = f x`.
+        // Route this BEFORE the `left.is_some()` bail below, so the dyadic-left form
+        // `a f ⍢ ⊢ b` still works (left is simply dropped, matching Kotlin).
+        if let Instr::Symbol { name, namespace: None } = wrapper {
+            if name == "⊢" {
+                // `⊣` under IS genuinely unsupported in Kotlin (array_functions.kt),
+                // so only `⊢` is handled here; `⊣` falls through to the unsupported bail.
+                // `f ⍢ ⊢ x = f x` (both monadic and dyadic-left forms: the left arg is
+                // ignored, matching Kotlin's evalWithStructuralUnder2Arg = baseFn(b)).
+                return self.eval_apply(base, &None, right, env);
+            }
+        }
         if left.is_some() {
             return Err(unsupported());
         }
