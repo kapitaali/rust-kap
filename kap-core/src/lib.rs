@@ -800,6 +800,11 @@ pub struct Environment {
     /// Lexical (block-scope) bindings: key = (name, namespace). Values are shared refs.
     /// Holds dfn params (`⍵`/`⍺`), block locals, and operator operands — NOT module symbols.
     pub symbols: RefCell<HashMap<(String, Option<String>), AplRef<APLValue>>>,
+    /// Names defined via `⇐` (function definition), NOT `←` (value assignment).
+    /// `function_names()` returns only these, so `←`-bound lambdas (which store
+    /// a `UserFn` but are VALUES) don't get treated as applicable functions.
+    /// See PROBLEM.md (A2).
+    pub function_defs: RefCell<HashSet<String>>,
     /// Parent scope for lexical lookup.
     pub parent: Option<AplRef<Environment>>,
     /// Shared namespace registry (module-level symbol table + import/export metadata).
@@ -824,6 +829,7 @@ impl Environment {
     pub fn child(parent: &Rc<Environment>) -> Rc<Environment> {
         Rc::new(Environment {
             symbols: RefCell::new(HashMap::new()),
+            function_defs: parent.function_defs.clone(),
             parent: Some(parent.clone()),
             ns_registry: parent.ns_registry.clone(),
             home_ns: RefCell::new(None),

@@ -168,19 +168,19 @@ impl Environment {
     /// user-defined or native function value. Used by the parser to distinguish a
     /// function symbol (which applies) from a value symbol (which strands).
     pub fn function_names(&self) -> Vec<String> {
+        // Return only names defined via `⇐` (function definition), NOT `←`
+        // (value assignment). A `←`-bound lambda stores a `UserFn` but is a
+        // VALUE, so `a 5` must strand to `⟨function 5⟩`, not apply. See PROBLEM.md (A2).
         let mut names = Vec::new();
         let mut cur: Option<&Environment> = Some(self);
         while let Some(env) = cur {
-            for ((name, _ns), val) in env.symbols.borrow().iter() {
-                if matches!(val.as_ref(), APLValue::UserFn { .. }) && !names.contains(name) {
+            for name in env.function_defs.borrow().iter() {
+                if !names.contains(name) {
                     names.push(name.clone());
                 }
             }
             cur = env.parent.as_deref();
         }
-        // Also surface functions held in the namespace registry (current/default ns and
-        // its imports) — top-level bare `f ⇐ {…}` assignments now live there.
-        self.ns_registry.collect_function_names(&mut names);
         names
     }
 
@@ -959,6 +959,9 @@ impl Engine {
                     env: env.clone(),
                 });
                 env.define(name, namespace, v.clone());
+                // Track this name as a function definition (∇), so the parser
+                // treats later uses as applicable. See PROBLEM.md (A2).
+                env.function_defs.borrow_mut().insert(name.clone());
                 Ok(Rc::new(APLValue::Null))
             }
             Instr::FnAssign {
@@ -1039,6 +1042,10 @@ impl Engine {
                     }
                 };
                 env.define(name, namespace, v.clone());
+                // Track this name as a function definition (⇐), so the parser
+                // treats later uses as applicable. ←-bound lambdas do NOT add
+                // here — they are values. See PROBLEM.md (A2).
+                env.function_defs.borrow_mut().insert(name.clone());
                 Ok(v)
             }
             Instr::UserOpDef {
@@ -5784,37 +5791,35 @@ impl Engine {
                 return self.adverb_inverse_with_proto(inner, left, right, env, &proto_val);
             }
         }
-        // Resolve a user-fn alias to its underlying primitive BEFORE dispatching,
-        // so `a⇐- ⋄ (10×)⍢(1 a⍨)` (where `a⍨` = `-⍨`) reaches the `-` inverse rule
-        // instead of erroring "`a`: Function does not have an inverse".
-        let resolved_owned: Option<Box<Instr>> =
-            if let Instr::Symbol { name, namespace: None } = func.as_ref() {
-                self.resolve_under_leaf_name(func, env).map(|resolved| {
-                    Box::new(Instr::Symbol {
-                        name: resolved,
-                        namespace: None,
-                    })
-                })
-            } else if let Instr::Derived { func: inner, op } = func.as_ref() {
-                if matches!(op.as_ref(), Instr::Symbol { name, namespace: None } if name == "⍨") {
-                    self.resolve_under_leaf_name(inner, env).map(|resolved| {
+        // Resolve a user-fn alias / dynamic ref to its underlying primitive BEFORE
+        // dispatching, so `a⇐- ⋄ (10×)⍢(1 a⍨)` (where `a⍨` = `-⍨`) and
+        // `a←λ- ⋄ (⍞a˝) 10` (where `⍞a` = DynamicRef to `-`) reach the `-` inverse
+        // rule instead of erroring "`a`: Function does not have an inverse" / "˝:
+        // inverse not supported".
+        let resolved_owned: Option<Box<Instr>> = match func.as_ref() {
+            Instr::Symbol { name, namespace: None } => self
+                .resolve_under_leaf_name(func, env)
+                .map(|r| Box::new(Instr::Symbol { name: r, namespace: None })),
+            Instr::Derived { func: inner, op }
+                if matches!(op.as_ref(), Instr::Symbol { name, namespace: None } if name == "⍨") =>
+            {
+                self.resolve_under_leaf_name(inner, env)
+                    .map(|r| {
                         Box::new(Instr::Derived {
-                            func: Box::new(Instr::Symbol {
-                                name: resolved,
-                                namespace: None,
-                            }),
+                            func: Box::new(Instr::Symbol { name: r, namespace: None }),
                             op: Box::new(Instr::Symbol {
                                 name: "⍨".to_string(),
                                 namespace: None,
                             }),
                         })
                     })
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
+            }
+            // `⍞a` (DynamicRef): resolve to the underlying function AST.
+            Instr::DynamicRef { .. } => {
+                self.resolve_under_wrapper(func, env).map(Box::new)
+            }
+            _ => None,
+        };
         let func: &Box<Instr> = match &resolved_owned {
             Some(b) => b,
             None => func,
@@ -9249,6 +9254,23 @@ impl Engine {
         if std::env::var("KAP_DEBUG_UNDER").is_ok() {
             eprintln!("UNDER base={:?} wrapper={:?} left={:?}", base, wrapper, left);
         }
+        // Resolve a dynamic function reference / user-fn alias wrapper (`⍞a`,
+        // `a⇐↑`, `a←λ↑`) to the underlying primitive it denotes, so `apply_under_op`
+        // dispatches exactly as if the primitive had been written inline. Kotlin's
+        // `⍢` sees through the DynamicRef at under-eval time (operator.kt structural
+        // under on the resolved fn), so `a←λ↑ ⋄ (1000+)⍢⍞a …` behaves like bare `↑`.
+        // Skip resolution when `wrapper` is ALREADY a bare primitive: resolving it
+        // returns itself, and recursing would loop infinitely. After one resolution
+        // step the wrapper becomes a primitive, so the skip fires and dispatch
+        // continues inline (e.g. the monadic `↑` first-cell branch at ~9413).
+        let wrapper_is_primitive = matches!(wrapper,
+            Instr::Symbol { name, namespace: None }
+                if matches!(name.as_str(), "↑" | "↓" | "⊢" | "⊣" | "-" | "+" | "÷" | "×" | "⍉" | "⌽" | "⊖" | "⋆" | "√"));
+        if !wrapper_is_primitive {
+            if let Some(resolved) = self.resolve_under_wrapper(wrapper, env) {
+                return self.apply_under_op(base, &resolved, left, right, env);
+            }
+        }
         // Axis-qualified take/drop under (`↑[k]`/`↓[k]`) is DYADIC: the left arg
         // supplies the take/drop count (Kotlin 2-arg evalWithStructuralUnder2Arg).
         if let Some((is_take, count, axis)) = self.under_take_drop_spec_axis(wrapper, env, left)? {
@@ -9291,7 +9313,13 @@ impl Engine {
                 return self.eval_apply(base, &None, right, env);
             }
         }
-        if left.is_some() {
+        // Gate the bail: only overlay-family wrappers (those without an inverse path)
+        // should bail on dyadic left. Inverse-family wrappers (`-`, `+`, `÷`, `×`) DO
+        // support dyadic-left: `a f ⍢ - b` = `a - (f(a - b))` per Kotlin `evalInverse2ArgB`.
+        let is_inverse_family = matches!(wrapper,
+            Instr::Symbol { name, namespace: None }
+                if matches!(name.as_str(), "-" | "+" | "÷" | "×"));
+        if left.is_some() && !is_inverse_family {
             return Err(unsupported());
         }
         // ATOP / COMPOSE under (2-train `Chain2(f0,f1)` = `f0(f1(x))`, instr.kt:608):
@@ -9389,6 +9417,36 @@ impl Engine {
                 // silently misbehave.
                 return Err(unsupported());
             }
+        }
+        // DYADIC INVERSE-FAMILY under: `a f ⍢ g b` where g ∈ {-, +, ×, ÷}.
+        // Kotlin `evalInverse2ArgB`: g(a, x) = v → x = a g⁻¹ v.
+        // For self-inverse g (-, +): result = g(a, f(g(a, b))).
+        // Threads the left arg through the wrapper's dyadic inverse.
+        if let Some(()) = (|| {
+            if !left.is_some() { return None; }
+            match wrapper {
+                Instr::Symbol { name, namespace: None }
+                    if matches!(name.as_str(), "-" | "+" | "×" | "÷") => Some(()),
+                _ => None,
+            }
+        })() {
+            let left_val = self.eval_instr(left.as_ref().unwrap(), env)?.force(self)?;
+            let right_val = self.eval_instr(right, env)?.force(self)?;
+            // v = g(a, b)
+            let v = self.eval_apply(wrapper, left, right, env)?;
+            // fv = f(v)
+            let fv = self.eval_apply(base, &None, &Box::new(Instr::Value(v)), env)?;
+            // result = a g⁻¹ fv  (for self-inverse: g(a, fv))
+            // For `-`: a - fv; for `+`: a + fv; for `×`: a ÷ fv; for `÷`: a × fv
+            let inv_op = match wrapper {
+                Instr::Symbol { name, .. } if name == "-" => "-",
+                Instr::Symbol { name, .. } if name == "+" => "+",
+                Instr::Symbol { name, .. } if name == "×" => "÷",
+                Instr::Symbol { name, .. } if name == "÷" => "×",
+                _ => unreachable!(),
+            };
+            let inv_instr = Instr::Symbol { name: inv_op.to_string(), namespace: None };
+            return self.eval_apply(&inv_instr, left, &Box::new(Instr::Value(fv)), env);
         }
         // v = wrapper(a)
         let wa = self.eval_apply(wrapper, &None, right, env)?;
@@ -9638,9 +9696,69 @@ impl Engine {
     /// Also sees through the commute adverb `⍨` (`a⍨` → `a`).
     /// Returns `Some("↑"|"↓"|"⊢"|"⊣")` when `f` is (or aliases) a take/drop/identity
     /// leaf, `None` otherwise.
+    /// Resolve a `⍢` wrapper (or `˝` func) that is a dynamic function reference
+    /// (`⍞a`, Kotlin `DynamicFunctionDescriptor` / `OUTER_REF`) or a user-fn alias
+    /// (`a⇐↑`, `a←λ↑`) to the *underlying function AST* it denotes. Returns the
+    /// resolved `Instr` so `apply_under_op`/`adverb_inverse` can dispatch as if the
+    /// primitive had been written directly.
+    ///
+    /// `a←λ↑` binds a `UserFn` whose body is `Instr::Symbol(↑)`; `⍞a` looks that up
+    /// at runtime and applies it. A commute `a⍨` unwraps to `a`. A `Symbol` alias
+    /// `a⇐↑` likewise stores `UserFn{body: Symbol(↑)}`. All three reduce to the same
+    /// primitive `Instr` here. Returns `None` when `f` is not a resolvable ref/alias.
+    fn resolve_under_wrapper(
+        &self,
+        f: &Instr,
+        env: &AplRef<Environment>,
+    ) -> Option<Instr> {
+        match f {
+            // A bare primitive (already resolved) — return as-is. MUST come before
+            // the user-fn alias arm below, because that arm catches ANY `Symbol`
+            // (including `↑`) and tries `env.lookup`, which fails for primitives
+            // and returns `None` — killing the resolution chain. With this arm
+            // first, `resolve_under_wrapper(Symbol(↑))` returns `Some(↑)`, so the
+            // DynamicRef arm's recursion (`⍞a` → `↑`) yields `Some(↑)`.
+            Instr::Symbol { name, namespace: None }
+                if matches!(name.as_str(), "↑" | "↓" | "⊢" | "⊣" | "-" | "+" | "÷" | "×" | "⍉" | "⌽" | "⊖" | "⋆" | "√") =>
+            {
+                Some(f.clone())
+            }
+            // `⍞a` — fetch the bound value; if it is a function, recurse on its body.
+            Instr::DynamicRef { name, namespace } => {
+                let v = env.lookup(name, namespace)?;
+                if let APLValue::UserFn { body, .. } = v.as_ref() {
+                    return self.resolve_under_wrapper(body, env);
+                }
+                None
+            }
+            // `a⍨` (commute) resolves to `a`.
+            Instr::Derived { func, op } if matches!(op.as_ref(),
+                Instr::Symbol { name, namespace: None } if name == "⍨") =>
+            {
+                self.resolve_under_wrapper(func, env)
+            }
+            // A user-fn alias (`a⇐↑`, `a←λ↑`) stored as `UserFn{body: Symbol(↑)}`.
+            Instr::Symbol { name, namespace: None } => {
+                let v = env.lookup(name, &None)?;
+                if let APLValue::UserFn { body, .. } = v.as_ref() {
+                    return self.resolve_under_wrapper(body, env);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn resolve_under_leaf_name(&self, f: &Instr, env: &AplRef<Environment>) -> Option<String> {
         match f {
             Instr::Symbol { name, namespace: None } => {
+                // A bare primitive (e.g. `-`, `+`) resolves to itself. MUST come
+                // before the user-fn alias check below, which tries env.lookup and
+                // fails for primitives (no binding), returning None and killing the
+                // resolution chain. See PROBLEM.md (C).
+                if Self::is_primitive_name(name) {
+                    return Some(name.clone());
+                }
                 // A named user fn aliasing a primitive (`a⇐↑`).
                 if let Some(v) = env.lookup(name, &None) {
                     if let APLValue::UserFn { body, .. } = v.as_ref() {
@@ -9656,6 +9774,17 @@ impl Engine {
                 Instr::Symbol { name, namespace: None } if name == "⍨") =>
             {
                 self.resolve_under_leaf_name(func, env)
+            }
+            // `⍞a` (DynamicRef): fetch the bound value and recurse on its body.
+            // `a←λ↑` stores a `UserFn` whose body is `Instr::Symbol(↑)`, so this
+            // resolves `⍞a` (aliasing `↑`) the same as a `Symbol`-alias `a⇐↑`.
+            Instr::DynamicRef { name, namespace } => {
+                if let Some(v) = env.lookup(name, namespace) {
+                    if let APLValue::UserFn { body, .. } = v.as_ref() {
+                        return self.resolve_under_leaf_name(body, env);
+                    }
+                }
+                None
             }
             _ => None,
         }

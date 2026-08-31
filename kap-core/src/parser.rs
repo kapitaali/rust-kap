@@ -519,21 +519,21 @@ impl<'a> Parser<'a> {
                     }
                 }
                 Token::LambdaToken => {
-                    // `λ` (Kotlin processLambda, parser.kt:1204) — a function reference
-                    // operator. FUNCTION-SHAPED, but whether it applies or strands
-                    // depends on valence:
-                    //   • preceded by a value (`'a λfoo 'b`, `5 λ{⍵×2} 10`) → the λ is a
-                    //     FUNCTION VALUE in a strand (oracle: ⟨a function b⟩, ⟨5 function 10⟩);
-                    //     push it as data and keep accumulating the strand.
-                    //   • at the start of an expression (`λfoo 5`, `f ← λfoo`) → apply
-                    //     (or yield an ambivalent fn value), via finish_fn_call.
-                    self.advance();
+                    // `λ` (Kotlin processLambda, parser.kt:1204) — a function-reference
+                    // operator that yields a FUNCTION VALUE, never auto-applies by
+                    // juxtaposition. Oracle: `λ↑`→`function`, `(λ↑) 5`→`⟨function 5⟩`,
+                    // `λ↑ 5`→`⟨function 5⟩`, `5 λ× 3`→`⟨5 function 3⟩`. The value is only
+                    // invoked via `⍞` (DynamicRef) / `˝` / `⍢`.
+                    //
+                    // Do NOT advance here: `parse_function_atom` (below) matches `λ` as
+                    // its first token, advances past it, and builds the `Lambda` value
+                    // from the following Symbol / `(` group / `{` dfn (parser.rs:4860).
+                    // Pre-advancing would leave the cursor at the operand (e.g. `↑`),
+                    // so `parse_function_atom` would return a bare `Symbol` that later
+                    // trips the "No arguments specified for function" guard.
                     let lam = self.parse_function_atom()?;
-                    if !left_args.is_empty() {
-                        left_args.push(lam);
-                        continue;
-                    }
-                    return self.finish_fn_call(lam, &mut left_args);
+                    left_args.push(lam);
+                    continue;
                 }
                 Token::OpenParen => {
                     // parser.kt:977 parseExprToplevel(CloseParen): M5 parses the group
@@ -1769,12 +1769,17 @@ impl<'a> Parser<'a> {
                         self.advance();
                         let value = self.parse_apply()?;
                         let target = instr_from_symbol(&name_tok.token);
-                        // A regular `←` assignment with a function-valued RHS (`{…}`, `λ`,
+                        // A regular `←` assignment with a function-valued RHS (`{…}`,
                         // train, derived, or a known function name) defines that name as a
-                        // function — same as `⇐` — so that later uses (`g 5`) apply it rather
-                        // than stranding. Pure `←` would otherwise *evaluate* the block here,
-                        // which fails on `⍵`/`⍺` and never registers the name.
-                        if self.is_function_value(&value) {
+                        // function — same as `⇐` — so that later uses (`g 5`) apply it
+                        // rather than stranding. Pure `←` would otherwise *evaluate* the
+                        // block here, which fails on `⍵`/`⍺` and never registers the name.
+                        // NOTE: Lambda is EXCLUDED — it is a function VALUE, not a
+                        // function atom. `a←λ↑` must bind `a` as a value (so `a 5`
+                        // strands to `⟨function 5⟩`), not register it as a function.
+                        if self.is_function_value(&value)
+                            && !matches!(value, Instr::Lambda { .. })
+                        {
                             let (nm, ns) = Self::name_of(&name_tok.token);
                             if !self.known_functions.iter().any(|x| x == &nm) {
                                 self.known_functions.push(nm.clone());
@@ -4870,7 +4875,15 @@ impl<'a> Parser<'a> {
                             let name = name.clone();
                             let ns = namespace.clone();
                             self.advance();
-                            Ok(Instr::Symbol { name, namespace: ns })
+                            // `λ↑` / `λfoo` is a FUNCTION VALUE (Kotlin processLambda,
+                            // parser.kt:1204), never auto-applied. `(λ↑) 5` strands to
+                            // `⟨function 5⟩` and it is only invoked via `⍞`/`˝`/`⍢`.
+                            // Return a `Lambda` value so the bare-fn guard in the main
+                            // parser loop does not fire and juxtaposition strands.
+                            Ok(Instr::Lambda {
+                                params: vec![],
+                                body: Box::new(Instr::Symbol { name, namespace: ns }),
+                            })
                         } else {
                             unreachable!()
                         }
@@ -4937,7 +4950,9 @@ impl<'a> Parser<'a> {
                 | Instr::Derived { .. }
                 | Instr::OpCall { .. }
                 | Instr::InnerProduct { .. }
-                | Instr::Lambda { .. }
+                // NOTE: Lambda is deliberately EXCLUDED — it is a function VALUE
+                // (like a number or string), not a function atom. `(λ↑) 5` must
+                // strand to `⟨function 5⟩`, not apply. See PROBLEM.md (A1).
                 | Instr::Train { .. }
                 | Instr::ValueOp { .. }
                 // An axis-applied function (`⌽[0]`, `,[0.5]`) is a DERIVED
@@ -5392,7 +5407,16 @@ impl<'a> Parser<'a> {
                             let name = name.clone();
                             let ns = namespace.clone();
                             self.advance();
-                            Ok(Instr::Symbol { name, namespace: ns })
+                            // `λ↑` / `λfoo` is a FUNCTION VALUE (Kotlin processLambda,
+                            // parser.kt:1204), never auto-applied. `(λ↑) 5` strands to
+                            // `⟨function 5⟩` and is only invoked via `⍞`/`˝`/`⍢`. Return a
+                            // `Lambda` value (matching the train-member handler at
+                            // parser.rs:~4870) so juxtaposition strands instead of
+                            // tripping the bare-fn guard.
+                            Ok(Instr::Lambda {
+                                params: vec![],
+                                body: Box::new(Instr::Symbol { name, namespace: ns }),
+                            })
                         } else {
                             unreachable!()
                         }
