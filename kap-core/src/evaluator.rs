@@ -7711,12 +7711,12 @@ impl Engine {
                     let (d, index) = match idx.as_ref() {
                         APLValue::Array(ia) => {
                             // vector coordinate: its length must equal curr.rank
-                            let coord = ia.dimensions.clone();
-                            if coord.len() != curr.dimensions().len() {
+                            if ia.element_count() != curr.dimensions().len() {
                                 return Err(AplError::runtime(
                                     "⊃: Dimensions does not match".into(),
                                 ));
                             }
+                            let coord = ia.dimensions.clone();
                             let mut flat = 0usize;
                             let r = curr.dimensions().len();
                             let mut stride = vec![1usize; r];
