@@ -5415,6 +5415,65 @@ impl Engine {
         Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(dims, ArrayData::Nested(out))))))
     }
 
+    /// Dyadic reshape with a custom fill value (`(dims ⍴ int:proto v) arr`).
+    /// Mirrors `reshape` but uses `fill` instead of 0 when the source array is empty.
+    fn reshape_with_fill(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+        fill: &AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        match left_val {
+            Some(l) => {
+                let l = l.force(self)?;
+                let r = right_val.force(self)?;
+                match (l.as_ref(), r.as_ref()) {
+                    (APLValue::Number(KapNumber::Long(d)), APLValue::Array(a)) if *d >= 0 => {
+                        let dims = vec![*d as usize];
+                        let total = *d as usize;
+                        let mut out = Vec::with_capacity(total);
+                        for i in 0..total {
+                            if (i as usize) < a.element_count() {
+                                out.push(a.elements()[i % a.element_count()].clone());
+                            } else {
+                                out.push(fill.clone());
+                            }
+                        }
+                        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(dims, ArrayData::Nested(out))))))
+                    }
+                    (APLValue::Array(dims_arr), APLValue::Array(a)) => {
+                        let dims: Vec<usize> = dims_arr.elements().iter().map(|e| match e.as_ref() {
+                            APLValue::Number(KapNumber::Long(n)) => *n as usize,
+                            _ => 0,
+                        }).collect();
+                        let total: usize = dims.iter().product();
+                        let src_elems = a.elements();
+                        let mut out = Vec::with_capacity(total);
+                        for i in 0..total {
+                            if src_elems.is_empty() {
+                                out.push(fill.clone());
+                            } else {
+                                out.push(src_elems[i % src_elems.len()].clone());
+                            }
+                        }
+                        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(dims, ArrayData::Nested(out))))))
+                    }
+                    _ => self.reshape(l, right_val),
+                }
+            }
+            None => {
+                // Monadic reshape with fill - use empty left arg (rank-0 reshape)
+                let r = right_val.force(self)?;
+                match r.as_ref() {
+                    APLValue::Array(a) if a.element_count() == 0 => {
+                        Ok(fill.clone())
+                    }
+                    _ => self.reshape(Rc::new(APLValue::Null), right_val),
+                }
+            }
+        }
+    }
+
     fn tally(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
         // Kotlin TallyFunction: ⍴⍵ of the SHAPE, not the flat element count
         // (a 2×2 table has tally 2, not 4 — oracle-verified via `≢ A f⌻ B`).
@@ -8871,6 +8930,18 @@ impl Engine {
             };
             let rv = self.eval_instr(right, env)?.force(self)?;
             return self.take_or_drop_with_fill(true, lv, rv, proto_val);
+        }
+        // `(dims ⍴ int:proto v) arr`: reshape with a custom fill element (Kotlin
+        // ReshapeAPLFunction.eval1ArgWithProto). The fill replaces the default 0
+        // when the source array is empty.
+        let fname_is_reshape = matches!(func, Instr::Symbol { name, .. } if name == "⍴" || name == "rho");
+        if fname_is_reshape {
+            let lv = match left {
+                Some(l) => Some(self.eval_instr(l, env)?.force(self)?),
+                None => None,
+            };
+            let rv = self.eval_instr(right, env)?.force(self)?;
+            return self.reshape_with_fill(lv, rv, proto_val);
         }
         // Default Kotlin behaviour: the proto is ignored for fns without a
         // WithProto override — call the fn normally.
