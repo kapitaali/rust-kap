@@ -6847,6 +6847,9 @@ impl Engine {
         match v.as_ref() {
             APLValue::Number(KapNumber::Long(n)) => Ok(vec![*n]),
             APLValue::Array(a) => {
+                if a.dimensions.len() > 1 {
+                    return Err(AplError::runtime("↑/↓: Left argument to drop must be a scalar or 1-dimensional array".into()));
+                }
                 let mut out = Vec::with_capacity(a.element_count());
                 for e in a.elements() {
                     match e.as_ref() {
