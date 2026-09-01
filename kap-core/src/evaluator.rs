@@ -1204,7 +1204,7 @@ impl Engine {
             APLValue::List(a) => a.element_count() > 0,
             APLValue::Str(s) => !s.is_empty(),
             APLValue::Char(_) => true,
-            APLValue::Null => false,
+            APLValue::Null => true,
             APLValue::UserFn { .. } => true,
             APLValue::UserOp { .. } => true,
             APLValue::Deferred { .. } => false,
@@ -1956,6 +1956,7 @@ impl Engine {
                     KapNumber::Rational(r) => KapNumber::BigInt(r.numer().clone()),
                     KapNumber::Double(d) if d.fract() == 0.0 && *d >= i64::MIN as f64 && *d <= i64::MAX as f64 =>
                         KapNumber::Long(*d as i64),
+                    KapNumber::Double(_) => return Err(AplError::runtime("math:numerator: Cannot return numerator from a double".into())),
                     other => KapNumber::Long(other.as_long().map_err(|e| AplError::runtime(e))?),
                 }))),
                 _ => Err(AplError::runtime("math:numerator requires a number".into())),
@@ -1982,8 +1983,18 @@ impl Engine {
             "math:divisors" => self.math_divisors(right_val),
             "math:primes" => self.math_primes(right_val),
             "math:isPrime" => self.scalar1(right_val, |x| {
-                let v = x.as_long().unwrap_or_else(|_| x.as_double() as i64);
-                KapNumber::Long(if v >= 2 && Self::is_prime_u64(v as u64) { 1 } else { 0 })
+                let is_prime = match x {
+                    KapNumber::Double(d) if d.fract() == 0.0 => {
+                        let v = *d as i64;
+                        v >= 2 && Self::is_prime_u64(v as u64)
+                    }
+                    KapNumber::Double(_) => false,
+                    _ => {
+                        let v = x.as_long().unwrap_or(-1);
+                        v >= 2 && Self::is_prime_u64(v as u64)
+                    }
+                };
+                KapNumber::Long(if is_prime { 1 } else { 0 })
             }, "math:isPrime"),
             // `map:` namespace (builtins/map.kt). Ground truth: `MapWithFunction`,
             // `MapGetFunction`, `MapRemoveKeysFunction`, `MapKeyValuesFunction`,
@@ -2076,6 +2087,9 @@ impl Engine {
                 Ok(Rc::new(APLValue::Number(KapNumber::Long(map.len() as i64))))
             }
             "map:keys" => {
+                if left_val.is_some() {
+                    return Err(AplError::runtime("map:keys: Function cannot be called with two arguments".into()));
+                }
                 let map = match right_val.as_ref() {
                     APLValue::Map(m) => m.clone(),
                     _ => return Err(AplError::runtime("map:keys: Argument must be a map".into())),

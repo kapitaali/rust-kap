@@ -637,7 +637,7 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ModifiedAssignmentTest.kt", "test": "modifiedAssignmentReturnValue", "kind": "eval", "expr": "foo ← 8 ⋄ foo +← 3", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ModifiedAssignmentTest.kt", "test": "arrayLeftArgument0", "kind": "eval", "expr": "bar←1 ⋄ foo ← 8 ⋄ bar foo +← 3", "expected": "11"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ModifiedAssignmentTest.kt", "test": "arrayLeftArgument1", "kind": "eval", "expr": "bar←1 ⋄ foo ← 8 ⋄ bar foo +← 3 ⋄ bar foo", "expected": "(1 11)"}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/NilTest.kt", "test": "nilBooleanValue", "kind": "eval", "expr": "null and 5", "expected": "⍬"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/NilTest.kt", "test": "nilBooleanValue", "kind": "eval", "expr": "null and 5", "expected": "5"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/NilTest.kt", "test": "nilDimensions", "kind": "eval", "expr": "⍴ null", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/NilTest.kt", "test": "compareNil", "kind": "eval", "expr": "null≡null", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/NilTest.kt", "test": "dimensionsNil", "kind": "eval", "expr": "⍴ null", "expected": null}
