@@ -635,9 +635,9 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ModifiedAssignmentTest.kt", "test": "modifiedAssignmentWithNonLvalue", "kind": "fails", "expr": "foo ← 8 ⋄ (foo + 1) +← 2", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ModifiedAssignmentTest.kt", "test": "simpleDfn", "kind": "eval", "expr": "foo ← 8 ⋄ foo {⍺+⍵}← 3 ⋄ foo+10", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ModifiedAssignmentTest.kt", "test": "modifiedAssignmentReturnValue", "kind": "eval", "expr": "foo ← 8 ⋄ foo +← 3", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ModifiedAssignmentTest.kt", "test": "arrayLeftArgument0", "kind": "eval", "expr": "bar←1 ⋄ foo ← 8 ⋄ bar foo +← 3", "expected": "(1 11)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ModifiedAssignmentTest.kt", "test": "arrayLeftArgument0", "kind": "eval", "expr": "bar←1 ⋄ foo ← 8 ⋄ bar foo +← 3", "expected": "11"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ModifiedAssignmentTest.kt", "test": "arrayLeftArgument1", "kind": "eval", "expr": "bar←1 ⋄ foo ← 8 ⋄ bar foo +← 3 ⋄ bar foo", "expected": "(1 11)"}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/NilTest.kt", "test": "nilBooleanValue", "kind": "eval", "expr": "null and 5", "expected": "(5)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/NilTest.kt", "test": "nilBooleanValue", "kind": "eval", "expr": "null and 5", "expected": "⍬"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/NilTest.kt", "test": "nilDimensions", "kind": "eval", "expr": "⍴ null", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/NilTest.kt", "test": "compareNil", "kind": "eval", "expr": "null≡null", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/NilTest.kt", "test": "dimensionsNil", "kind": "eval", "expr": "⍴ null", "expected": null}
@@ -1442,7 +1442,7 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComplexExpressionsTest.kt", "test": "locallyBound2", "kind": "eval", "expr": "isLocallyBound('a)", "expected": "0"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComplexExpressionsTest.kt", "test": "equalsWithEachShouldNotYieldEmptyResult", "kind": "eval", "expr": "(2 0x6000000000000000 + 0x6000000000000000) =¨ ⊂10 20 0x6000000000000000 3 + 0x6000000000000000", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComplexExpressionsTest.kt", "test": "emptyProgram", "kind": "eval", "expr": "", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComplexExpressionsTest.kt", "test": "scalarFunctionOnSinglevalue", "kind": "eval", "expr": "⊣«×»(+/=⌻)/ 4 2 ⍴ ⍳8", "expected": "(0 0 0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComplexExpressionsTest.kt", "test": "scalarFunctionOnSinglevalue", "kind": "eval", "expr": "⊣«×»(+/=⌻)/ 4 2 ⍴ ⍳8", "expected": "((0) (0) (0) (0))"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComplexExpressionsTest.kt", "test": "decodeWithGrade", "kind": "eval", "expr": "{1+⍵[1]} ⍋⍛⊇ {2⊥⍵}¨ (1 1 1 0) (1 1 0)", "expected": "15"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "compose2Arg0", "kind": "eval", "expr": "¯2 3 4 (×∘-) 1000", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "compose2Arg1", "kind": "eval", "expr": "¯2 3 4 ×∘- 1000", "expected": null}
@@ -1936,7 +1936,7 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/OperatorsTest.kt", "test": "reduceWithFunctionAxis1", "kind": "eval", "expr": ",[0]⌿ (2 3 ⍴ 10+⍳6) (2 3 ⍴ 20+⍳6) (2 3 ⍴ 30+⍳6)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/OperatorsTest.kt", "test": "reduceWithAxis", "kind": "eval", "expr": ",/[0] 3 3 ⍴ (2 3 ⍴ 10+⍳6) (2 3 ⍴ 20+⍳6) (2 3 ⍴ 30+⍳6) ", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/OperatorsTest.kt", "test": "twoArgOperatorPrecedence", "kind": "eval", "expr": "1 2+∙×¨4 5", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/OperatorsTest.kt", "test": "twoArgOperatorPrecedenceWithParen", "kind": "eval", "expr": "1 2+∙(×¨)4 5", "expected": "14"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/OperatorsTest.kt", "test": "twoArgOperatorPrecedenceWithParen", "kind": "eval", "expr": "1 2+∙(×¨)4 5", "expected": "(14)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/OperatorsTest.kt", "test": "twoArgWithApplyWithoutParen", "kind": "eval", "expr": "f0 ← λ{⍺+⍵}\n20 200 -∙⍞f0 1 2", "expected": "-181"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/OperatorsTest.kt", "test": "twoArgWithApplyWithParen", "kind": "eval", "expr": "f0 ← λ{⍺+⍵}\n20 200 (-∙⍞f0) 1 2", "expected": "-181"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/OperatorsTest.kt", "test": "twoArgWithApplyWithDoubleParen", "kind": "eval", "expr": "f0 ← λ{⍺+⍵}\n20 200 (-∙(⍞f0)) 1 2", "expected": "-181"}
