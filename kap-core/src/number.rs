@@ -1047,26 +1047,53 @@ impl KapNumber {
     /// the result lies in `[0, |a|)` and takes the sign of `a` (Kap/APL rule). Concretely
     /// `self|other` = `other.rem_euclid(self)`.
     pub fn modulo(&self, other: &KapNumber) -> KapNumber {
+        // Kotlin ModAPLFunction.opLong/opDouble: `if (x==0) y else (y%x).let {
+        // if ((x<0)!=(y<0) && result!=0) x+result else result }`. NOT rem_euclid:
+        // the sign of the result follows the DIVISOR (x), not the dividend (y).
         use KapNumber::*;
         match (self, other) {
-            (Long(a), Long(b)) if *a != 0 => Long(b.rem_euclid(*a)),
-            (Long(a), BigInt(b)) if *a != 0 => {
-                // `self` (the modulus) is a Long; compute `other rem_euclid self`.
-                let b = b.to_string().parse::<f64>().unwrap_or(0.0);
-                let a = *a as f64;
-                if a == 0.0 {
-                    Double(0.0)
+            (Long(a), Long(b)) => {
+                if *a == 0 {
+                    Long(*b)
                 } else {
-                    Double(b.rem_euclid(a))
+                    let result = *b % *a;
+                    if (*a < 0) != (*b < 0) && result != 0 {
+                        Long(a + result)
+                    } else {
+                        Long(result)
+                    }
+                }
+            }
+            (Long(a), BigInt(b)) => {
+                if *a == 0 {
+                    BigInt(b.clone())
+                } else {
+                    let result = b % *a;
+                    // NOTE: `BigInt` here shadows num_bigint::BigInt (use KapNumber::* above),
+                    // so use the full path for the type.
+                    if (*a < 0) != (&result < &num_bigint::BigInt::from(0))
+                        && result != num_bigint::BigInt::from(0)
+                    {
+                        BigInt(num_bigint::BigInt::from(*a) + &result)
+                    } else {
+                        BigInt(result)
+                    }
                 }
             }
             _ => {
                 let a = self.as_double();
                 let b = other.as_double();
                 if a == 0.0 {
-                    return Double(0.0);
+                    // Kotlin: `if (xSign == 0) y` — return the dividend with its ORIGINAL
+                    // type, not converted to Double. `0 | 5` → `5` (Long), not `5.0`.
+                    return other.clone();
                 }
-                Double(b.rem_euclid(a))
+                let result = b % a;
+                if (a < 0.0) != (b < 0.0) && result != 0.0 {
+                    Double(a + result)
+                } else {
+                    Double(result)
+                }
             }
         }
     }

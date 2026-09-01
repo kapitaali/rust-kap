@@ -32,8 +32,53 @@ PARSE_CALLS = ("parseAPLExpression", "parseAPLExpressionWithTest", "parseAndTest
 
 
 def find_string_literal(s: str, start: int):
-    """Return (inner_text, end_index_after_closing_quote) for a "..." starting at s[start]=='\"'."""
+    """Return (inner_text, end_index_after_closing_quote) for a "..." or triple-quoted string starting at s[start]=='\"'.
+
+    For triple-quoted strings, applies Kotlin's trimMargin/trimIndent logic.
+    """
     assert s[start] == '"'
+    # Triple-quoted string (Kotlin raw string with trimMargin/trimIndent)
+    if s[start:start + 3] == '"""':
+        end = s.find('"""', start + 3)
+        if end == -1:
+            raw = s[start + 3:]
+            end_idx = len(s)
+        else:
+            raw = s[start + 3:end]
+            end_idx = end + 3
+        # Apply trimMargin/trimIndent: strip leading whitespace + optional '|' from each line
+        lines = raw.split('\n')
+        # Find minimum indent (ignoring blank lines and lines with only '|')
+        min_indent = None
+        for line in lines:
+            stripped = line.lstrip()
+            if stripped == '' or stripped == '|':
+                continue
+            indent = len(line) - len(line.lstrip())
+            if min_indent is None or indent < min_indent:
+                min_indent = indent
+        if min_indent is None:
+            min_indent = 0
+        # Strip margin
+        result_lines = []
+        for line in lines:
+            if line.strip() == '':
+                result_lines.append('')
+            elif line.strip() == '|':
+                result_lines.append('')
+            else:
+                # Strip leading whitespace up to min_indent, then optional '|'
+                stripped = line[min_indent:]
+                if stripped.startswith('|'):
+                    stripped = stripped[1:]
+                result_lines.append(stripped)
+        # Remove leading/trailing blank lines
+        while result_lines and result_lines[0] == '':
+            result_lines.pop(0)
+        while result_lines and result_lines[-1] == '':
+            result_lines.pop()
+        return '\n'.join(result_lines), end_idx
+    # Single-quoted string
     i = start + 1
     buf = []
     while i < len(s):
@@ -109,15 +154,22 @@ def detect_fails(body: str):
 
 def best_effort_expected(body: str):
     """Pull a single-line assertSimpleNumber(N, ...) / assert1DArray(arrayOf(...), ...) expectation."""
-    m = re.search(r'assertSimpleNumber\(\s*([+-]?\d+)\s*,', body)
+    # Only extract when the assertion is on `result` directly. If the Kotlin test
+    # drills into a cell (`assert1DArray(..., result.valueAt(0))`), a lookup
+    # (`assertSimpleNumber(N, result.lookupValue(...))`), or a map:get, the body
+    # makes per-cell assertions and a single `N` no longer describes the whole
+    # value — emit null so the harness counts these as "parse+eval OK" rather than
+    # a misleading MISMATCH against a partial expected.
+    if 'result.valueAt' in body or 'result.lookupValue' in body or 'map:get' in body:
+        return None
+    m = re.search(r'assertSimpleNumber\(\s*([+-]?\d+)\s*,\s*result\b', body)
     if m:
         return m.group(1)
-    # assert1DArray(arrayOf(a, b, ...), result) -> "(a b ...)"
-    # NOTE: Kap prints vectors with PARENTHESES (e.g. `(1 2)`), never brackets —
+    # Kap prints vectors with PARENTHESES (e.g. `(1 2)`), never brackets —
     # brackets are reserved for indexing. The Kotlin assertion uses `[]` because
     # that is *Kotlin* array syntax, not Kap's. Emit Kap-syntax so the conformance
     # harness can compare apples to apples against our engine's `format_value`.
-    m = re.search(r'assert1DArray\(\s*arrayOf\(([^)]*)\)\s*,', body)
+    m = re.search(r'assert1DArray\(\s*arrayOf\(([^)]*)\)\s*,\s*result\b', body)
     if m:
         parts = [p.strip() for p in m.group(1).split(',') if p.strip()]
         # numeric only

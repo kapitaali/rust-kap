@@ -2411,8 +2411,13 @@ impl Engine {
                 };
                 let kind = match sym.as_str() {
                     "kap:KapEvalException" => "throwNative",
-                    "default:InvalidDimensionsException" => "Invalid dimensions",
-                    "default:IllegalArgumentException" => "Illegal argument",
+                    "kap:InvalidDimensionsException" | "default:InvalidDimensionsException" => {
+                        "Invalid dimensions"
+                    }
+                    "kap:IllegalArgumentException" | "default:IllegalArgumentException" => {
+                        "Illegal argument"
+                    }
+                    "jvm:jvmMethodCallException" => "throwNative",
                     _ => {
                         return Err(AplError::runtime(format!(
                             "throwNative: Invalid exception name: {}",
@@ -2561,19 +2566,37 @@ impl Engine {
                 }
             }
             "=" => match left_val {
-                // Monadic `=` (self-classify, Kotlin EqualsAPLFunction.eval1Arg): for each
-                // major cell of the ravelled argument, the index (in first-occurrence
-                // order) of the cell's class — using type-qualified equality (`≡` rules,
-                // so 10 ≠ 10.0). `= ⍬ → ⍬`.
+                // Monadic `=` (self-classify, Kotlin EqualsAPLFunction.eval1Arg):
+                // For rank-1: classify each element. For rank>1: classify each
+                // major cell (row). Uses type-qualified equality.
                 None => {
                     let v = right_val.force(self)?;
-                    // A Str iterates as its characters (oracle: `= "abc" → ⟨0 1 2⟩`).
-                    let elems: Vec<AplRef<APLValue>> = match v.as_ref() {
-                        APLValue::Array(a) => a.elements(),
-                        APLValue::Str(s) => {
-                            s.chars().map(|c| Rc::new(APLValue::Char(c))).collect()
+                    let v_rank = v.rank();
+                    let elems: Vec<AplRef<APLValue>> = if v_rank <= 1 {
+                        match v.as_ref() {
+                            APLValue::Array(a) => a.elements(),
+                            APLValue::Str(s) => {
+                                s.chars().map(|c| Rc::new(APLValue::Char(c))).collect()
+                            }
+                            other => vec![Rc::new(other.clone())],
                         }
-                        other => vec![Rc::new(other.clone())],
+                    } else {
+                        // Major cells: each row along axis 0
+                        let dims = v.dimensions();
+                        let n_major = dims[0];
+                        let rest: usize = dims[1..].iter().product();
+                        (0..n_major)
+                            .map(|i| {
+                                let start = i * rest;
+                                let end = start + rest;
+                                let sub: Vec<AplRef<APLValue>> =
+                                    (start..end).map(|j| Rc::new(v.value_at(j))).collect();
+                                Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                                    vec![rest],
+                                    ArrayData::Nested(sub),
+                                ))))
+                            })
+                            .collect()
                     };
                     if elems.is_empty() {
                         return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
@@ -2581,7 +2604,6 @@ impl Engine {
                             ArrayData::Long(vec![]),
                         )))));
                     }
-                    // First-occurrence classes with type-strict comparison.
                     let mut classes: Vec<AplRef<APLValue>> = Vec::new();
                     let mut out: Vec<i64> = Vec::with_capacity(elems.len());
                     for e in &elems {
@@ -7721,12 +7743,24 @@ impl Engine {
     ) -> Result<AplRef<APLValue>, AplError> {
         match left_val {
             None => {
-                // Monadic: listify wraps the *whole* value X in a single-element vector.
+                // Monadic `⌷` mirrors Kotlin `AccessFromIndexAPLFunction.eval1Arg`:
+                // `fromListFunction.eval1Arg(context, a.listify(), axis)`.
+                // `listify` wraps non-list values in a 1-element APLList; list values
+                // pass through unchanged. `fromListFunction` then converts the list
+                // to a flat array. So:
+                //   `⌷(1;2)` → list passes through → flat array [1, 2] → `⟨1 2⟩`
+                //   `⌷1 2 3` → wrapped in list → [[1,2,3]] → `((1 2 3))`
                 let v = right_val.force(self)?;
-                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                    vec![1],
-                    ArrayData::Nested(vec![v]),
-                )))))
+                if let APLValue::List(arr) = v.as_ref() {
+                    // List: convert to flat array (unwrap the list wrapper)
+                    Ok(Rc::new(APLValue::Array(arr.clone())))
+                } else {
+                    // Non-list: wrap in a 1-element array
+                    Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        vec![1],
+                        ArrayData::Nested(vec![v]),
+                    )))))
+                }
             }
             Some(a) => {
                 let b = right_val.force(self)?;
@@ -11238,6 +11272,23 @@ impl Engine {
         let r = right_val.force(self)?;
         match (l.as_ref(), r.as_ref()) {
             (APLValue::Array(la), APLValue::Array(ra)) => {
+                // Kotlin WithoutFunction: all axes except the first must match.
+                let a_dims = la.dimensions.clone();
+                let b_dims = ra.dimensions.clone();
+                if a_dims.len() != b_dims.len() {
+                    return Err(AplError::runtime(format!(
+                        "~: All but the first axis needs to have the same dimensions. Ranks: A={:?}, B={:?}",
+                        a_dims, b_dims
+                    )));
+                }
+                for k in 1..a_dims.len() {
+                    if a_dims[k] != b_dims[k] {
+                        return Err(AplError::runtime(format!(
+                            "~: All but the first axis needs to have the same dimensions. Ranks: A={:?}, B={:?}",
+                            a_dims, b_dims
+                        )));
+                    }
+                }
                 let lb = la.elements();
                 let rb = ra.elements();
                 let mut out = Vec::with_capacity(lb.len());
@@ -12737,10 +12788,8 @@ impl Engine {
     ) -> Result<AplRef<APLValue>, AplError> {
         let a = left_val.force(self)?;
         let b = right_val.force(self)?;
-        // Both must be 1-D (or scalar → rank-0, treated as 1-D of length 1).
         let a_rank = a.rank();
         let b_rank = b.rank();
-        // Kotlin: both must be scalar or non-empty 1-D.
         if a_rank > 1 || b_rank > 1 {
             return Err(AplError::runtime(
                 "…: Both arguments must be scalars or 1-dimensional arrays".into(),
@@ -12753,23 +12802,73 @@ impl Engine {
                 "…: Both arguments must be non-empty".into(),
             ));
         }
-        // Last element of A, first element of B.
         let a_last = a.value_at(a_len - 1);
         let b_first = b.value_at(0);
-        // Determine the element type from the last A element and first B element.
         match (&a_last, &b_first) {
             (APLValue::Number(x), APLValue::Number(y)) => {
                 let x_long = x.as_long();
                 let y_long = y.as_long();
                 if let (Ok(xv), Ok(yv)) = (x_long, y_long) {
-                    // Integer range
-                    return self.range_long(xv, yv);
+                    let mut out: Vec<AplRef<APLValue>> = Vec::new();
+                    for i in 0..a_len - 1 {
+                        out.push(Rc::new(a.value_at(i)));
+                    }
+                    let step = if xv <= yv { 1i64 } else { -1i64 };
+                    let n = (yv - xv).unsigned_abs() as usize + 1;
+                    for j in 0..n {
+                        out.push(Rc::new(APLValue::Number(KapNumber::Long(
+                            xv + j as i64 * step,
+                        ))));
+                    }
+                    for i in 1..b_len {
+                        out.push(Rc::new(b.value_at(i)));
+                    }
+                    let len = out.len();
+                    return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        vec![len],
+                        ArrayData::Nested(out),
+                    )))));
                 }
-                // Fall back to double range (will likely error in Kotlin if not integer)
-                return self.range_double(x.as_double(), y.as_double());
+                let mut out: Vec<AplRef<APLValue>> = Vec::new();
+                for i in 0..a_len - 1 {
+                    out.push(Rc::new(a.value_at(i)));
+                }
+                let n = ((y.as_double() - x.as_double()).abs() as usize) + 1;
+                for j in 0..n {
+                    let v = x.as_double()
+                        + (j as f64) * (y.as_double() - x.as_double()) / (n as f64 - 1.0);
+                    out.push(Rc::new(APLValue::Number(KapNumber::Double(v))));
+                }
+                for i in 1..b_len {
+                    out.push(Rc::new(b.value_at(i)));
+                }
+                let len = out.len();
+                return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![len],
+                    ArrayData::Nested(out),
+                )))));
             }
             (APLValue::Char(xc), APLValue::Char(yc)) => {
-                return self.range_char(*xc, *yc);
+                let mut out: Vec<AplRef<APLValue>> = Vec::new();
+                for i in 0..a_len - 1 {
+                    out.push(Rc::new(a.value_at(i)));
+                }
+                let step = if xc <= yc { 1i32 } else { -1i32 };
+                let x = *xc as i32;
+                let y = *yc as i32;
+                let mut v = x;
+                while (step > 0 && v <= y) || (step < 0 && v >= y) {
+                    out.push(Rc::new(APLValue::Char(char::from_u32(v as u32).unwrap())));
+                    v += step;
+                }
+                for i in 1..b_len {
+                    out.push(Rc::new(b.value_at(i)));
+                }
+                let len = out.len();
+                return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![len],
+                    ArrayData::Nested(out),
+                )))));
             }
             _ => {
                 return Err(AplError::runtime(format!(
@@ -12780,7 +12879,6 @@ impl Engine {
             }
         }
     }
-
     fn range_long(&self, start: i64, end: i64) -> Result<AplRef<APLValue>, AplError> {
         let n = (end - start).unsigned_abs() as usize + 1;
         if n > 100_000_000 {
@@ -13080,6 +13178,18 @@ impl Engine {
         let b_dims = b.dimensions();
         let l = b_dims[0];
 
+        // When A is a vector (rank 1), its length must equal the digit axis length
+        // of B (else Kotlin's foreach throws "Arguments to foreach does not have
+        // the same dimensions").
+        if a_rank == 1 {
+            let a_len = a.elements().len();
+            if a_len != l {
+                return Err(AplError::runtime(
+                    "Left argument must have rank 0 or 1".into(),
+                ));
+            }
+        }
+
         // Build per-position weights along axis 0.
         let weights: Vec<KapNumber> = match a.as_ref() {
             APLValue::Number(n) => {
@@ -13145,8 +13255,14 @@ impl Engine {
                     APLValue::Number(n) => n.as_long().ok(),
                     _ => None,
                 };
-                if let Some(d) = bval {
-                    acc = acc.add(&KapNumber::Long(d).mul(&weights[j]));
+                match bval {
+                    Some(d) => acc = acc.add(&KapNumber::Long(d).mul(&weights[j])),
+                    None => {
+                        return Err(AplError::runtime(format!(
+                            "⊥: Non-numeric element in right argument at index {}",
+                            bflat
+                        )));
+                    }
                 }
             }
             out.push(Rc::new(APLValue::Number(acc)));
@@ -13193,14 +13309,18 @@ impl Engine {
             let cols = a_dims[1];
             // Per-B-element digit vectors (MSB-first), computed with the successive
             // division of math-kap's vectorEncode.
-            let b_elems: Vec<i64> = b
+            let b_elems: Result<Vec<i64>, AplError> = b
                 .elements()
                 .iter()
-                .filter_map(|e| match e.as_ref() {
-                    APLValue::Number(n) => n.as_long().ok(),
-                    _ => None,
+                .map(|e| match e.as_ref() {
+                    APLValue::Number(n) => n.as_long().map_err(|e| AplError::runtime(e)),
+                    other => Err(AplError::runtime(format!(
+                        "⊤: Non-numeric element in right argument: {}",
+                        other.format_value()
+                    ))),
                 })
                 .collect();
+            let b_elems = b_elems?;
             let b_total = b_elems.len();
             let mut per_elem_digits: Vec<Vec<i64>> = Vec::with_capacity(b_total);
             for j in 0..cols.min(b_total) {
@@ -13239,14 +13359,18 @@ impl Engine {
 
         // Flatten B for iteration; record its shape for the result.
         let b_dims = b.dimensions();
-        let b_elems: Vec<i64> = b
+        let b_elems: Result<Vec<i64>, AplError> = b
             .elements()
             .iter()
-            .filter_map(|e| match e.as_ref() {
-                APLValue::Number(n) => n.as_long().ok(),
-                _ => None,
+            .map(|e| match e.as_ref() {
+                APLValue::Number(n) => n.as_long().map_err(|e| AplError::runtime(e)),
+                other => Err(AplError::runtime(format!(
+                    "⊤: Non-numeric element in right argument: {}",
+                    other.format_value()
+                ))),
             })
             .collect();
+        let b_elems = b_elems?;
         let b_total = b_elems.len();
 
         if a_rank == 0 {
