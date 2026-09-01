@@ -3241,6 +3241,11 @@ impl<'a> Parser<'a> {
                     || matches!(t.token, Token::CloseBrace)
                     || matches!(t.token, Token::CloseParen)
                     || matches!(t.token, Token::CloseBracket)
+                    // QuotePrefix ('sym) starts a NEW value literal — it must NOT be
+                    // consumed as a right argument to a preceding function call.
+                    // `namespace("foo") 'bar` is two statements, not `namespace` applied
+                    // to two args. Without this, the parser strands 'bar as another arg.
+                    || matches!(t.token, Token::QuotePrefix)
             }
             None => true,
         }
