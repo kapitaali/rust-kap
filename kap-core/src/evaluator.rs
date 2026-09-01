@@ -11339,15 +11339,39 @@ impl Engine {
         sym: &str,
     ) -> Result<AplRef<APLValue>, AplError> {
         let a = left_val.ok_or_else(|| AplError::runtime(format!("{} needs two args", sym)))?;
-        let (x, y) = match (a.as_ref(), right_val.as_ref()) {
+        // Kap's logic functions return the operand, not 0/1:
+        //   null is TRUTHY
+        //   0 is falsy, 1 is truthy
+        //   any other number is INVALID (strict boolean)
+        //   and: return right if left is truthy, else return left
+        //   or: return left if truthy, else return right
+        match (a.as_ref(), right_val.as_ref()) {
+            (APLValue::Null, _) => {
+                if sym == "∧" || sym == "and" {
+                    Ok(right_val)
+                } else {
+                    Ok(a.clone())
+                }
+            }
+            (APLValue::Number(x), APLValue::Null) => {
+                let x_bool = self.as_strict_bool(x, sym)?;
+                if sym == "∧" || sym == "and" {
+                    if x_bool { Ok(right_val) } else { Ok(a.clone()) }
+                } else {
+                    if x_bool { Ok(a.clone()) } else { Ok(right_val) }
+                }
+            }
             (APLValue::Number(x), APLValue::Number(y)) => {
                 let x_bool = self.as_strict_bool(x, sym)?;
                 let y_bool = self.as_strict_bool(y, sym)?;
-                (x_bool, y_bool)
+                if sym == "∧" || sym == "and" {
+                    if x_bool { Ok(right_val) } else { Ok(a.clone()) }
+                } else {
+                    if x_bool { Ok(a.clone()) } else { Ok(right_val) }
+                }
             }
             _ => return Err(AplError::runtime(format!("{} requires booleans", sym))),
-        };
-        Ok(Rc::new(APLValue::Number(KapNumber::Long(if f(x, y) { 1 } else { 0 }))))
+        }
     }
 
     /// Validate that a number is a strict Kap boolean (0 or 1). The oracle errors
