@@ -6663,6 +6663,14 @@ impl Engine {
                 }
             }
         }
+        // Kotlin InverseDiagonalTransposeValue: the number of axis groups must
+        // equal the rank of the right argument, else "Number of axis in left
+        // argument must match the rank of the right argument".
+        if groups.len() != src_dims.len() {
+            return Err(AplError::runtime(
+                "⍉: Number of axis in left argument must match the rank of the right argument".into(),
+            ));
+        }
         // Kotlin: sortedBy key, each key must equal an incrementing `expected`
         // counter from 0, else "Invalid transpose axes: [..]".
         let mut sorted: Vec<(i64, Vec<usize>)> =
