@@ -2510,7 +2510,7 @@ impl Engine {
                     }
                 };
                 env.ns_registry.current.replace(Some(name));
-                Ok(right_val)
+                Ok(Rc::new(APLValue::Null))
             }
             "import" => {
                 let name = match right_val.as_ref() {
