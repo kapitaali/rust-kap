@@ -948,6 +948,20 @@ impl Engine {
                 right_params,
                 body,
             } => {
+                // Kotlin registerDefinedUserFunction (parser.kt:671-678): a native
+                // function cannot be redefined. The port's parse_fn_def deliberately
+                // does NOT reject this at parse time (stdlib shadowing), so the
+                // check happens here at eval time — mirroring Kotlin's
+                // InvalidFunctionRedefinition. See CustomFunctionTest.nativeFunctionRedefinition.
+                // Only fire in the home namespace: namespaced definitions (e.g. `⊥` in
+                // math-kap.kap under `namespace("kap")`) shadow the builtin legitimately.
+                let in_home_ns = env.ns_registry.current_ns() == "default";
+                if in_home_ns && Self::is_primitive_name(&name) {
+                    return Err(AplError::Runtime(format!(
+                        "Function cannot be redefined: kap:{}",
+                        name
+                    )));
+                }
                 // Combine left+right params; `split` separates the dyadic left bind.
                 let mut params = left_params.clone();
                 params.extend(right_params.iter().cloned());

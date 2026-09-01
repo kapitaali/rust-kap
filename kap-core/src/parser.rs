@@ -686,6 +686,12 @@ impl<'a> Parser<'a> {
                             .map(|t| matches!(t.token, Token::DynassignToken))
                             == Some(true)
                     {
+                        // Kotlin parser.kt:961-962: a multi-symbol name (e.g. `abc def ⇐`
+                        // or `1 foo ⇐`) is rejected — the function name must be a
+                        // single symbol with no preceding left args.
+                        if !left_args.is_empty() {
+                            return Err(self.err("The function name must be a single symbol"));
+                        }
                         self.advance(); // consume the name
                         self.advance(); // consume ⇐
                         let value = self.parse_function_expr_impl(true)?;
@@ -698,6 +704,21 @@ impl<'a> Parser<'a> {
                                     rhs
                                 )));
                             }
+                        }
+                        // The RHS must be a function, not a value (e.g. `foo ⇐ 1` is
+                        // invalid). Mirrors parse_fn_assign's validation
+                        // (parser.rs:1877-1887) and Kotlin processShortFormFn
+                        // (parser.kt:656-657): parseValue() must yield a FnParseResult.
+                        // Value-producing nodes (Literal, Array) are rejected; all other
+                        // AST shapes are function-producing (Lambda, Train, Symbol,
+                        // Derived, Block, ValueOp, InnerProduct, OverOp, DynamicRef).
+                        if matches!(
+                            value,
+                            Instr::Literal(_) | Instr::Array { .. }
+                        ) {
+                            return Err(self.err(&format!(
+                                "Right side of the arrow must be a function"
+                            )));
                         }
                         // Kotlin processShortFormFn DEFINES the binding during parse
                         // (lookupFunction sees it immediately), so a later statement in
