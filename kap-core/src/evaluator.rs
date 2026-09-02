@@ -6663,16 +6663,7 @@ impl Engine {
                 }
             }
         }
-        // Kotlin InverseDiagonalTransposeValue: the number of axis groups must
-        // equal the rank of the right argument, else "Number of axis in left
-        // argument must match the rank of the right argument".
-        if groups.len() != src_dims.len() {
-            return Err(AplError::runtime(
-                "⍉: Number of axis in left argument must match the rank of the right argument".into(),
-            ));
-        }
         // Kotlin: sortedBy key, each key must equal an incrementing `expected`
-        // counter from 0, else "Invalid transpose axes: [..]".
         let mut sorted: Vec<(i64, Vec<usize>)> =
             keys.into_iter().zip(groups.into_iter()).collect();
         sorted.sort_by_key(|(k, _)| *k);
@@ -6743,6 +6734,16 @@ impl Engine {
         // Kotlin init: result dims[i] = bDimensions[indexes[0]] for every i.
         if axes.is_empty() {
             return Err(AplError::runtime("⍉˝: empty axis spec".into()));
+        }
+        // Kotlin InverseDiagonalTransposedValue (transpose.kt:428): the number of
+        // axis groups (distinct axis indices) must equal the rank of the right
+        // argument, else "Number of axis in left argument must match the rank of
+        // the right argument".
+        let distinct: std::collections::HashSet<i64> = axes.iter().copied().collect();
+        if distinct.len() != src_dims.len() {
+            return Err(AplError::runtime(
+                "⍉: Number of axis in left argument must match the rank of the right argument".into(),
+            ));
         }
         let new_dims: Vec<usize> =
             (0..axes.len()).map(|_| src_dims[axes[0] as usize]).collect();

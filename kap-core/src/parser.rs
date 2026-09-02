@@ -341,13 +341,6 @@ impl<'a> Parser<'a> {
             }
             match &tok.token {
                 Token::EndOfFile | Token::StatementSeparator | Token::Newline => break,
-                // A leading `[` without a preceding value is an index dereference
-                // without an argument — error "Index dereference without argument".
-                // `[0]` at statement start is NOT an array constructor (Kap uses
-                // `⟨⟩` for arrays, `[]` for index/squad).
-                Token::OpenBracket if left_args.is_empty() => {
-                    return Err(self.err("Index dereference without argument"));
-                }
                 _ => {}
             }
             // Skip newlines BETWEEN tokens of the same expression.
@@ -3270,6 +3263,7 @@ impl<'a> Parser<'a> {
                 | "⊢" | "⊣" | "≡" | "⍓" | "∪" | "∩" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair"
                 | "⊆" | "⊇" | "→" | "≬" | "toList" | "fromList" | "⫇" | "group"
                 | "⍕" | "format" | "⍎" | "execute" | "typeof"
+                | "~" | "∊" | "⍋" | "⊤" | "⊥"
                 | "namespace" | "import" | "declare" | "use" | "isLocallyBound"
                 | "throw"
                 | "comp"
