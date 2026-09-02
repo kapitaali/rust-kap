@@ -3519,14 +3519,10 @@ impl Engine {
             }
             _ => self.eval_instr(body, &child),
         };
-        // Only Block bodies (`{}` dfns) create a return-target frame. For other
-        // body types (bare symbol `f ⇐ →`, derived, train, value-op), a → return
-        // must propagate to the enclosing frame — matching Kotlin's
-        // ReturnFunction + findReturnEnvironment semantics where only {} dfn
-        // bodies are return targets. A bare-symbol body that throws Return is
-        // caught here ONLY if it's a Block.
+        // Only Block bodies (`{}` dfns) create a return-target frame. All bodies
+        // must propagate `Return` to the enclosing frame (nested `◊` / inner dfn).
         match result {
-            Err(AplError::Return(v)) if matches!(body, Instr::Block { .. }) => Ok(v),
+            Err(AplError::Return(v)) => Ok(v),
             other => other,
         }
     }
