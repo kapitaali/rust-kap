@@ -3304,13 +3304,12 @@ impl Engine {
                     2 => {
                         let (a, b) = (&funcs[0], &funcs[1]);
                         if Self::is_value(a) {
-                            // x (c f) y : left-bind ignores the outer left, uses c.
-                            return self.eval_apply(
-                                b,
-                                &Some(Box::new(a.clone())),
-                                right,
-                                env,
-                            );
+                            // LeftAssignedFunction.eval2Arg (Kotlin functions.kt:640)
+                            // throws LeftAssigned2ArgException — a 2-train [value, fn]
+                            // binds value as ⍺, and dyadic calls are forbidden.
+                            return Err(AplError::Runtime(
+                                format!("Left assigned functions cannot be called with two arguments")
+                            ));
                         }
                         // Atop: f(x g y)  (g is dyadic)
                         let xgy = self.eval_apply(
