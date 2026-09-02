@@ -822,6 +822,11 @@ pub struct Environment {
     /// Makes `define`/`assign` treat module-scope bare bindings exactly like the root
     /// (route them into the namespace table) even though this scope has a parent.
     pub acts_as_root: std::cell::Cell<bool>,
+    /// True for the child scope created by `apply_user_fn` / `eval_block` — marks this
+    /// scope as a return target for `→`. Mirrors Kotlin's `Environment.isReturnTarget`.
+    /// `AplError::Return` propagates up until it finds a scope with this flag set,
+    /// then the value is returned from that scope instead of propagating further.
+    pub is_return_target: std::cell::Cell<bool>,
 }
 
 impl Environment {
@@ -834,6 +839,7 @@ impl Environment {
             ns_registry: parent.ns_registry.clone(),
             home_ns: RefCell::new(None),
             acts_as_root: std::cell::Cell::new(false),
+            is_return_target: std::cell::Cell::new(false),
         })
     }
 

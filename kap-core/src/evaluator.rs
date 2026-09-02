@@ -3419,6 +3419,14 @@ impl Engine {
         self_name: Option<&str>,
     ) -> Result<AplRef<APLValue>, AplError> {
         let child = Environment::child(&closure_env);
+        // Mark the child scope as a return-target frame when the body is a
+        // Block (`{}` dfn). This mirrors Kotlin's `parseFnDefinitionNewEnvironment`
+        // which sets `returnTarget = true` for `{}` dfn bodies. For bare-symbol
+        // bodies (`f ⇐ →`), the child scope is NOT a return target — `→` must
+        // propagate to the enclosing frame.
+        if matches!(body, Instr::Block { .. }) {
+            child.is_return_target.set(true);
+        }
         // Evaluate args in the *calling* env (Kap passes by value/sharing). The body
         // scope chains to the *defining* env (`closure_env`) so sibling names in the
         // defining namespace resolve — Kotlin scopes a namespace() to its defining file.
@@ -3511,8 +3519,14 @@ impl Engine {
             }
             _ => self.eval_instr(body, &child),
         };
+        // Only Block bodies (`{}` dfns) create a return-target frame. For other
+        // body types (bare symbol `f ⇐ →`, derived, train, value-op), a → return
+        // must propagate to the enclosing frame — matching Kotlin's
+        // ReturnFunction + findReturnEnvironment semantics where only {} dfn
+        // bodies are return targets. A bare-symbol body that throws Return is
+        // caught here ONLY if it's a Block.
         match result {
-            Err(AplError::Return(v)) => Ok(v),
+            Err(AplError::Return(v)) if matches!(body, Instr::Block { .. }) => Ok(v),
             other => other,
         }
     }
@@ -10603,13 +10617,29 @@ impl Engine {
                 let left_elems = self.flat_elements(&lv);
                 for (i, re) in right_elems.iter().enumerate() {
                     let le = left_elems.get(i).cloned().unwrap_or_else(|| lv.clone());
-                    out.push(self.apply_fn_instr(fn_instr, Some(&le), re, env)?);
+                    out.push(
+                        self.apply_fn_instr(fn_instr, Some(&le), re, env)
+                            .map_err(|e| match e {
+                                AplError::Return(_) => AplError::runtime(
+                                    "→: Return outside of expected frame".into(),
+                                ),
+                                other => other,
+                            })?,
+                    );
                 }
             }
             // Monadic each: apply f to each right element.
             None => {
                 for e in &right_elems {
-                    out.push(self.apply_fn_instr(fn_instr, None, e, env)?);
+                    out.push(
+                        self.apply_fn_instr(fn_instr, None, e, env)
+                            .map_err(|e| match e {
+                                AplError::Return(_) => AplError::runtime(
+                                    "→: Return outside of expected frame".into(),
+                                ),
+                                other => other,
+                            })?,
+                    );
                 }
             }
         }
