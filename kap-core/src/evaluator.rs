@@ -8516,10 +8516,39 @@ impl Engine {
             return Ok(out.into_iter().next().unwrap_or_else(|| Rc::new(APLValue::Null)));
         }
 
-        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-            result_dims,
-            ArrayData::Nested(out),
-        )))))
+        // Thread labels: for each result axis (selected[k].len() > 1), index the
+        // source axis labels by the selected indices. Matches Kotlin ArrayIndex.computeLabels().
+        let labels = match arr.as_ref() {
+            APLValue::Array(a) => {
+                let mut result_labels: Vec<Option<Vec<AxisLabel>>> = Vec::new();
+                for k in 0..selected.len() {
+                    if selected[k].len() > 1 {
+                        let axis_labels = a.labels().and_then(|l| l.labels.get(k).cloned().flatten());
+                        let indexed: Vec<AxisLabel> = match axis_labels {
+                            None => vec![None; selected[k].len()],
+                            Some(src_labels) => {
+                                selected[k].iter().map(|&i| {
+                                    src_labels.get(i).cloned().unwrap_or(None)
+                                }).collect()
+                            }
+                        };
+                        let has_any = indexed.iter().any(|l| l.is_some());
+                        result_labels.push(if has_any { Some(indexed) } else { None });
+                    }
+                }
+                if result_labels.is_empty() {
+                    None
+                } else {
+                    Some(Box::new(DimensionLabels { labels: result_labels }))
+                }
+            }
+            _ => None,
+        };
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray {
+            dimensions: result_dims,
+            data: ArrayData::Nested(out),
+            labels,
+        }))))
     }
 
     /// Compute the flat indices for a given selector (mirrors `index_select`'s logic).
