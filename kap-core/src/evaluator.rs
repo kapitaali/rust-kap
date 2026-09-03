@@ -6634,10 +6634,32 @@ impl Engine {
                             elems[pre + src * stride + post].clone();
                     }
                 }
-                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                    dims,
-                    ArrayData::Nested(out),
-                )))))
+                let labels = a.labels().map(|l| {
+                    if do_reverse {
+                        Box::new(l.reverse_axis(axis))
+                    } else {
+                        // Apply per-cell shifts — for uniform shift, rotate all cells the same.
+                        // For simplicity, if all shifts are the same, rotate; otherwise clear labels.
+                        let first = shifts.first().copied().unwrap_or(0);
+                        let uniform = shifts.iter().all(|s| *s == first);
+                        if uniform {
+                            Box::new(l.rotate_axis(axis, first as isize, n))
+                        } else {
+                            // Non-uniform shifts: labels can't be meaningfully preserved per-cell.
+                            // Clear the rotated axis labels.
+                            let mut new = l.clone();
+                            if let Some(list) = new.labels.get_mut(axis) {
+                                *list = None;
+                            }
+                            Box::new(new)
+                        }
+                    }
+                });
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray {
+                    dimensions: dims,
+                    data: ArrayData::Nested(out),
+                    labels,
+                }))))
             }
             other => Err(AplError::runtime(
                 "⌽/⊖ not implemented for this value type".into(),
@@ -6792,10 +6814,11 @@ impl Engine {
                     }
                     out[pos] = elems[oflat].clone();
                 }
-                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                    new_dims,
-                    ArrayData::Nested(out),
-                )))))
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray {
+                    dimensions: new_dims,
+                    data: ArrayData::Nested(out),
+                    labels: None,
+                }))))
             }
             other => Err(AplError::runtime("⍉ not implemented for this value type".into())),
         }
@@ -7175,11 +7198,6 @@ impl Engine {
                         "↑/↓ count has more elements than the array rank".into(),
                     ));
                 }
-                // Compute the final shape up front and reject runaway results
-                // (e.g. `1e6 1e6 ↑ small`) *before* slicing, so we never attempt to
-                // allocate an OOM-sized vector — `slice_axis` requests a `Vec`
-                // capacity of `outer * target * stride`, and for a padded multi-axis
-                // take that can be ~1e12 elements, which aborts the process.
                 let mut final_dims = dims.clone();
                 for axis in 0..rank {
                     let spec = counts.get(axis).copied().flatten();
@@ -7195,17 +7213,54 @@ impl Engine {
                     return Err(AplError::runtime("take/drop result too large".into()));
                 }
                 let mut flat = a.elements();
+                let orig_dims = a.dimensions.clone();
+                let mut new_labels = a.labels().cloned();
                 for axis in 0..rank {
                     let spec = counts.get(axis).copied().flatten();
+                    let orig_n = orig_dims[axis];
                     let (new_flat, new_dims) = self.slice_axis(&flat, &dims, axis, take, spec)?;
                     flat = new_flat;
                     dims = new_dims;
+                    if let Some(ref mut lab) = new_labels {
+                        if let Some(Some(ll)) = lab.labels.get(axis) {
+                            let ll = ll.clone();
+                            let new_label_list = match spec {
+                                None => ll,
+                                Some(c) if take => {
+                                    let abs_c = c.unsigned_abs() as usize;
+                                    if c >= 0 {
+                                        let mut r: Vec<_> = ll.into_iter().take(abs_c).collect();
+                                        while r.len() < abs_c { r.push(None); }
+                                        r
+                                    } else {
+                                        let drop = ll.len().saturating_sub(abs_c);
+                                        let pad = abs_c.saturating_sub(ll.len());
+                                        let mut r: Vec<_> = (0..pad).map(|_| None).collect();
+                                        r.extend(ll.into_iter().skip(drop));
+                                        r
+                                    }
+                                }
+                                Some(c) => {
+                                    let abs_c = c.unsigned_abs() as usize;
+                                    if c >= 0 {
+                                        ll.into_iter().skip(abs_c).collect()
+                                    } else {
+                                        let keep = ll.len().saturating_sub(abs_c);
+                                        ll.into_iter().take(keep).collect()
+                                    }
+                                }
+                            };
+                            if axis < lab.labels.len() {
+                                lab.labels[axis] = Some(new_label_list);
+                            }
+                        }
+                    }
                 }
                 let total: usize = dims.iter().product();
                 if total > 100_000_000 {
                     return Err(AplError::runtime("take/drop result too large".into()));
                 }
-                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(dims, ArrayData::Nested(flat))))))
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray { dimensions: dims, data: ArrayData::Nested(flat), labels: new_labels.map(Box::new) }))))
             }
             APLValue::Str(s) => {
                 // A string is a rank-1 vector of chars; take/drop slices its characters.
