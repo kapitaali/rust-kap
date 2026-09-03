@@ -6991,10 +6991,17 @@ impl Engine {
                     }
                     out[pos] = elems[oflat].clone();
                 }
+                let labels = a.labels().map(|l| {
+                    let mut new_labels = Vec::with_capacity(rank);
+                    for k in 0..rank {
+                        new_labels.push(l.labels[perm[k]].clone());
+                    }
+                    Box::new(DimensionLabels { labels: new_labels })
+                });
                 Ok(Rc::new(APLValue::Array(Rc::new(KapArray {
                     dimensions: new_dims,
                     data: ArrayData::Nested(out),
-                    labels: None,
+                    labels,
                 }))))
             }
             other => Err(AplError::runtime("⍉ not implemented for this value type".into())),
