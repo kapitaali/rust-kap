@@ -12178,10 +12178,57 @@ impl Engine {
         } else if total != 0 {
             shape = vec![total];
         }
-        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-            shape,
-            ArrayData::Nested(out_elems),
-        )))))
+        // Thread labels through replicate/compress.
+        // For the replicated axis: counts[i]==0 drops, counts[i]==1 keeps label, counts[i]>1 nulls all.
+        // For other axes: preserve labels unchanged.
+        let labels = match b.as_ref() {
+            APLValue::Array(b_arr) => {
+                let rank = b_dims.len();
+                let mut new_labels: Vec<Option<Vec<AxisLabel>>> = Vec::with_capacity(rank);
+                for k in 0..rank {
+                    if k == axis {
+                        // Replicated axis: build labels per counts
+                        let src_axis_labels = b_arr.labels().and_then(|l| l.labels.get(k).cloned().flatten());
+                        let mut rep_labels: Vec<AxisLabel> = Vec::with_capacity(total);
+                        let axis_size = b_dims.get(axis).copied().unwrap_or(0);
+                        for i in 0..axis_size {
+                            let c = if counts.is_empty() {
+                                1
+                            } else if counts.len() == 1 {
+                                counts[0]
+                            } else {
+                                counts[i]
+                            };
+                            let count = c as usize;
+                            if count == 0 {
+                                // drop
+                            } else if count == 1 {
+                                // keep label once
+                                let lbl = src_axis_labels.as_ref().and_then(|v| v.get(i).cloned().unwrap_or(None));
+                                rep_labels.push(lbl);
+                            } else {
+                                // replicated: all null
+                                for _ in 0..count {
+                                    rep_labels.push(None);
+                                }
+                            }
+                        }
+                        let has_any = rep_labels.iter().any(|l| l.is_some());
+                        new_labels.push(if has_any { Some(rep_labels) } else { None });
+                    } else {
+                        // Other axes: preserve
+                        new_labels.push(b_arr.labels().and_then(|l| l.labels.get(k).cloned().flatten()));
+                    }
+                }
+                Some(Box::new(DimensionLabels { labels: new_labels }))
+            }
+            _ => None,
+        };
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray {
+            dimensions: shape,
+            data: ArrayData::Nested(out_elems),
+            labels,
+        }))))
     }
 
     /// Value-left `A \ B` (Kotlin `ExpandLastAxisFunction`) and `A ⍀ B`
