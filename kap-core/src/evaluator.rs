@@ -12270,10 +12270,48 @@ impl Engine {
         } else {
             shape = vec![counts.len()];
         }
-        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-            shape,
-            ArrayData::Nested(out_elems),
-        )))))
+        // Thread labels through expand.
+        // For the expanded axis: positive counts[i] keeps B's label at position i
+        // (repeated counts[i] times), zero/negative counts emit nulls.
+        // Other axes preserve labels unchanged.
+        let labels = match b.as_ref() {
+            APLValue::Array(b_arr) => {
+                let rank = b_dims.len();
+                let src_axis_labels = b_arr.labels().and_then(|l| l.labels.get(axis).cloned().flatten());
+                let mut exp_labels: Vec<AxisLabel> = Vec::with_capacity(counts.len());
+                for (i, &c) in counts.iter().enumerate() {
+                    if c > 0 {
+                        let lbl = src_axis_labels.as_ref().and_then(|v| v.get(i).cloned().unwrap_or(None));
+                        for _ in 0..c as usize {
+                            exp_labels.push(lbl.clone());
+                        }
+                    } else if c == 0 {
+                        exp_labels.push(None);
+                    } else {
+                        for _ in 0..(-c) as usize {
+                            exp_labels.push(None);
+                        }
+                    }
+                }
+                let has_any = exp_labels.iter().any(|l| l.is_some());
+                let axis_label = if has_any { Some(exp_labels) } else { None };
+                let mut new_labels: Vec<Option<Vec<AxisLabel>>> = Vec::with_capacity(rank);
+                for k in 0..rank {
+                    if k == axis {
+                        new_labels.push(axis_label.clone());
+                    } else {
+                        new_labels.push(b_arr.labels().and_then(|l| l.labels.get(k).cloned().flatten()));
+                    }
+                }
+                Some(Box::new(DimensionLabels { labels: new_labels }))
+            }
+            _ => None,
+        };
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray {
+            dimensions: shape,
+            data: ArrayData::Nested(out_elems),
+            labels,
+        }))))
     }
 
     /// Legacy name for `select_elements(..., last_axis=true)` — kept so existing
