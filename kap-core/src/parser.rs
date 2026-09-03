@@ -1364,46 +1364,9 @@ impl<'a> Parser<'a> {
         }
         // M5: nested context parses the right argument with the SAME accumulator loop
         // so it stops at this group's close token instead of running past it.
-        let right = if self.kotlin_close_stack.is_empty() {
-            self.parse_apply()?
-        } else {
-            let r = self.parse_value_kotlin()?;
-            let at_close_now = matches!(self.peek().map(|t| &t.token), Some(t)
-                if self.kotlin_close_stack.last().map(|c| {
-                    std::mem::discriminant(c) == std::mem::discriminant(t)
-                }) == Some(true));
-            if at_close_now && self.nested_right_is_fn_result(&r) {
-                // parser.kt:479–491 FnParseResult branch: right is a FUNCTION ⇒
-                // Chain2(parsedFn, right) — atop composition, returned as a fn value.
-                // When leftArgs is NON-EMPTY, Kotlin wraps parsedFn in
-                // makeLeftBindFunction(leftArgs, parsedFn) FIRST (:486), then
-                // Chain2s with holder.fn — i.e. `Train[Train[strand(leftArgs), fn], r]`.
-                // Without this wrap, `(¯1r2 0+2÷⍨≢)` drops the value `3/2 2` and
-                // builds `Train[÷⍨, ≢]` (evaluates to `1`, not `⟨3/2 2⟩`).
-                let outer_fn = if left_args.is_empty() {
-                    fn_instr
-                } else {
-                    let bound = if left_args.len() == 1 {
-                        left_args.pop().unwrap()
-                    } else {
-                        Instr::Array {
-                            elements: std::mem::take(left_args),
-                        }
-                    };
-                    Instr::Train {
-                        funcs: vec![bound, fn_instr],
-                        reverse: false,
-                        compose: false,
-                    }
-                };
-                return Ok(Instr::Train {
-                    funcs: vec![outer_fn, r],
-                    reverse: false,
-                    compose: false,
-                });
-            }
-            r
-        };
+        // ALWAYS use parse_value_kotlin for the right argument to ensure correct
+        // Kotlin-style stranding (e.g. `2 3 ⍴ 6` parses as `(2 3) ⍴ 6`, not `2 (3 ⍴ 6)`).
+        let right = self.parse_value_kotlin()?;
         if left_args.is_empty() {
             // parser.kt:479–484 FnParseResult branch: when the right argument is a
             // FUNCTION, Kotlin forms Chain2(parsedFn, holder.fn) — a 2-train ATOP
