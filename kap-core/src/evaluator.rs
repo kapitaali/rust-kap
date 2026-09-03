@@ -7,7 +7,7 @@
 //! `⍉` transpose, `↑/↓` take/drop, `⊂` enclose), assignment `←`, and user lambdas
 //! (`λ(params) body`). More in later phases.
 
-use crate::array::{ArrayData, KapArray};
+use crate::array::{ArrayData, AxisLabel, DimensionLabels, KapArray};
 use crate::ast::{SyntaxMacro, Instr, BooleanOpKind};
 use crate::lexer::tokenise;
 use crate::number::{bigint_to_kap, popcount_bigint, KapNumber};
@@ -1267,6 +1267,25 @@ impl Engine {
                     ))
                 }
             };
+            // `labels[axis]` / `hasLabels[axis]`: axis-aware label read/write.
+            // Handle entirely here to avoid re-entering AxisApplied dispatch.
+            if fn_name == "labels" || fn_name == "hasLabels" {
+                let axis_val = self.eval_instr(axis, env)?.force(self)?;
+                if fn_name == "labels" {
+                    // Monadic: labels[axis] R — read labels along axis.
+                    // Dyadic: L labels[axis] R — set labels along axis.
+                    let right_v = self.eval_instr(right, env)?.force(self)?;
+                    return self.eval_labels(left, right_v, env, Some(axis_val));
+                } else {
+                    // hasLabels is dyadic: axis hasLabels array (no [axis] form)
+                    let left_v = match left {
+                        Some(l) => Some(self.eval_instr(l, env)?.force(self)?),
+                        None => None,
+                    };
+                    let right_v = self.eval_instr(right, env)?.force(self)?;
+                    return self.eval_has_labels(left_v.unwrap_or(Rc::new(APLValue::Null)), right_v);
+                }
+            }
             let left_v = match left {
                 Some(l) => Some(self.eval_instr(l, env)?.force(self)?),
                 None => None,
@@ -2112,7 +2131,7 @@ impl Engine {
                     _ => return Err(AplError::runtime("int:formatRational requires a number".into())),
                 };
                 let (s, exact) = self.format_rational(v, decimals);
-                use crate::array::{ArrayData, KapArray};
+                use crate::array::{ArrayData, AxisLabel, DimensionLabels, KapArray};
                 Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
                     vec![2],
                     ArrayData::Nested(vec![
@@ -2202,7 +2221,7 @@ impl Engine {
                             }
                             "kap:rendererParameters" | "default:rendererParameters" => {
                                 // ⟨⟨200 50⟩ ⟨60 10⟩⟩ — max height/width then label cell size.
-                                use crate::array::{ArrayData, KapArray};
+                                use crate::array::{ArrayData, AxisLabel, DimensionLabels, KapArray};
                                 let row = |a: i64, b: i64| {
                                     Rc::new(APLValue::Array(Rc::new(KapArray::new(
                                         vec![2],
@@ -2754,6 +2773,18 @@ impl Engine {
                 None => self.collapse(right_val),
                 Some(_) => Err(AplError::runtime("comp: Function cannot be called with two arguments".into())),
             },
+            // `labels` (div_functions.kt LabelsFunction): monadic reads axis labels,
+            // dyadic sets them. Bare form (no `[axis]`) — the axis-applied form is
+            // handled in the AxisApplied dispatch above.
+            "labels" => {
+                return self.eval_labels(left, right_val, env, None);
+            }
+            // `hasLabels` (div_functions.kt HasLabelsFunction): dyadic, returns 1 if
+            // the given axis of the right arg has labels, 0 otherwise. Bare form only.
+            "hasLabels" => {
+                let axis_arg = left_val.ok_or_else(|| AplError::runtime("hasLabels: requires two arguments (axis, array)".into()))?;
+                return self.eval_has_labels(axis_arg, right_val);
+            }
             // `⫇` / `group` — Kotlin GroupFunction (group-index.kt). Left `L` is a rank-1
             // vector of group indices (negative => element skipped). Right `R` has major
             // axis == length(L); each index selects into R's major cells. Returns a vector
@@ -3400,7 +3431,8 @@ impl Engine {
                 // parse time via is_primitive_op; listed here so the eval-time late gate
                 // knows it (two-gate rule).
                 | "comp"
-)
+                | "labels" | "hasLabels"
+ )
  }
 
     /// Apply a user-defined lambda. `split` = number of leading params that are bound to
@@ -3524,6 +3556,130 @@ impl Engine {
         match result {
             Err(AplError::Return(v)) => Ok(v),
             other => other,
+        }
+    }
+
+    /// `labels` builtin: monadic reads axis labels, dyadic sets them.
+    /// `explicit_axis` is the value from `labels[axis]`; `None` for bare `labels`.
+    fn eval_labels(
+        &self,
+        left: &Option<Box<Instr>>,
+        right_val: AplRef<APLValue>,
+        env: &AplRef<Environment>,
+        explicit_axis: Option<AplRef<APLValue>>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        match left {
+            None => {
+                // Monadic: read labels from right_val along axis.
+                let arr = match right_val.as_ref() {
+                    APLValue::Array(a) => a,
+                    _ => return Err(AplError::runtime("labels: argument must be an array".into())),
+                };
+                let rank = arr.rank();
+                let axis_i = match explicit_axis {
+                    Some(ax) => match ax.as_ref() {
+                        APLValue::Number(n) => n.as_long().map_err(|e| AplError::runtime(e))? as usize,
+                        _ => return Err(AplError::runtime("labels: axis must be a number".into())),
+                    },
+                    None => {
+                        // Default: last axis (Kotlin `d.lastAxis(pos)`)
+                        if rank == 0 { 0 } else { rank - 1 }
+                    }
+                };
+                if rank > 0 && axis_i >= rank {
+                    return Err(AplError::runtime(format!("labels: axis {} is out of bounds for rank-{} array", axis_i, rank)));
+                }
+                let axis_size = if rank == 0 { 1 } else { arr.dimensions[axis_i] };
+                let label_strings: Vec<String> = match arr.labels().and_then(|l| l.labels.get(axis_i)) {
+                    None => vec!["".to_string(); axis_size],
+                    Some(Some(list)) => {
+                        list.iter().map(|l| l.clone().unwrap_or_default()).collect()
+                    }
+                    Some(None) => vec!["".to_string(); axis_size],
+                };
+                let elems: Vec<AplRef<APLValue>> = label_strings.into_iter()
+                    .map(|s| Rc::new(APLValue::Str(s)))
+                    .collect();
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(vec![axis_size], ArrayData::Nested(elems))))))
+            }
+            Some(l) => {
+                // Dyadic: set labels. l = label vector, right_val = target array.
+                let labels_arg = self.eval_instr(l, env)?.force(self)?;
+                let arr = match right_val.as_ref() {
+                    APLValue::Array(a) => a,
+                    _ => return Err(AplError::runtime("labels: right argument must be an array".into())),
+                };
+                let rank = arr.rank();
+                let axis_i = match explicit_axis {
+                    Some(ax) => match ax.as_ref() {
+                        APLValue::Number(n) => n.as_long().map_err(|e| AplError::runtime(e))? as usize,
+                        _ => return Err(AplError::runtime("labels: axis must be a number".into())),
+                    },
+                    None => {
+                        // Default: last axis of the right arg
+                        if rank == 0 { 0 } else { rank - 1 }
+                    }
+                };
+                if rank > 0 && axis_i >= rank {
+                    return Err(AplError::runtime(format!("labels: axis {} is out of bounds for rank-{} array", axis_i, rank)));
+                }
+                let axis_size = if rank == 0 { 1 } else { arr.dimensions[axis_i] };
+                // Parse the label vector: must be rank-1, length == axis_size.
+                let (label_elems, label_rank) = match labels_arg.as_ref() {
+                    APLValue::Array(a) => (a.elements(), a.rank()),
+                    _ => return Err(AplError::runtime("labels: left argument must be an array of label strings".into())),
+                };
+                if label_rank != 1 {
+                    return Err(AplError::runtime("labels: left argument must be a vector".into()));
+                }
+                if label_elems.len() != axis_size {
+                    return Err(AplError::runtime("labels: label list has incorrect length".into()));
+                }
+                let new_axis_labels: Vec<AxisLabel> = label_elems.iter().map(|e| {
+                    match e.as_ref() {
+                        APLValue::Null => None,
+                        APLValue::Str(s) => Some(s.clone()),
+                        APLValue::Char(c) => Some(c.to_string()),
+                        APLValue::Number(n) => Some(n.to_string()),
+                        _ => Some(e.format_value()),
+                    }
+                }).collect();
+                // Build new DimensionLabels with the target axis set.
+                let mut new_labels = arr.labels().cloned().unwrap_or_else(|| DimensionLabels::none(rank));
+                if axis_i >= new_labels.labels.len() {
+                    new_labels.labels.resize(axis_i + 1, None);
+                }
+                new_labels.labels[axis_i] = Some(new_axis_labels);
+                Ok(Rc::new(APLValue::Array(Rc::new(arr.clone_with_labels(Some(Box::new(new_labels)))))))
+            }
+        }
+    }
+
+    /// `hasLabels` builtin: dyadic, returns 1 if the given axis of the right arg has labels, 0 otherwise.
+    fn eval_has_labels(
+        &self,
+        axis_arg: AplRef<APLValue>,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let arr = match right_val.as_ref() {
+            APLValue::Array(a) => a,
+            _ => return Err(AplError::runtime("hasLabels: right argument must be an array".into())),
+        };
+        let axis_i = match axis_arg.as_ref() {
+            APLValue::Number(n) => n.as_long().map_err(|e| AplError::runtime(e))? as usize,
+            _ => return Err(AplError::runtime("hasLabels: left argument must be an axis number".into())),
+        };
+        let rank = arr.rank();
+        if axis_i >= rank {
+            return Err(AplError::runtime("hasLabels: A must be a valid axis in B".into()));
+        }
+        let has = arr.labels().map(|l| {
+            l.labels.get(axis_i).map(|axis| axis.is_some()).unwrap_or(false)
+        }).unwrap_or(false);
+        if has {
+            Ok(Rc::new(APLValue::Number(KapNumber::Long(1))))
+        } else {
+            Ok(Rc::new(APLValue::Number(KapNumber::Long(0))))
         }
     }
 
@@ -11228,7 +11384,7 @@ impl Engine {
 
     /// Build a rank-1 Long array from i64 values.
     fn make_long_vector(&self, vals: Vec<i64>) -> Result<AplRef<APLValue>, AplError> {
-        use crate::array::{ArrayData, KapArray};
+        use crate::array::{ArrayData, AxisLabel, DimensionLabels, KapArray};
         Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
             vec![vals.len()],
             ArrayData::Long(vals),

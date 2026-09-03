@@ -1076,7 +1076,7 @@ impl<'a> Parser<'a> {
                             // here made `2↑[0] ⍳6` STRAND the axis beside the argument
                             // (`2↑[0] "abcdef"` → `((0) "abcdef")`) instead of applying
                             // take — a silently WRONG VALUE, not a parse error.
-                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖" | "↑" | "↓")
+                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖" | "↑" | "↓" | "labels" | "hasLabels")
                     );
                     if axis_ok {
                         self.advance();
@@ -3267,6 +3267,7 @@ impl<'a> Parser<'a> {
                 | "namespace" | "import" | "declare" | "use" | "isLocallyBound"
                 | "throw"
                 | "comp"
+                | "labels" | "hasLabels"
         )
     }
 

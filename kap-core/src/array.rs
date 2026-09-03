@@ -26,16 +26,176 @@ pub enum ArrayData {
     Nested(Vec<AplRef<APLValue>>),
 }
 
-/// A Kap array: shape (dimensions) + backing data. Immutable.
+/// A single axis label. `None` means "no label for this position" (Kotlin
+/// `AxisLabel?` — null entries are explicit gaps, distinct from an empty-string
+/// label which is the default for unlabelled axes).
+pub type AxisLabel = Option<String>;
+
+/// Labels for every axis of an array, in axis order. `labels[axis]` is
+/// `None` when that axis has no labels at all; `Some(list)` where each
+/// element is `Some(title)` or `None` (gap) when the axis is labelled.
+#[derive(Debug, Clone)]
+pub struct DimensionLabels {
+    /// One entry per axis; each entry is None (no labels) or Some(per-position labels).
+    pub labels: Vec<Option<Vec<AxisLabel>>>,
+}
+
+impl DimensionLabels {
+    /// Create labels for `rank` axes, all unlabelled.
+    pub fn none(rank: usize) -> Self {
+        DimensionLabels { labels: vec![None; rank] }
+    }
+
+    /// Compute which axes have at least one non-null label (Kotlin
+    /// `DimensionLabels.computeLabelledAxes()`).
+    pub fn compute_labelled_axes(&self) -> Vec<bool> {
+        self.labels
+            .iter()
+            .map(|axis| match axis {
+                None => false,
+                Some(list) => list.iter().any(|l| l.is_some()),
+            })
+            .collect()
+    }
+
+    /// Insert a new axis at position `axis` (Kotlin `insertAxis`). The new
+    /// axis starts unlabelled; axes at and above `axis` shift up by one.
+    pub fn insert_axis(&self, axis: usize) -> Self {
+        let mut new = Vec::with_capacity(self.labels.len() + 1);
+        for (i, l) in self.labels.iter().enumerate() {
+            if i == axis {
+                new.push(None);
+            }
+            new.push(l.clone());
+        }
+        if axis >= self.labels.len() {
+            new.push(None);
+        }
+        DimensionLabels { labels: new }
+    }
+
+    /// Delete axis `axis` (Kotlin `deleteAxis`). Axes above shift down.
+    pub fn delete_axis(&self, axis: usize) -> Self {
+        let mut new = Vec::with_capacity(self.labels.len().saturating_sub(1));
+        for (i, l) in self.labels.iter().enumerate() {
+            if i != axis {
+                new.push(l.clone());
+            }
+        }
+        DimensionLabels { labels: new }
+    }
+
+    /// Reverse the labels on a single axis (used by `⌽`/`⊖` monadic).
+    pub fn reverse_axis(&self, axis: usize) -> Self {
+        let mut new = self.labels.clone();
+        if let Some(Some(list)) = new.get_mut(axis) {
+            list.reverse();
+        }
+        DimensionLabels { labels: new }
+    }
+
+    /// Rotate labels on a single axis by `n` positions (used by dyadic `⌽`/`⊖`).
+    pub fn rotate_axis(&self, axis: usize, n: isize, axis_size: usize) -> Self {
+        let mut new = self.labels.clone();
+        if let Some(Some(list)) = new.get_mut(axis) {
+            let len = list.len();
+            if len > 0 {
+                let n = ((n as isize).rem_euclid(len as isize)) as usize;
+                let mut rotated = Vec::with_capacity(len);
+                for i in 0..len {
+                    rotated.push(list[(i + len - n) % len].clone());
+                }
+                *list = rotated;
+            }
+        }
+        DimensionLabels { labels: new }
+    }
+
+    /// Take `n` elements from the front of `axis`, keeping only their labels.
+    pub fn take_axis(&self, axis: usize, n: usize) -> Self {
+        let mut new = self.labels.clone();
+        if let Some(Some(list)) = new.get_mut(axis) {
+            list.truncate(n);
+        }
+        DimensionLabels { labels: new }
+    }
+
+    /// Drop `n` elements from the front of `axis`.
+    pub fn drop_axis(&self, axis: usize, n: usize) -> Self {
+        let mut new = self.labels.clone();
+        if let Some(Some(list)) = new.get_mut(axis) {
+            if n >= list.len() {
+                *list = Vec::new();
+            } else {
+                *list = list[n..].to_vec();
+            }
+        }
+        DimensionLabels { labels: new }
+    }
+
+    /// Take with fill: extend labels with `null` for padding positions.
+    pub fn take_with_fill(&self, axis: usize, n: usize, axis_size: usize, fill_left: bool) -> Self {
+        let mut new = self.labels.clone();
+        if let Some(Some(list)) = new.get_mut(axis) {
+            let mut result = Vec::with_capacity(n);
+            if fill_left {
+                let pad = n.saturating_sub(axis_size);
+                for _ in 0..pad {
+                    result.push(None);
+                }
+                for i in 0..axis_size.min(n) {
+                    result.push(list[i].clone());
+                }
+            } else {
+                let pad = n.saturating_sub(axis_size);
+                for i in 0..axis_size.min(n) {
+                    if i + pad < n {
+                        // skip padding on the right
+                    }
+                }
+                // Right-aligned: take last n, pad left with null
+                let start = axis_size.saturating_sub(n);
+                for _ in 0..(n - axis_size.min(n)) {
+                    result.push(None);
+                }
+                for i in start..axis_size {
+                    result.push(list[i].clone());
+                }
+            }
+            *list = result;
+        }
+        DimensionLabels { labels: new }
+    }
+}
+
+/// A Kap array: shape (dimensions) + backing data + optional axis labels. Immutable.
 #[derive(Debug, Clone)]
 pub struct KapArray {
     pub dimensions: Vec<usize>,
     pub data: ArrayData,
+    /// Axis labels (Kap `DimensionLabels`). `None` when no axis is labelled.
+    pub labels: Option<Box<DimensionLabels>>,
 }
 
 impl KapArray {
     pub fn new(dimensions: Vec<usize>, data: ArrayData) -> Self {
-        KapArray { dimensions, data }
+        KapArray { dimensions, data, labels: None }
+    }
+
+    /// Create a labelled array. `labels` is one entry per axis; each entry
+    /// is `Some(per-position)` where positions are `Some(title)` or `None` (gap).
+    pub fn with_labels(dimensions: Vec<usize>, data: ArrayData, labels: Vec<Option<Vec<AxisLabel>>>) -> Self {
+        KapArray { dimensions, data, labels: Some(Box::new(DimensionLabels { labels })) }
+    }
+
+    /// Get a reference to the labels, if any.
+    pub fn labels(&self) -> Option<&DimensionLabels> {
+        self.labels.as_deref()
+    }
+
+    /// Clone with new labels.
+    pub fn clone_with_labels(&self, labels: Option<Box<DimensionLabels>>) -> Self {
+        KapArray { dimensions: self.dimensions.clone(), data: self.data.clone(), labels }
     }
 
     /// Total element count = product of dimensions (0 for the empty/rank-0 case is
