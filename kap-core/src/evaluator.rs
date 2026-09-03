@@ -5774,10 +5774,29 @@ impl Engine {
                     let mut elems = Vec::new();
                     self.collect_elements(&a, &mut elems);
                     self.collect_elements(&b, &mut elems);
-                    return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                        vec![elems.len()],
-                        ArrayData::Nested(elems),
-                    )))));
+                    let a_labels = match a.as_ref() {
+                        APLValue::Array(arr) => arr.labels(),
+                        _ => None,
+                    };
+                    let b_labels = match b.as_ref() {
+                        APLValue::Array(arr) => arr.labels(),
+                        _ => None,
+                    };
+                    let a_size = a_dims.get(0).copied().unwrap_or(0);
+                    let b_size = b_dims.get(0).copied().unwrap_or(0);
+                    let labels = self.catenate_labels(
+                        a_labels,
+                        b_labels,
+                        default_axis,
+                        1,
+                        a_size,
+                        b_size,
+                    );
+                    return Ok(Rc::new(APLValue::Array(Rc::new(KapArray {
+                        dimensions: vec![elems.len()],
+                        data: ArrayData::Nested(elems),
+                        labels,
+                    }))));
                 }
                 // Higher rank: use join_by_axis (Kotlin joinByAxis, :188). Kotlin
                 // promotes a lower-rank argument by inserting a length-1 axis at the
@@ -5797,6 +5816,14 @@ impl Engine {
                 let a_dims = a.dimensions();
                 let b_dims = b.dimensions();
                 let join_name = if is_table { "⍪" } else { "," };
+                let a_labels = match a.as_ref() {
+                    APLValue::Array(arr) => arr.labels(),
+                    _ => None,
+                };
+                let b_labels = match b.as_ref() {
+                    APLValue::Array(arr) => arr.labels(),
+                    _ => None,
+                };
                 self.join_by_axis(
                     &a.elements(),
                     &a_dims,
@@ -5804,8 +5831,124 @@ impl Engine {
                     &b_dims,
                     default_axis,
                     join_name,
+                    a_labels,
+                    b_labels,
                 )
             }
+        }
+    }
+
+    /// Merge labels for catenation. For 1D (flat) concat, concatenate the label lists.
+    /// For higher-rank concat along an axis, concatenate labels on that axis and preserve
+    /// labels on other axes (only if they match between both sides).
+    fn catenate_labels(
+        &self,
+        a_labels: Option<&DimensionLabels>,
+        b_labels: Option<&DimensionLabels>,
+        axis: usize,
+        rank: usize,
+        a_size: usize,
+        b_size: usize,
+    ) -> Option<Box<DimensionLabels>> {
+        match (a_labels, b_labels) {
+            (None, None) => None,
+            (a_opt, b_opt) => {
+                let mut all_axis_are_null = true;
+                let mut result_labels = Vec::with_capacity(rank);
+                for a in 0..rank {
+                    let axis_labels_a = a_opt.and_then(|l| l.labels.get(a).cloned().flatten());
+                    let axis_labels_b = b_opt.and_then(|l| l.labels.get(a).cloned().flatten());
+                    let result_axis_labels = if a == axis {
+                        Self::compute_concat_axis_labels(&axis_labels_a, &axis_labels_b, a_size, b_size)
+                    } else if axis_labels_a.is_none() || axis_labels_b.is_none() {
+                        None
+                    } else {
+                        Self::compute_non_primary_labels(&axis_labels_a.unwrap(), &axis_labels_b.unwrap())
+                    };
+                    if result_axis_labels.is_some() {
+                        all_axis_are_null = false;
+                    }
+                    result_labels.push(result_axis_labels);
+                }
+                if all_axis_are_null {
+                    None
+                } else {
+                    Some(Box::new(DimensionLabels { labels: result_labels }))
+                }
+            }
+        }
+    }
+
+    fn compute_concat_axis_labels(
+        axis_labels_a: &Option<Vec<AxisLabel>>,
+        axis_labels_b: &Option<Vec<AxisLabel>>,
+        a_size: usize,
+        b_size: usize,
+    ) -> Option<Vec<AxisLabel>> {
+        let mut axis_labels = Vec::new();
+        let mut has_labels = false;
+        match axis_labels_a {
+            None => {
+                for _ in 0..a_size {
+                    axis_labels.push(None);
+                }
+            }
+            Some(labels) => {
+                for label in labels {
+                    axis_labels.push(label.clone());
+                    if label.is_some() {
+                        has_labels = true;
+                    }
+                }
+            }
+        }
+        match axis_labels_b {
+            None => {
+                for _ in 0..b_size {
+                    axis_labels.push(None);
+                }
+            }
+            Some(labels) => {
+                for label in labels {
+                    axis_labels.push(label.clone());
+                    if label.is_some() {
+                        has_labels = true;
+                    }
+                }
+            }
+        }
+        if has_labels {
+            Some(axis_labels)
+        } else {
+            None
+        }
+    }
+
+    fn compute_non_primary_labels(
+        axis_labels_a: &[AxisLabel],
+        axis_labels_b: &[AxisLabel],
+    ) -> Option<Vec<AxisLabel>> {
+        if axis_labels_a.len() != axis_labels_b.len() {
+            return None;
+        }
+        let mut is_same = true;
+        for i in 0..axis_labels_a.len() {
+            let l0 = &axis_labels_a[i];
+            let l1 = &axis_labels_b[i];
+            let same = match (l0, l1) {
+                (None, None) => true,
+                (Some(a), Some(b)) => a == b,
+                _ => false,
+            };
+            if !same {
+                is_same = false;
+                break;
+            }
+        }
+        if is_same {
+            Some(axis_labels_a.to_vec())
+        } else {
+            None
         }
     }
 
@@ -5890,6 +6033,24 @@ impl Engine {
             let a_elems = a.elements();
             let b_elems = b.elements();
             // Reshape each to `rd` (elements unchanged — length-1 insertion keeps order).
+            let a1_laminate_labels = match a.as_ref() {
+                APLValue::Array(arr) => arr.labels(),
+                _ => None,
+            }
+            .map(|l| {
+                let mut new = l.clone();
+                new.labels.insert(na, Some(vec![None]));
+                new
+            });
+            let b1_laminate_labels = match b.as_ref() {
+                APLValue::Array(arr) => arr.labels(),
+                _ => None,
+            }
+            .map(|l| {
+                let mut new = l.clone();
+                new.labels.insert(na, Some(vec![None]));
+                new
+            });
             let a1 = APLValue::Array(Rc::new(KapArray::new(rd.clone(), ArrayData::Nested(a_elems))));
             let b1 = APLValue::Array(Rc::new(KapArray::new(rd, ArrayData::Nested(b_elems))));
             return self.join_by_axis(
@@ -5899,6 +6060,8 @@ impl Engine {
                 &b1.dimensions(),
                 na,
                 ",",
+                a1_laminate_labels.as_ref(),
+                b1_laminate_labels.as_ref(),
             );
         }
         // Plain integer-axis concatenation.
@@ -5912,6 +6075,14 @@ impl Engine {
                 a_dims.len()
             )));
         }
+        let a_labels = match a.as_ref() {
+            APLValue::Array(arr) => arr.labels(),
+            _ => None,
+        };
+        let b_labels = match b.as_ref() {
+            APLValue::Array(arr) => arr.labels(),
+            _ => None,
+        };
         self.join_by_axis(
             &a.elements(),
             &a_dims,
@@ -5919,6 +6090,8 @@ impl Engine {
             &b_dims,
             na,
             ",",
+            a_labels,
+            b_labels,
         )
     }
 
@@ -5952,6 +6125,8 @@ impl Engine {
         b_dims: &[usize],
         axis: usize,
         name: &str,
+        a_labels: Option<&DimensionLabels>,
+        b_labels: Option<&DimensionLabels>,
     ) -> Result<AplRef<APLValue>, AplError> {
         if a_dims.len() != b_dims.len() {
             return Err(AplError::runtime(format!(
@@ -6017,10 +6192,12 @@ impl Engine {
             }
             out_elems.push(src_elems[sf].clone());
         }
-        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-            out_dims,
-            ArrayData::Nested(out_elems),
-        )))))
+        let labels = self.catenate_labels(a_labels, b_labels, axis, rank, a_dims[axis], b_dims[axis]);
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray {
+            dimensions: out_dims,
+            data: ArrayData::Nested(out_elems),
+            labels,
+        }))))
     }
 
     /// Flatten a value's elements for catenation/stranding: scalars become a 1-element
