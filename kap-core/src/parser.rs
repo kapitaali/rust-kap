@@ -1076,7 +1076,16 @@ impl<'a> Parser<'a> {
                             // here made `2↑[0] ⍳6` STRAND the axis beside the argument
                             // (`2↑[0] "abcdef"` → `((0) "abcdef")`) instead of applying
                             // take — a silently WRONG VALUE, not a parse error.
-                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖" | "↑" | "↓" | "labels" | "hasLabels")
+                            //
+                            // T1.1 (PROGRESS-20260904d.md) extends the allowlist to the
+                            // remaining axis-aware verbs. Per Kotlin source:
+                            //   `⊂` enclose  — disclose.kt:132 (EncloseAPLFunctionImpl.eval1Arg)
+                            //   `⊃` disclose — disclose.kt:413 (DiscloseAPLFunctionImpl.eval1Arg)
+                            //   `∊` enlist   — member.kt:94 (MemberFunctionImpl.eval1Arg, limit form)
+                            //   `/` reduce   — reduce.kt:279 (reduce adverb path: adv_explicit_axis)
+                            //   `\\` expand  — expand.kt:23 (ExpandFunctionImpl.eval2Arg)
+                            //   `⌿` reduce-first — same path as `/` (adverb-level)
+                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖" | "↑" | "↓" | "labels" | "hasLabels" | "⊂" | "⊃" | "∊" | "/" | "\\" | "⌿")
                     );
                     if axis_ok {
                         self.advance();
