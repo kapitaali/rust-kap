@@ -221,3 +221,20 @@ TOTAL = 138
 
 Both deferred to a follow-up session per ROADMAP §0.1 law 4 (no leniency
 creep; the existing `,[0.5]` cases may regress if I touch catenate_axis).
+
+### Explicit "did NOT implement X" decisions
+
+Every "left it out" decision in this session is enumerated with reasoning,
+blast radius, status quo, and unblock path in
+[`META-INF/NON-IMPLEMENTED.md`](NON-IMPLEMENTED.md). Eight entries:
+
+1. ⊃[axis] (11 cases) — needs DisclosedArrayValue + TransposedAPLValue
+2. +[axis] monadic (~1) — reverted; wrong semantics, not arithmetic
+3. +/ adverb distinguish (0) — already works via adv_explicit_axis
+4. ∧/∨ sort-along-axis (5) — not in allowlist; new helper needed
+5. Byte-identical probe (0) — P8 display noise dominates; useless
+6. T1.3 labels cluster (40) — separate workstream
+7. T2.1 reshape spec (4) — separate workstream
+8. s:col (~4) — depends on ⊃[axis] (#1)
+
+T1.1 carryover: 17 cases. Adjacent clusters: 48 cases.
