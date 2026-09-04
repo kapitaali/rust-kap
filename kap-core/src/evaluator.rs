@@ -1733,6 +1733,30 @@ impl Engine {
                         .collect();
                     self.take_or_drop_opt(is_take, &counts_opt, right_v)
                 }
+                // T1.1: `∧[axis]` / `∨[axis]` sort along axis (Kotlin
+                // `sortKapArray`, sort.kt:192, with explicit axis validated by
+                // `ensureValidAxis`). Monadic only — dyadic `∧`/`∨` are
+                // bitwise, not sort (sort.kt:192 is reached from the SORT
+                // GradeUp/GradeDownFunctionImpl, not from the bitwise AndOr
+                // path).
+                "∧" | "∨" => {
+                    if left_v.is_some() {
+                        // Kotlin `AndOrToken` dyadic path: bitwise AND/OR, no
+                        // axis support. `ensureValidAxis` runs on the LEFT
+                        // arg's dims; a scalar (rank 0) gives "Axis N is not
+                        // valid. Expected: 0". Reproduce the same shape.
+                        let left_rank = left_v
+                            .as_ref()
+                            .map(|v| v.dimensions().len())
+                            .unwrap_or(0);
+                        return Err(AplError::runtime(format!(
+                            "{}: Axis {} is not valid. Expected: {}",
+                            fn_name, axis_as_long, left_rank
+                        )));
+                    }
+                    let reverse = fn_name == "∨";
+                    return self.sort_array(right_v, reverse, Some(axis_as_long));
+                }
                 // T1.1: `⊂[axis]` enclose-along-axis. Monadic (the parser
                 // builds AxisApplied; left_v is unused). The left_v is unused
                 // here (Kotlin's EncloseAPLFunction is monadic); reject dyadic
@@ -3214,11 +3238,11 @@ impl Engine {
                 Some(_) => self.num2(left_val, right_val, |a, b| b.log(a), "⍟"),
             },
             "∧" => match left_val {
-                None => self.sort_array(right_val, false),
+                None => self.sort_array(right_val, false, None),
                 Some(l) => self.bool2(Some(l), right_val, |a, b| a & b, "∧"),
             },
             "∨" => match left_val {
-                None => self.sort_array(right_val, true),
+                None => self.sort_array(right_val, true, None),
                 Some(l) => self.bool2(Some(l), right_val, |a, b| a | b, "∨"),
             },
             "⍲" => self.bool_broadcast(left_val, right_val, |x, y| !(x && y), "⍲"),
@@ -13920,59 +13944,92 @@ impl Engine {
     }
 
     /// Sort `∧ x` (ascending) / `∨ x` (descending). Mirrors Kotlin
-    /// `sortKapArray` (sort.kt:192): sorts the FIRST AXIS using
+    /// `sortKapArray` (sort.kt:192): sorts along the given axis using
     /// `compareTotalOrdering`, returns the sorted array (NOT indices — that's
-    /// `⍋`/`⍒`). Scalar → error; empty first axis → null.
+    /// `⍋`/`⍒`). When `axis_opt` is `None`, defaults to first axis. Scalar →
+    /// error; empty axis → null; axis out of range → "Axis N is not valid.
+    /// Expected: R" (matches `⌽/⊖[k]` validation, which mirrors Kotlin
+    /// `ensureValidAxis`).
     fn sort_array(
         &self,
         right_val: AplRef<APLValue>,
         reverse: bool,
+        axis_opt: Option<usize>,
     ) -> Result<AplRef<APLValue>, AplError> {
         let dims = right_val.dimensions();
         if dims.is_empty() {
             return Err(AplError::runtime("Scalars cannot be sorted".into()));
         }
-        if dims[0] == 0 {
+        let axis = axis_opt.unwrap_or(0);
+        if axis >= dims.len() {
+            return Err(AplError::runtime(format!(
+                "Axis {} is not valid. Expected: {}",
+                axis,
+                dims.len()
+            )));
+        }
+        if dims[axis] == 0 {
             return Ok(Rc::new(APLValue::Null));
         }
-        if dims.len() == 1 {
-            let n = dims[0];
-            let mut items: Vec<AplRef<APLValue>> = Vec::with_capacity(n);
-            for i in 0..n {
-                items.push(Rc::new(right_val.value_at(i)));
-            }
-            items.sort_by(|a, b| {
-                a.total_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-            });
-            if reverse {
-                items.reverse();
-            }
-            let arr = KapArray::new(vec![n], ArrayData::Nested(items));
-            return Ok(Rc::new(APLValue::Array(Rc::new(arr))));
+        // Compute the cell size and stride for the chosen axis.
+        // The "cell" at index k along the chosen axis is the run of values
+        // across all OTHER axes at that axis position. The cell is laid out
+        // contiguously because Kap arrays are row-major and the chosen axis
+        // is fixed for the whole cell range.
+        // For an array with dims [d0, d1, ..., dN-1], axis k:
+        //   - axis size: dims[k]
+        //   - prefix size (elements before the chosen axis): prod(d0..dk-1)
+        //   - cell size (elements at fixed axis position): prod(dk+1..dN-1)
+        //   - stride (jump from one axis position to the next): cell_size
+        //   - total: prod(dims) = prefix * axis_size * cell_size
+        let prefix: usize = if axis == 0 {
+            1
+        } else {
+            dims[..axis].iter().product()
+        };
+        let axis_len = dims[axis];
+        let cell_size: usize = if axis + 1 == dims.len() {
+            1
+        } else {
+            dims[axis + 1..].iter().product()
+        };
+        // Sort each "column" (one per prefix slot) independently. For each
+        // prefix slot p, gather the axis_len cells, sort by total_cmp, and
+        // write back.
+        let total: usize = dims.iter().product();
+        let mut data: Vec<AplRef<APLValue>> = Vec::with_capacity(total);
+        for i in 0..total {
+            data.push(Rc::new(right_val.value_at(i)));
         }
-        // Multi-axis: sort first-axis cells using total_cmp.
-        let first_axis = dims[0];
-        let cell_size: usize = dims[1..].iter().product();
-        let mut indices: Vec<usize> = (0..first_axis).collect();
-        indices.sort_by(|&a, &b| {
-            for i in 0..cell_size {
-                let va = right_val.value_at(a * cell_size + i);
-                let vb = right_val.value_at(b * cell_size + i);
-                let cmp = va.total_cmp(&vb).unwrap_or(std::cmp::Ordering::Equal);
-                if cmp != std::cmp::Ordering::Equal {
-                    return if reverse { cmp.reverse() } else { cmp };
+        for p in 0..prefix {
+            // The base offset for prefix p is p * (axis_len * cell_size).
+            // Within the prefix, axis position k starts at p*stride_a + k*cell_size.
+            let base = p * (axis_len * cell_size);
+            let mut indices: Vec<usize> = (0..axis_len).collect();
+            indices.sort_by(|&a, &b| {
+                for i in 0..cell_size {
+                    let va = &data[base + a * cell_size + i];
+                    let vb = &data[base + b * cell_size + i];
+                    let cmp = va.total_cmp(vb).unwrap_or(std::cmp::Ordering::Equal);
+                    if cmp != std::cmp::Ordering::Equal {
+                        return if reverse { cmp.reverse() } else { cmp };
+                    }
+                }
+                std::cmp::Ordering::Equal
+            });
+            // Reorder the data within this prefix slot in place.
+            // Use a temporary buffer to avoid overwriting unread values.
+            let mut tmp: Vec<AplRef<APLValue>> = Vec::with_capacity(axis_len * cell_size);
+            for &k in &indices {
+                for i in 0..cell_size {
+                    tmp.push(data[base + k * cell_size + i].clone());
                 }
             }
-            std::cmp::Ordering::Equal
-        });
-        let total: usize = first_axis * cell_size;
-        let mut sorted: Vec<AplRef<APLValue>> = Vec::with_capacity(total);
-        for &idx in &indices {
-            for i in 0..cell_size {
-                sorted.push(Rc::new(right_val.value_at(idx * cell_size + i)));
+            for k in 0..axis_len * cell_size {
+                data[base + k] = tmp[k].clone();
             }
         }
-        let arr = KapArray::new(dims.clone(), ArrayData::Nested(sorted));
+        let arr = KapArray::new(dims.clone(), ArrayData::Nested(data));
         Ok(Rc::new(APLValue::Array(Rc::new(arr))))
     }
 

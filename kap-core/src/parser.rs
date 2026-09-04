@@ -1085,7 +1085,7 @@ impl<'a> Parser<'a> {
                             //   `/` reduce   — reduce.kt:279 (reduce adverb path: adv_explicit_axis)
                             //   `\\` expand  — expand.kt:23 (ExpandFunctionImpl.eval2Arg)
                             //   `⌿` reduce-first — same path as `/` (adverb-level)
-                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖" | "↑" | "↓" | "labels" | "hasLabels" | "⊂" | "⊃" | "∊" | "/" | "\\" | "⌿")
+                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖" | "↑" | "↓" | "labels" | "hasLabels" | "⊂" | "⊃" | "∊" | "/" | "\\" | "⌿" | "∧" | "∨")
                     );
                     if axis_ok {
                         self.advance();
@@ -2820,7 +2820,7 @@ impl<'a> Parser<'a> {
                     let axis_ok = matches!(
                         &fn_expr,
                         Instr::Symbol { name, .. }
-                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖")
+                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖" | "∧" | "∨")
                     );
                     if axis_ok
                         && matches!(self.peek().map(|t| &t.token), Some(Token::OpenBracket))
