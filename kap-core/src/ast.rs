@@ -177,7 +177,12 @@ pub enum Instr {
     /// `member` is either a bare symbol name (`object.name`) or a parenthesised value
     /// expression (`object.(expr)`). Parsed as a postfix suffix on a primary, mirroring
     /// index access `object[sel]`.
-    MemberDeref { object: Box<Instr>, member: Box<Instr> },
+    /// `value_form` distinguishes the two: `false` for name-form (the member IS a
+    /// symbol literal used as a column label / map key), `true` for value-form
+    /// (`(expr)` is EVALUATED first and the result is used as the key/index).
+    /// Without this flag the evaluator cannot tell `a.col1` (name-form: lookup column
+    /// "col1") from `a.(col1)` (value-form: evaluate the variable `col1` first).
+    MemberDeref { object: Box<Instr>, member: Box<Instr>, value_form: bool },
     /// Short-circuit boolean operator: `and` / `or` (Kotlin `AndToken`/`OrToken` →
     /// `BooleanAndFunction`/`BooleanOrFunction`). These are *not* the bitwise `∧`/`∨`
     /// functions — they sit at the **lowest precedence** (below assignment) and evaluate

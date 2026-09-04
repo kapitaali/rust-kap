@@ -5482,6 +5482,7 @@ impl<'a> Parser<'a> {
                         base = Instr::MemberDeref {
                             object: Box::new(base),
                             member: Box::new(member),
+                            value_form: true,  // `.(expr)` — evaluate `expr` first
                         };
                     }
                     Some(t) => match &t.token {
@@ -5492,6 +5493,7 @@ impl<'a> Parser<'a> {
                             base = Instr::MemberDeref {
                                 object: Box::new(base),
                                 member: Box::new(Instr::Symbol { name: nm, namespace: ns }),
+                                value_form: false,  // `.name` — use the symbol as a literal
                             };
                         }
                         _ => return Err(self.err("expected a symbol or `(` after member dereference `.`")),
