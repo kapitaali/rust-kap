@@ -1716,6 +1716,24 @@ impl Engine {
                     }
                     return self.enclose_axis(right_v, axis_as_long);
                 }
+                // T1.1: `a /[axis] b` direct-verb select-elements-last-axis
+                // (Kotlin `SelectElementsLastAxisFunctionImpl.eval2Arg`,
+                // lookup.kt:340-371). For `⌿[axis]` we use the same helper —
+                // the implementation is identical except the default axis
+                // changes from last to first, but the explicit `[axis]`
+                // overrides the default.
+                "/" | "⌿" => {
+                    let left_v = match left_v {
+                        Some(l) => l,
+                        None => {
+                            return Err(AplError::runtime(format!(
+                                "{}: Function does not support axis specifier",
+                                fn_name
+                            )))
+                        }
+                    };
+                    return self.select_elements_axis(left_v, right_v, axis_as_long);
+                }
                 // T1.1: `∊[limit]` enlist-with-limit (Kotlin
                 // `MemberFunctionImpl.eval1Arg` axis arm, member.kt:95-103).
                 // Negative limits error; 0 returns input unchanged; positive N
@@ -8026,6 +8044,133 @@ impl Engine {
                 vec![slice_len],
                 ArrayData::Nested(slice),
             )))));
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            out_dims,
+            ArrayData::Nested(out_elems),
+        )))))
+    }
+
+    /// Kap's `a /[axis] b` (Kotlin `SelectElementsLastAxisFunctionImpl.eval2Arg`
+    /// axis arm, lookup.kt:340-371). Direct-verb form (not the adverb `+/`
+    /// reduce). `a` is a rank-1 array of replication counts whose length must
+    /// equal `b.dimensions[axis]`; each source element along `axis` is
+    /// replicated `a[i]` times in the output. The output's `axis`-th
+    /// dimension is the sum of `a`.
+    fn select_elements_axis(
+        &self,
+        left_val: AplRef<APLValue>,
+        right_val: AplRef<APLValue>,
+        axis: usize,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let b = right_val.force(self)?;
+        let arr = match b.as_ref() {
+            APLValue::Array(a) => a,
+            _ => {
+                return Err(AplError::runtime("b: argument must be an array".into()));
+            }
+        };
+        let dims = arr.dimensions.clone();
+        if axis >= dims.len() {
+            return Err(AplError::runtime(format!(
+                "/: Axis {} is not valid. Expected: {}",
+                axis,
+                dims.len()
+            )));
+        }
+        // Extract a as Vec<usize> of replication counts.
+        let av = left_val.force(self)?;
+        let a: Vec<usize> = match av.as_ref() {
+            APLValue::Array(aa) => {
+                if aa.dimensions.len() != 1 {
+                    return Err(AplError::runtime(
+                        "A must be a single-dimensional array of the same size as the dimension of B along the selected axis.".into(),
+                    ));
+                }
+                let mut v = Vec::with_capacity(aa.element_count());
+                for e in aa.elements() {
+                    match e.as_ref() {
+                        APLValue::Number(n) => {
+                            let n = n.as_long().map_err(|e| AplError::runtime(e))?;
+                            if n < 0 {
+                                return Err(AplError::runtime("Selection index is negative".into()));
+                            }
+                            v.push(n as usize);
+                        }
+                        _ => {
+                            return Err(AplError::runtime("A must be integers".into()));
+                        }
+                    }
+                }
+                v
+            }
+            APLValue::Number(n) => {
+                let n = n.as_long().map_err(|e| AplError::runtime(e))?;
+                if n < 0 {
+                    return Err(AplError::runtime("Selection index is negative".into()));
+                }
+                vec![n as usize; dims[axis]]
+            }
+            _ => {
+                return Err(AplError::runtime("A must be a 1-D array".into()));
+            }
+        };
+        if a.len() != dims[axis] {
+            return Err(AplError::runtime(format!(
+                "A must be a single-dimensional array of the same size as the dimension of B along the selected axis."
+            )));
+        }
+        // Build output: same dims, with axis-dim replaced by sum(a).
+        let size_along_axis: usize = a.iter().sum();
+        let mut out_dims = dims.clone();
+        out_dims[axis] = size_along_axis;
+        // Strides for source layout.
+        let mut src_strides = vec![1usize; dims.len()];
+        if dims.len() > 1 {
+            for k in (0..dims.len() - 1).rev() {
+                src_strides[k] = src_strides[k + 1] * dims[k + 1];
+            }
+        }
+        let src_step = src_strides[axis];
+        // Strides for output layout.
+        let mut out_strides = vec![1usize; out_dims.len()];
+        if out_dims.len() > 1 {
+            for k in (0..out_dims.len() - 1).rev() {
+                out_strides[k] = out_strides[k + 1] * out_dims[k + 1];
+            }
+        }
+        let out_step = out_strides[axis];
+        // Build aIndex: for each i in 0..a.len(), repeat a[i] times, value = i.
+        let mut a_index: Vec<usize> = Vec::with_capacity(size_along_axis);
+        for (i, &count) in a.iter().enumerate() {
+            for _ in 0..count {
+                a_index.push(i);
+            }
+        }
+        // Build output elements: for each output flat position, decompose
+        // coords and look up the source.
+        let total: usize = out_dims.iter().product();
+        let elems = arr.elements();
+        let mut out_elems: Vec<AplRef<APLValue>> = Vec::with_capacity(total);
+        for out_idx in 0..total {
+            // Decompose out_idx into out_dims coords.
+            let mut rem = out_idx;
+            let mut out_coords = vec![0usize; out_dims.len()];
+            for d in 0..out_dims.len() {
+                out_coords[d] = rem / out_strides[d];
+                rem %= out_strides[d];
+            }
+            // Map out_coords[axis] through a_index.
+            let b_index_pos = a_index[out_coords[axis]];
+            // Build source coords: same as out_coords except axis slot = b_index_pos.
+            let mut src_coords = out_coords.clone();
+            src_coords[axis] = b_index_pos;
+            let src_flat: usize = src_coords
+                .iter()
+                .zip(src_strides.iter())
+                .map(|(c, s)| c * s)
+                .sum();
+            out_elems.push(elems[src_flat].clone());
         }
         Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
             out_dims,

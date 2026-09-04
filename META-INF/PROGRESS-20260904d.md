@@ -139,3 +139,37 @@ Missing: `⊂` `∊` `⊃` `/` `\\` `⌿` (and likely more after first sweep).
 - T1.1 +[axis] monadic (ResizedArrayImpls)
 - T1.1 /[axis] direct-verb (SelectElements)
 - T1.1 `\\[axis]` (Kotlin ExpandFunction axis arm)
+
+### Session work (continued again)
+
+#### Commit plan
+- T1.1: `a /[axis] b` and `a ⌿[axis] b` direct-verb arms
+  (Kotlin `SelectElementsLastAxis/FirstAxis`, lookup.kt:340-371).
+  8 cases closed.
+
+#### Probe results (just verified)
+
+| expr | shape oracle | shape port | value-equivalent |
+|---|---|---|---|
+| `2 2 /[0] 2 3 ⍴ ⍳6` | `4 3` | `4 3` | ✓ (replicate-along-axis 0) |
+| `1 2 2 /[0] 3 4 5 6 7 ⍴ ⍳1000` | `5 4 5 6 7` | same | ✓ |
+| `0 2 1 1 /[1] 3 4 5 6 7 ⍴ ⍳1000` | `3 4 5 6 7` | same | ✓ |
+| `2 1 1 /[4] 7 6 5 4 3 ⍴ ⍳1000` | `7 6 5 4 4` | same | ✓ |
+| `9 9 /[2] 2 3 ⍴ ⍳6` | Error | Error | ✓ (same text) |
+| `2 1 1 2 ⌿[2] 2 3 4 ⍴ ⍳24` | `2 3 6` | `2 3 6` | ✓ |
+| `2 ⌿[2] 3 2 2 ⍴ ⍳24` | `3 2 4` | `3 2 4` | ✓ |
+
+#### Helper added
+
+`select_elements_axis(left, right, axis)` at evaluator.rs:8036+:
+- extracts `a` as Vec<usize> replication counts from left arg
+- validates `a.len() == b.dimensions[axis]`
+- builds output: same dims, axis-dim replaced by sum(a)
+- uses `a_index: Vec<usize>` (the "for each i, repeat a[i] times" lookup)
+- mirrors `SelectElementsValue.valueAt` (lookup.kt:241-290)
+
+#### Carryover
+
+- ⊃[axis] still open (DisclosedArrayValue + TransposedAPLValue is complex)
+- +[axis] monadic and B-is-rank-1 path: still need Kotlin ResizedArrayImpls work
+- s:col still open (T1.3 labels cluster)
