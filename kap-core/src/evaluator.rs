@@ -1704,6 +1704,30 @@ impl Engine {
                         .collect();
                     self.take_or_drop_opt(is_take, &counts_opt, right_v)
                 }
+                // T1.1: `⊂[axis]` enclose-along-axis. Monadic (the parser
+                // builds AxisApplied; left_v is unused). The left_v is unused
+                // here (Kotlin's EncloseAPLFunction is monadic); reject dyadic
+                // uses to match the oracle (`2 ⊂[0] 1 2 3` errors).
+                "⊂" => {
+                    if left_v.is_some() {
+                        return Err(AplError::runtime(
+                            "⊂: function does not accept a left argument".into(),
+                        ));
+                    }
+                    return self.enclose_axis(right_v, axis_as_long);
+                }
+                // T1.1: `∊[limit]` enlist-with-limit (Kotlin
+                // `MemberFunctionImpl.eval1Arg` axis arm, member.kt:95-103).
+                // Negative limits error; 0 returns input unchanged; positive N
+                // flattens N levels.
+                "∊" => {
+                    if left_v.is_some() {
+                        return Err(AplError::runtime(
+                            "∊: function does not accept a left argument".into(),
+                        ));
+                    }
+                    return self.enlist(right_v, Some(axis_as_long as i64));
+                }
                 _ => {
                     // Not a scalar-arithmetic fn: the wrapper is likely
                     // `(f[axis])/` — the axis belongs to the ADVERB inside.
@@ -3039,9 +3063,6 @@ impl Engine {
             "⍮" | "pair" => self.pair(left_val, right_val),
             "⌷" | "reveal" => self.access_from_index(left_val, right_val),
             // `≬` / `toList` (Kotlin `ToListFunction`, div_functions.kt): monadic-only.
-            // Coerces a scalar or 1-D array into a Kap list (a rank-0 box whose single
-            // element is the array). Fluent inverse `fromList` (Kotlin `FromListFunction`)
-            // recovers the array. Dyadic application is an error.
             "≬" | "toList" => match left_val {
                 None => self.to_list(right_val),
                 Some(_) => Err(AplError::runtime("≬: Function cannot be called with two arguments".into())),
@@ -3168,7 +3189,12 @@ impl Engine {
                 },
                 Some(l) => self.without(l, right_val),
             },
-            "∊" | "in" => self.membership(left_val, right_val),
+            "∊" | "in" => match left_val {
+                // T1.1: monadic enlist (Kotlin `MemberFunctionImpl.eval1Arg`,
+                // member.kt:91). Without an explicit axis, no level limit.
+                None => self.enlist(right_val, None),
+                Some(l) => self.membership(Some(l), right_val),
+            },
             // `∪` unique/union (Kotlin unique.kt): monadic → unique; dyadic → union.
             "∪" | "unique" => match left_val {
                 None => self.unique(right_val),
@@ -7910,7 +7936,185 @@ impl Engine {
         }
     }
 
-    /// Kap's `≬` / `toList` (Kotlin `ToListFunction`, div_functions.kt).
+    /// Kap's `⊂[axis] x` (Kotlin `EncloseAPLFunctionImpl.eval1Arg` axis arm,
+    /// `disclose.kt:132-178`): enclose-along-axis. For a single-integer axis
+    /// `k`, produces a (rank-1)-D array whose elements are the `dims[k]`-long
+    /// slices of `x` along axis `k` (each slice is itself a rank-1 vector
+    /// wrapped in a box).
+    fn enclose_axis(
+        &self,
+        right_val: AplRef<APLValue>,
+        axis: usize,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let v = right_val.force(self)?;
+        let arr = match v.as_ref() {
+            APLValue::Array(a) => a,
+            APLValue::Number(_) | APLValue::Char(_) | APLValue::Null => {
+                // Scalar input: enclose returns the scalar itself.
+                return Ok(v.clone());
+            }
+            _ => {
+                return Err(AplError::runtime(format!(
+                    "⊂[axis]: argument must be an array, got {:?}",
+                    v
+                )));
+            }
+        };
+        let dims = arr.dimensions.clone();
+        if axis >= dims.len() {
+            return Err(AplError::runtime(format!(
+                "⊂: Axis {} is not valid. Expected: {}",
+                axis,
+                dims.len()
+            )));
+        }
+        // Build output: remove `axis` from dimensions; each output cell is a
+        // `dims[axis]`-long slice along that axis. Mirrors `AxisEnclosedValue`
+        /// (disclose.kt:9-46).
+        let out_dims: Vec<usize> = dims
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != axis)
+            .map(|(_, d)| *d)
+            .collect();
+        let elems = arr.elements();
+        let slice_len = dims[axis];
+        // Compute the stride of axis in the source layout.
+        let mut strides = vec![1usize; dims.len()];
+        if dims.len() > 1 {
+            for k in (0..dims.len() - 1).rev() {
+                strides[k] = strides[k + 1] * dims[k + 1];
+            }
+        }
+        let step_length = strides[axis];
+        // For each output flat position, decompose into coords on out_dims
+        // and remap to coords on the source dims (shifting indices ≥ axis).
+        let out_total: usize = if out_dims.is_empty() {
+            1
+        } else {
+            out_dims.iter().product()
+        };
+        let mut out_elems: Vec<AplRef<APLValue>> = Vec::with_capacity(out_total);
+        for out_idx in 0..out_total {
+            // Decompose out_idx into coords on out_dims.
+            let mut src_pos = vec![0usize; dims.len()];
+            let mut rem = out_idx;
+            for (d, dim) in out_dims.iter().enumerate() {
+                let coord = rem % dim;
+                rem /= dim;
+                if d < axis {
+                    src_pos[d] = coord;
+                } else {
+                    src_pos[d + 1] = coord;
+                }
+            }
+            let base_flat = Self::flat_index(&src_pos, &dims);
+            let mut slice: Vec<AplRef<APLValue>> = Vec::with_capacity(slice_len);
+            for k in 0..slice_len {
+                slice.push(elems[base_flat + k * step_length].clone());
+            }
+            if out_dims.is_empty() {
+                // 1-D input: return the enclosed slice as a rank-0 array of one box.
+                return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![],
+                    ArrayData::Nested(vec![Rc::new(APLValue::Array(Rc::new(
+                        KapArray::new(vec![slice_len], ArrayData::Nested(slice)),
+                    )))]),
+                )))));
+            }
+            out_elems.push(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![slice_len],
+                ArrayData::Nested(slice),
+            )))));
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            out_dims,
+            ArrayData::Nested(out_elems),
+        )))))
+    }
+
+    /// Kap's `∊ x` (Kotlin `MemberFunctionImpl.eval1Arg`, member.kt:91-115).
+    /// Monadic enlist: flattens one level by default. With `limit=N`, recurses
+    /// N levels, stopping at level N (everything at level > N is added as a
+    /// single element). `limit=0` returns the input unchanged.
+    fn enlist(
+        &self,
+        right_val: AplRef<APLValue>,
+        limit: Option<i64>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let v = right_val.force(self)?;
+        // Atomic scalar: `∊ 5` → `5` (Kotlin `a.specialisedType.isAtom` arm).
+        // But rank>1 atomic isn't really possible for a scalar; only Array can
+        // be rank>1. So this is just scalars.
+        match v.as_ref() {
+            APLValue::Number(_) | APLValue::Char(_) | APLValue::Null | APLValue::List(_) => {
+                return Ok(v.clone());
+            }
+            _ => {}
+        }
+        let arr = match v.as_ref() {
+            APLValue::Array(a) => a,
+            APLValue::Str(_) => return Ok(v.clone()),
+            _ => {
+                return Err(AplError::runtime(
+                    "∊: argument must be an array".into(),
+                ));
+            }
+        };
+        // `limit < 0` is an error (Kotlin "Negative enlist limit: N").
+        if let Some(l) = limit {
+            if l < 0 {
+                return Err(AplError::runtime(format!(
+                    "∊: Negative enlist limit: {}",
+                    l
+                )));
+            }
+            if l == 0 {
+                return Ok(v.clone());
+            }
+        }
+        let mut out: Vec<AplRef<APLValue>> = Vec::new();
+        Self::enlist_recurse(&mut out, v.as_ref(), 0, limit);
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![out.len()],
+            ArrayData::Nested(out),
+        )))))
+    }
+
+    /// Recursive helper for `enlist`. Mirrors Kotlin's `enlistInner`
+    /// (member.kt:107-117). At each level:
+    /// - If the value is atomic (scalar or `Str` or `List`): append it.
+    /// - If `limit` is set and we are at depth > limit: append the value as-is
+    ///   (treats the whole subarray as one element).
+    /// - Otherwise recurse into each member.
+    fn enlist_recurse(
+        out: &mut Vec<AplRef<APLValue>>,
+        value: &APLValue,
+        level: i64,
+        limit: Option<i64>,
+    ) {
+        // Stop at the limit.
+        if let Some(l) = limit {
+            if level > l {
+                out.push(Rc::new(value.clone()));
+                return;
+            }
+        }
+        match value {
+            APLValue::Number(_) | APLValue::Char(_) | APLValue::Null | APLValue::Str(_)
+            | APLValue::List(_) | APLValue::Map(_) | APLValue::Symbol { .. }
+            | APLValue::Deferred { .. } | APLValue::UserFn { .. } | APLValue::UserOp { .. } => {
+                out.push(Rc::new(value.clone()));
+            }
+            APLValue::Array(arr) => {
+                for e in arr.elements() {
+                    Self::enlist_recurse(out, e.as_ref(), level + 1, limit);
+                }
+            }
+        }
+    }
+
+
     ///
     /// Monadic only: a scalar or 1-D array is boxed into a rank-0 array whose single
     /// element is the array coerced to a Kap *list* (the `⟨⟩` type). Real Kap returns an

@@ -103,3 +103,39 @@ Missing: `⊂` `∊` `⊃` `/` `\\` `⌿` (and likely more after first sweep).
 ---
 
 ## Session work
+
+## Session work (continued)
+
+### Commits
+
+- `0c09c80` — parser allowlist extension (12→18 verbs)
+- uncommitted — ⊂[axis] arm + enclose_axis helper (mirrors AxisEnclosedValue)
+- uncommitted — ∊[N] arm + enlist helper + monadic enlist fix (mirrors MemberFunction)
+- DEFERRED: ⊃[axis] (needs full-disclose + transpose; complex)
+- DEFERRED: `+[axis]` monadic (Kotlin's ResizedArrayImpls path is subtle)
+- DEFERRED: `/[axis]` direct-verb (Kotlin SelectElementsLastAxis/FirstAxis; different from adverb)
+
+### Probe results (this session, after changes)
+
+| expr | oracle | port |
+|---|---|---|
+| `⊂[0] 2 3 2 ⍴ ⍳12` | 2-d array of enclosed pairs | `((0 6) (2 8) (4 10) (1 7) (3 9) (5 11))` ✓ |
+| `⊂[1] 2 3 2 ⍴ ⍳12` | 2-d array of enclosed triples | `((0 2 4) (6 8 10) (1 3 5) (7 9 11))` ✓ |
+| `⊂[0] 1 2 3 4` | 1-d of enclosed 4-vec | `((1 2 3 4))` ✓ |
+| `⊂[1] 1 2 3 4` | error "Axis 1 is not valid. Expected: 1" | same ✓ |
+| `∊ 1 2 3` | `(1 2 3)` | `(1 2 3)` ✓ |
+| `∊ (1 2)(3 4)` | `(1 2 3 4)` | `(1 2 3 4)` ✓ |
+| `∊[0] ...` | input unchanged | same ✓ |
+| `∊[1] ...` | one-level | same ✓ |
+| `∊[2] ...` | two-level | same ✓ |
+| `∊[3] ...` | three-level (full flat) | same ✓ |
+| `∊[¯1] ...` | error "Negative enlist limit: -1" | same ✓ |
+
+(Display-only diffs `()` vs `⟨⟩` accepted per ROADMAP §11.)
+
+### Carries forward
+
+- T1.1 ⊃[axis] (full-disclose + transpose)
+- T1.1 +[axis] monadic (ResizedArrayImpls)
+- T1.1 /[axis] direct-verb (SelectElements)
+- T1.1 `\\[axis]` (Kotlin ExpandFunction axis arm)
