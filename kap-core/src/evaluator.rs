@@ -1268,20 +1268,20 @@ impl Engine {
                 ))
             });
         }
-        // 4. APLList (lookup.kt:46) — `listElement(int, pos)`. Our `APLValue::List` is
-        // backed by a `KapArray`; listElement maps 0-based positive/negative indices
-        // to flat positions in the same way as a rank-1 array bracket-index.
+        // 4. APLList (lookup.kt:46) — `listElement(int, pos)`. Unlike array
+        // bracket-indexing, listElement does NOT support negative wraparound
+        // (`listElement(-1, list)` throws "Attempt to access element -1 from
+        // list"). Only non-negative indices in [0, size) are valid.
         if let APLValue::List(arr) = obj.as_ref() {
             let i = self.index_to_i64(key_value.as_ref())?;
             let size = arr.element_count() as i64;
-            if i == size {
-                // Kotlin `listElement` lets the index equal the size (returns the empty
-                // element past the end); collapse to a runtime error to match the
-                // observable behaviour `listElement` produces when callers expect an
-                // element. Conservative match to the conformance test surface.
+            if i < 0 || i >= size {
+                return Err(AplError::runtime(format!(
+                    "Attempt to access element {} from list. Size: {}",
+                    i, size
+                )));
             }
-            let pos = check_and_adjust_selected_index(i, arr.element_count())?;
-            return arr.elements().into_iter().nth(pos).ok_or_else(|| {
+            return arr.elements().into_iter().nth(i as usize).ok_or_else(|| {
                 AplError::runtime(format!("index {} is outside valid range (list size {})", i, size))
             });
         }
@@ -1315,18 +1315,21 @@ impl Engine {
         // Numeric index dispatch.
         match key_value.as_ref() {
             // Scalar member → single-axis pick on the LAST axis.
+            // Only valid when `rank == 1`; on rank>1 arrays, scalar members
+            // produce a rank mismatch (per `indexFromPosition`, which requires
+            // `p.size == dimensions.size`). So `(3 3 ⍴ ⍳9).(0)` is an error,
+            // but `(1 2 3).(0)` is fine.
             APLValue::Number(_) | APLValue::Char(_) | APLValue::Null => {
                 let i = self.index_to_i64(key_value.as_ref())?;
+                if rank != 1 {
+                    return Err(AplError::runtime("Dimensions does not match".to_string()));
+                }
                 let pos = check_and_adjust_selected_index(i, dims[rank - 1])?;
-                // Build a multi-axis position: all-but-last zeros, last = pos.
-                let mut pos_vec = vec![0usize; rank];
-                pos_vec[rank - 1] = pos;
-                let flat = Self::flat_index(&pos_vec, &dims);
-                Ok(arr
+                return arr
                     .elements()
                     .into_iter()
-                    .nth(flat)
-                    .unwrap_or_else(|| Rc::new(APLValue::Null)))
+                    .nth(pos)
+                    .ok_or_else(|| AplError::runtime(format!("index {} out of range", pos)));
             }
             // Array member.
             APLValue::Array(idx_arr) => {
