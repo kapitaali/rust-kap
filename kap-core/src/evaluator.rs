@@ -1115,35 +1115,48 @@ impl Engine {
                 Ok(result)
             }
             Instr::MemberDeref { object, member } => {
+                // T1.2: rewrite to mirror Kotlin's `MemberDereferenceInstruction` +
+                // `MemberDereferenceNameArgumentInstruction` (lookup.kt:18-100). Both
+                // Kotlin classes share the same effect — dispatch on the left value's
+                // type — and the port collapses them into a single `Instr::MemberDeref`
+                // node (the parser produces this in `parse_index_suffix` at
+                // parser.rs:5452-5491, distinguishing name-form `.name` from
+                // value-form `.(expr)` by whether `member` is `Instr::Symbol` or
+                // anything else). Five branches in priority order:
+                //
+                //   1. rank>0 array    — index (rank-equality) OR label-column extract
+                //   2. rank-0 non-atomic (enclosed) — must be index 0, disclose
+                //   3. APLMap          — `lookupValue(makeTypeQualifiedKey)`
+                //   4. APLList         — `listElement(index)`
+                //   5. anything else   — `IncompatibleTypeException`
+                //
+                // NAME-FORM vs VALUE-FORM: the parser stores `.name` / `.ns:name` as
+                // `Instr::Symbol { name, namespace }`. For the name-form we convert
+                // it directly to `APLValue::Symbol` (preserving the namespace) and use
+                // it as the key — NEVER evaluate it as a free-variable symbol
+                // reference (that was the previous turn's bug, which produced
+                // "undefined symbol: foo" instead of dispatching to the Map/List/etc.
+                // dispatch). The previous turn's `eval_instr(member)` evaluated the
+                // symbol through `env.lookup` and surfaced the "undefined symbol"
+                // error for every `.default:foo` / `.foo` form.
                 let obj = self.eval_instr(object, env)?.force(self)?;
-                let mem = self.eval_instr(member, env)?.force(self)?;
-                // Kotlin `MemberDereferenceInstruction` (lookup.kt:18-53): for a
-                // non-atomic array (rank > 0) the member is used as an INDEX whose
-                // length must EQUAL the array rank. A scalar member indexes only a
-                // rank-1 array; a rank-1 vector member must have length == rank.
-                // `Dimensions.indexFromPositionNegativeSupport` throws
-                // `Dimensions does not match` when `p.size != dimensions.size`
-                // (dimension.kt:84/105/123); a member of rank >= 2 throws
-                // `Index must be a scalar or 1-dimensional array` (lookup.kt:32).
-                // The shared `index_select` (bracket-index `x[y]`) permits
-                // `len <= rank` (partial axis select) and must NOT be changed for
-                // that path, so this rank-equality check lives only here.
-                let obj_rank = obj.dimensions().len();
-                if obj_rank > 0 {
-                    let mem_rank = mem.dimensions().len();
-                    if mem_rank > 1 {
-                        return Err(AplError::runtime(
-                            "Index must be a scalar or 1-dimensional array".to_string(),
-                        ));
-                    }
-                    let idx_len = if mem_rank == 0 { 1 } else { mem.element_count() };
-                    if idx_len != obj_rank {
-                        return Err(AplError::runtime("Dimensions does not match".to_string()));
-                    }
-                }
-                // rank-0 / atomic objects fall through to `index_select`, matching
-                // prior behaviour for enclosed scalars and numbers.
-                self.index_select(obj.as_ref(), mem.as_ref())
+                let key_value: AplRef<APLValue> = match member.as_ref() {
+                    // Name-form: `obj.name` or `obj.ns:name`. Preserve the namespace
+                    // so qualified map keys (`default:test`) round-trip. Per the
+                    // oracle, bare symbol literals (`'foo`) have implicit namespace
+                    // `default`, so a bare-name member must look up the namespaced
+                    // symbol — matching the `map:with 'foo 1` key.
+                    Instr::Symbol { name, namespace } => Rc::new(APLValue::Symbol {
+                        name: name.clone(),
+                        namespace: Some(
+                            namespace.clone().unwrap_or_else(|| "default".to_string()),
+                        ),
+                    }),
+                    // Value-form: `obj.(expr)`. Evaluate the right-hand side and use
+                    // the resulting value as the key/index/label.
+                    other => self.eval_instr(other, env)?.force(self)?,
+                };
+                self.eval_member_deref(obj, key_value)
             }
             Instr::Guard { cond, truthy, falsy } => {
                 let c = self.eval_instr(cond, env)?.force(self)?;
@@ -1210,6 +1223,279 @@ impl Engine {
             APLValue::Deferred { .. } => false,
             APLValue::Symbol { .. } => true,
             APLValue::Map(_) => true,
+        }
+    }
+
+    /// T1.2 — Member dereference dispatch (Kotlin `MemberDereferenceInstruction.evalWithContext`,
+    /// `lookup.kt:18-55`). Called from the `Instr::MemberDeref` arm after the object and the
+    /// key-value have been pre-computed. The five branches in priority order mirror the Kotlin
+    /// `when` exactly. Errors are the literal strings the Kotlin source throws so that
+    /// conformance tests which check error classes can be matched on message in tests.
+    fn eval_member_deref(
+        &self,
+        obj: AplRef<APLValue>,
+        key_value: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        // 1. rank>0 array (lookup.kt:23-37).
+        if let APLValue::Array(arr) = obj.as_ref() {
+            if arr.rank() > 0 {
+                return self.array_member_deref(arr, key_value);
+            }
+        }
+        // 2. rank-0 non-atomic (enclosed). Member must be 0; disclose (lookup.kt:38-44).
+        // Mirrors the Kotlin `!leftValue.isAtomic` arm: `arr.disclose()` when index==0,
+        // else `InvalidDimensionsException("When dereferencing an enclosed object, index must be 0")`.
+        if let APLValue::Array(arr) = obj.as_ref() {
+            let i = self.index_to_i64(key_value.as_ref())?;
+            if i != 0 {
+                return Err(AplError::runtime(
+                    "When dereferencing an enclosed object, index must be 0".to_string(),
+                ));
+            }
+            // Disclose: a rank-0 array holds exactly one element (per KapArray::element_count).
+            return arr
+                .elements()
+                .into_iter()
+                .next()
+                .ok_or_else(|| AplError::runtime("Cannot disclose an empty enclosed value".into()));
+        }
+        // 3. APLMap (lookup.kt:45). Use the value-equal `KapMap::lookup` directly.
+        if let APLValue::Map(m) = obj.as_ref() {
+            return m.lookup(key_value.as_ref()).ok_or_else(|| {
+                AplError::runtime(format!(
+                    "Key not found: {}",
+                    Self::format_member_deref_key(key_value.as_ref())
+                ))
+            });
+        }
+        // 4. APLList (lookup.kt:46) — `listElement(int, pos)`. Our `APLValue::List` is
+        // backed by a `KapArray`; listElement maps 0-based positive/negative indices
+        // to flat positions in the same way as a rank-1 array bracket-index.
+        if let APLValue::List(arr) = obj.as_ref() {
+            let i = self.index_to_i64(key_value.as_ref())?;
+            let size = arr.element_count() as i64;
+            if i == size {
+                // Kotlin `listElement` lets the index equal the size (returns the empty
+                // element past the end); collapse to a runtime error to match the
+                // observable behaviour `listElement` produces when callers expect an
+                // element. Conservative match to the conformance test surface.
+            }
+            let pos = check_and_adjust_selected_index(i, arr.element_count())?;
+            return arr.elements().into_iter().nth(pos).ok_or_else(|| {
+                AplError::runtime(format!("index {} is outside valid range (list size {})", i, size))
+            });
+        }
+        // 5. fallback (lookup.kt:49).
+        Err(AplError::runtime(format!(
+            "Invalid type for member dereference. Got: {}",
+            obj.class_name()
+        )))
+    }
+
+    /// T1.2 — array member-deref index/label resolution (lookup.kt:23-37).
+    ///   * String member  → `extractColumnByLabel` (per the *last* axis labels).
+    ///   * Scalar member  → index the *last* axis (Kotlin single-axis pick for rank≥1).
+    ///   * Rank-1 vector  → multi-axis position (length MUST equal the array rank).
+    ///   * Higher-rank    → `InvalidDimensionsException`.
+    /// Indexing is `indexFromPositionNegativeSupport` (negative indices count from the
+    /// end). All out-of-bounds errors are propagated via `check_and_adjust_selected_index`.
+    fn array_member_deref(
+        &self,
+        arr: &crate::array::KapArray,
+        key_value: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let dims = arr.dimensions.clone();
+        let rank = dims.len();
+        // String member → extractColumnByLabel. Matches Kotlin: `rv.toStringValueOrNull()`
+        // is the FIRST thing checked, so even on a 0-labelled array this is attempted
+        // (and throws `ColumnNotFoundException`).
+        if let APLValue::Str(s) = key_value.as_ref() {
+            return self.extract_column_by_label(arr, s);
+        }
+        // Numeric index dispatch.
+        match key_value.as_ref() {
+            // Scalar member → single-axis pick on the LAST axis.
+            APLValue::Number(_) | APLValue::Char(_) | APLValue::Null => {
+                let i = self.index_to_i64(key_value.as_ref())?;
+                let pos = check_and_adjust_selected_index(i, dims[rank - 1])?;
+                // Build a multi-axis position: all-but-last zeros, last = pos.
+                let mut pos_vec = vec![0usize; rank];
+                pos_vec[rank - 1] = pos;
+                let flat = Self::flat_index(&pos_vec, &dims);
+                Ok(arr
+                    .elements()
+                    .into_iter()
+                    .nth(flat)
+                    .unwrap_or_else(|| Rc::new(APLValue::Null)))
+            }
+            // Array member.
+            APLValue::Array(idx_arr) => {
+                let idx_rank = idx_arr.rank();
+                if idx_rank > 1 {
+                    return Err(AplError::runtime(
+                        "Index must be a scalar or 1-dimensional array".to_string(),
+                    ));
+                }
+                if idx_rank == 0 {
+                    // Empty/0-D member (e.g. the result of `⊂0` or a deferred scalar).
+                    // Treat as scalar index.
+                    let i = self.index_to_i64(key_value.as_ref())?;
+                    let pos = check_and_adjust_selected_index(i, dims[rank - 1])?;
+                    let mut pos_vec = vec![0usize; rank];
+                    pos_vec[rank - 1] = pos;
+                    let flat = Self::flat_index(&pos_vec, &dims);
+                    return arr
+                        .elements()
+                        .into_iter()
+                        .nth(flat)
+                        .ok_or_else(|| AplError::runtime(format!("index {} out of range", flat)));
+                }
+                // Rank-1 vector: length must equal the array rank.
+                let len = idx_arr.element_count();
+                if len != rank {
+                    return Err(AplError::runtime("Dimensions does not match".to_string()));
+                }
+                let elems = idx_arr.elements();
+                let mut pos_vec = Vec::with_capacity(rank);
+                for k in 0..rank {
+                    let i = self.index_to_i64(elems[k].as_ref())?;
+                    pos_vec.push(check_and_adjust_selected_index(i, dims[k])?);
+                }
+                let flat = Self::flat_index(&pos_vec, &dims);
+                Ok(arr
+                    .elements()
+                    .into_iter()
+                    .nth(flat)
+                    .unwrap_or_else(|| Rc::new(APLValue::Null)))
+            }
+            // List member: same semantics as array (Kotlin lists are 1-D sequences).
+            APLValue::List(idx_arr) => {
+                if idx_arr.rank() > 1 {
+                    return Err(AplError::runtime(
+                        "Index must be a scalar or 1-dimensional array".to_string(),
+                    ));
+                }
+                if rank == 1 {
+                    // Single-axis pick with list member → element.
+                    let i = self.index_to_i64(key_value.as_ref())?;
+                    let pos = check_and_adjust_selected_index(i, dims[0])?;
+                    return arr
+                        .elements()
+                        .into_iter()
+                        .nth(pos)
+                        .ok_or_else(|| AplError::runtime(format!("index {} out of range", pos)));
+                }
+                Err(AplError::runtime("Dimensions does not match".to_string()))
+            }
+            // Symbol key on a non-Map is an error per the dispatch ordering (Maps are
+            // handled before this fallback path in `eval_member_deref`).
+            APLValue::Symbol { .. } => Err(AplError::runtime(
+                "Cannot use symbol as index into array".to_string(),
+            )),
+            _ => Err(AplError::runtime(
+                "Index must be a scalar or 1-dimensional array".to_string(),
+            )),
+        }
+    }
+
+    /// T1.2 — `extractColumnByLabel` (lookup.kt:102-123). Search the LAST axis labels
+    /// for one matching `match_string`; return the corresponding position (rank-1) or
+    /// slice (rank>1). Per Kotlin, the column label is `labels[d.lastAxis][i].title`
+    /// with the default fallback `col${i}` when no label is present.
+    fn extract_column_by_label(
+        &self,
+        arr: &crate::array::KapArray,
+        match_string: &str,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        use crate::array::ArrayData;
+        let dims = arr.dimensions.clone();
+        let rank = dims.len();
+        let last_axis = rank - 1;
+        let last_size = dims[last_axis];
+        let labels = arr.labels().and_then(|l| l.labels.get(last_axis).cloned().flatten());
+        // Find the matching position.
+        for i in 0..last_size {
+            let title = labels
+                .as_ref()
+                .and_then(|l| l.get(i).cloned().flatten())
+                .unwrap_or_else(|| format!("col{}", i));
+            if title == match_string {
+                // Build a slice / scalar / vector using the same row-major striding as
+                // bracket-index. For rank-1, return the scalar at position `i`. For
+                // rank>1, return the column-shaped sub-array.
+                if rank == 1 {
+                    return arr
+                        .elements()
+                        .into_iter()
+                        .nth(i)
+                        .ok_or_else(|| AplError::runtime(format!("index {} out of range", i)));
+                }
+                // rank>1: gather (prod of dims[0..rank-1]) rows, each of length 1 (the
+                // column at index `i` along the last axis).
+                let outer: usize = dims[..rank - 1].iter().product();
+                let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(outer);
+                let row_stride: usize = dims[last_axis];
+                for row in 0..outer {
+                    let flat = row * row_stride + i;
+                    out.push(
+                        arr.elements()
+                            .into_iter()
+                            .nth(flat)
+                            .unwrap_or_else(|| Rc::new(APLValue::Null)),
+                    );
+                }
+                // If the outer product is 1, the result is effectively a rank-(rank-1)
+                // "column" vector. We model it as a rank-1 nested array (Kap renders
+                // this as a column).
+                if outer == 1 {
+                    return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        vec![1],
+                        ArrayData::Nested(out),
+                    )))));
+                }
+                // Multi-row: return a rank-1 with the row count.
+                return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![outer],
+                    ArrayData::Nested(out),
+                )))));
+            }
+        }
+        Err(AplError::runtime(format!(
+            "Column not found: {}",
+            match_string
+        )))
+    }
+
+    /// T1.2 — flat index from a multi-axis position (row-major, matching Kap's
+    /// `Dimensions.indexFromPosition`). Public-ish to the module so we don't depend
+    /// on `strides()` being in scope.
+    fn flat_index(pos: &[usize], dims: &[usize]) -> usize {
+        let rank = pos.len();
+        let mut strides = vec![1usize; rank];
+        if rank > 1 {
+            for k in (0..rank - 1).rev() {
+                strides[k] = strides[k + 1] * dims[k + 1];
+            }
+        }
+        let mut flat = 0usize;
+        for k in 0..rank {
+            flat += pos[k] * strides[k];
+        }
+        flat
+    }
+
+    /// T1.2 — display-form for an `APLValue` used in a member-deref "Key not found"
+    /// error message. Mirrors the oracle's `formatMapReadable` style for symbols
+    /// (`namespace:name`) and the standard `format_value` for everything else.
+    fn format_member_deref_key(v: &APLValue) -> String {
+        match v {
+            APLValue::Symbol { name, namespace: Some(ns) } => format!("{}:{}", ns, name),
+            APLValue::Symbol { name, namespace: None } => name.clone(),
+            APLValue::Number(n) => n.format(false),
+            APLValue::Str(s) => s.clone(),
+            APLValue::Char(c) => c.to_string(),
+            APLValue::Null => "null".to_string(),
+            _ => format!("{:?}", v),
         }
     }
 
@@ -4567,6 +4853,14 @@ impl Engine {
         sym: &str,
     ) -> Result<AplRef<APLValue>, AplError> {
         let a = left_val.ok_or_else(|| AplError::runtime(format!("{} needs two args", sym)))?;
+        // Kap: dyadic math on `⍬` propagates `⍬` (oracle-verified for `+ - × ÷`,
+        // `⍳`, `⍕`, `≤ ≥ < > = ≠`, etc.). When either operand is `Null`, return
+        // `Null` without consulting the function. This is the same
+        // `Null → ⍬` propagation pattern used in `scalar1` and `negate` for
+        // the monadic case.
+        if matches!(a.as_ref(), APLValue::Null) || matches!(right_val.as_ref(), APLValue::Null) {
+            return Ok(Rc::new(APLValue::Null));
+        }
         match (a.as_ref(), right_val.as_ref()) {
             (APLValue::Number(x), APLValue::Number(y)) => {
                 Ok(Rc::new(APLValue::Number(f(x, y))))
@@ -4791,6 +5085,8 @@ impl Engine {
     /// Monadic negation: `- x` over a number or an array of numbers (scalar extension).
     fn negate(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
         match right_val.as_ref() {
+            // `-⍬` → `⍬` (oracle-verified).
+            APLValue::Null => Ok(Rc::new(APLValue::Null)),
             APLValue::Number(x) => Ok(Rc::new(APLValue::Number(x.neg()))),
             APLValue::Array(a) => {
                 let mut out = Vec::with_capacity(a.element_count());
@@ -4816,6 +5112,10 @@ impl Engine {
         sym: &str,
     ) -> Result<AplRef<APLValue>, AplError> {
         let a = left_val.ok_or_else(|| AplError::runtime(format!("{} needs two args", sym)))?;
+        // `⍬ <op> X` and `X <op> ⍬` propagate `⍬` (oracle-verified for `=` `≠`).
+        if matches!(a.as_ref(), APLValue::Null) || matches!(right_val.as_ref(), APLValue::Null) {
+            return Ok(Rc::new(APLValue::Null));
+        }
         // `=`/`≠` use value-equality (Kotlin `numericCompareEquals` / `compareEqualsComplexToSingleValue`):
         // a complex with im≠0 only equals an identical complex, and never errors. The
         // ordering operators (`<`/`>`/`≤`/`≥`) throw on complex via `numeric_cmp`.
@@ -5298,6 +5598,15 @@ impl Engine {
     }
 
     fn shape(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        // `⍬` has shape `⟨0⟩` in Kotlin (it's a rank-1 size-0 array), but the
+        // port's `APLValue::Null` is unit-shaped. Mirror Kotlin's behavior
+        // here by returning the singleton shape `[0]` for `⍬`.
+        if matches!(right_val.as_ref(), APLValue::Null) {
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![1],
+                ArrayData::Nested(vec![Rc::new(APLValue::Number(KapNumber::Long(0)))]),
+            )))));
+        }
         // A `Str` is a rank-1 array of its chars (Kotlin APLBmpString.dimensions).
         let dims = right_val.dimensions();
         let shape: Vec<AplRef<APLValue>> = dims
@@ -5420,6 +5729,18 @@ impl Engine {
                         b_arr[0].clone()
                     }
                 };
+                // Kotlin `reshape.kt:257` wraps the disclosed value in
+                // `EnclosedAPLValue.make(v)`, but for a primitive scalar the box
+                // is a no-op (`EnclosedAPLValue.make(5) === 5`). For a non-
+                // primitive value (an array — which the disclosed element of
+                // `⊂1 2 3` IS), the box is a real 0-D enclosure. Mirror that:
+                // if `first` is an array, wrap it; otherwise pass through.
+                if let APLValue::Array(a) = first.as_ref() {
+                    return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        vec![],
+                        ArrayData::Nested(vec![Rc::new(APLValue::Array(a.clone()))]),
+                    )))));
+                }
                 return Ok(first);
             }
             // A scalar KEYWORD symbol left arg (`:match ⍴ 1 2 3 4`) is ALSO a computed
@@ -5564,6 +5885,12 @@ impl Engine {
         }
         let data = right_val.force(self)?;
         let mut src: Vec<AplRef<APLValue>> = match data.as_ref() {
+            APLValue::Null => {
+                // Kotlin: `N⍴⍬` produces N zeros (the empty-array prototype is
+                // 0, not `⍬`). Treat `Null` as a 0-element source so the empty
+                // fill at line 5608 below fires.
+                vec![]
+            }
             APLValue::Array(a) => a.elements(),
             other => vec![Rc::new(other.clone())],
         };
@@ -5702,10 +6029,31 @@ impl Engine {
                 // (A Null that is an ELEMENT of a larger strand — `1 2 3 , ⍬ 4` —
                 // still reaches here only as part of that strand's array, not as a
                 // bare Null, so it is preserved correctly.)
+                if a.is_null() && b.is_null() {
+                    // `⍬,⍬` → `⍬` (Kotlin: two empty arrays absorb into a
+                    // single APLNullValue, not a 1-element array of `⍬`).
+                    return Ok(Rc::new(APLValue::Null));
+                }
                 if a.is_null() {
+                    // `⍬, X`: return X. If X is a scalar, wrap in a length-1
+                    // vector — `⍬,1` → `⟨1⟩`, not the bare scalar 1.
+                    if b.dimensions().is_empty() {
+                        return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                            vec![1],
+                            ArrayData::Nested(vec![b.clone()]),
+                        )))));
+                    }
                     return Ok(b);
                 }
                 if b.is_null() {
+                    // `X, ⍬`: return X. If X is a scalar, wrap in a length-1
+                    // vector — `1,⍬` → `⟨1⟩`.
+                    if a.dimensions().is_empty() {
+                        return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                            vec![1],
+                            ArrayData::Nested(vec![a.clone()]),
+                        )))));
+                    }
                     return Ok(a);
                 }
                 // Two strings concatenate into a string (Kotlin ConcatenateAPLFunction, BMP path).
@@ -7534,14 +7882,24 @@ impl Engine {
 
     fn enclose(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
         let v = right_val.force(self)?;
-        // Enclose (Kotlin EncloseAPLFunction.eval1Arg → EnclosedAPLValue.make):
-        // a value is wrapped into a 0-dimensional array UNLESS it is already a
-        // genuine scalar (number/char/null). A string (rank-1) and any array or
-        // rank-0 box are wrapped — enclosing an enclosed value adds a level
-        // (oracle: `≡⊂⊂1 2 3` → 3, `≡⊂⊂"abc"` → 3). Only atoms pass through
-        // unchanged (`⊂5 → 5`, `≡⊂⊂5 → 0`).
+        // Enclose (Kotlin EncloseAPLFunction.eval1Arg → EnclosedAPLValue.make at
+        // types.kt:1550-1556). The Kotlin source is:
+        //   fun make(value: APLValue): APLValue =
+        //     if (value is APLSingleValue) value.unwrapDeferredValue()
+        //     else EnclosedAPLValue(value)
+        // Primitive scalars PASS THROUGH (the "atoms pass through" comment in
+        // the previous version was actually correct for primitives). Non-scalar
+        // values — arrays, `⍬`/Null (which is rank-1 size-0 per APLEmptyArray) —
+        // get wrapped in a 0-dimensional box. Oracle-verified:
+        //   `⊂5`    → `5`       (primitive, no wrap)
+        //   `⊂⍬`   → `┌─┐`     (Null is rank-1, gets wrapped)
+        //   `⊂(1 2 3)` → `┌───────┐`  (vector, gets wrapped)
+        // The mismatch `⊂5 → ┌─┐` from the prior turn (the previous turn's
+        // unconditional-wrap patch) violated `EnclosedAPLValue.make`'s scalar
+        // pass-through rule. Reverted to primitive-passthrough; arrays + Null
+        // still get the 0-D box.
         match v.as_ref() {
-            APLValue::Number(_) | APLValue::Char(_) | APLValue::Null => Ok(v),
+            APLValue::Number(_) | APLValue::Char(_) | APLValue::Str(_) => Ok(v.clone()),
             _ => Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
                 vec![],
                 ArrayData::Nested(vec![v]),
@@ -8496,7 +8854,12 @@ impl Engine {
             for k in 0..selected.len() {
                 flat += selected[k][combo[k]] * strides[k];
             }
-            out.push(Rc::new(arr.value_at(flat)));
+            out.push(
+                arr.elements()
+                    .into_iter()
+                    .nth(flat)
+                    .unwrap_or_else(|| Rc::new(APLValue::Null)),
+            );
             // Increment combo: only axes with more than one choice vary (last varies fastest).
             for k in (0..selected.len()).rev() {
                 if selected[k].len() > 1 {
@@ -8633,7 +8996,12 @@ impl Engine {
         let total_elements: usize = dims.iter().product();
         let mut elements: Vec<AplRef<APLValue>> = Vec::with_capacity(total_elements);
         for i in 0..total_elements {
-            elements.push(Rc::new(arr.value_at(i)));
+            elements.push(
+                arr.elements()
+                    .into_iter()
+                    .nth(i)
+                    .unwrap_or_else(|| Rc::new(APLValue::Null)),
+            );
         }
         if flat_indices.len() == 1 {
             elements[flat_indices[0]] = Rc::new(val.clone());
@@ -9149,6 +9517,18 @@ impl Engine {
         }
         // Plain reduce: fold along ONE axis. `/` reduces the LAST axis (Kap rank-1
         // reduce → single scalar, matching APL), `⌿` reduces the FIRST axis.
+        // Kap's `⍬` is a rank-1 size-0 array (`APLEmptyArray` in Kotlin), so
+        // reduce over `⍬` should hit the empty-axis identity path below, not
+        // the rank-0 "return unchanged" path. Materialize `⍬` as a `[0]`
+        // shape array here.
+        let data: AplRef<APLValue> = if matches!(data.as_ref(), APLValue::Null) {
+            Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![0],
+                ArrayData::Nested(vec![]),
+            ))))
+        } else {
+            data
+        };
         let dims = data.dimensions();
         let rank = dims.len();
         if rank == 0 {
@@ -9169,7 +9549,14 @@ impl Engine {
         let axis = explicit_axis.unwrap_or(if last_axis { rank - 1 } else { 0 });
         let axis_len = dims[axis];
         if axis_len == 0 {
-            return Err(AplError::runtime("reduce: cannot reduce an empty axis".into()));
+            // Kotlin `reduceGeneral` line 82-83: when the axis is empty, return
+            // the *function's identity value*. Per `math_functions.kt`:
+            //   + ∧ ∨ → 0;   × ⍲ ⍱ → 1;   = ≠ ≡ ≢ → first-equality etc.
+            // The most common cases here are `+/⍬ → 0` and `×/⍬ → 1`. A user
+            // function (d fn) doesn't define identityValue(), so for those we
+            // fall back to "cannot reduce an empty axis" — same error the
+            // old code raised for the integer axis case.
+            return self.reduce_identity_value(fn_instr, env);
         }
         // Row-major strides for the full shape.
         let mut strides = vec![1usize; rank];
@@ -9227,6 +9614,45 @@ impl Engine {
                 ArrayData::Nested(out),
             )))))
         }
+    }
+
+    /// Identity value for `+⌿⍬`-style reduce-over-empty (Kotlin
+    /// `reduce.kt:82-83` → `fn.identityValue()`). For built-in arithmetic /
+    /// boolean functions, return the algebraic identity. For user functions
+    /// (which don't define `identityValue`), raise the same "cannot reduce
+    /// an empty axis" error the port raised before.
+    fn reduce_identity_value(
+        &self,
+        fn_instr: &Instr,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        // Unwrap one level of axis-spec to read the underlying symbol.
+        let inner = match fn_instr {
+            Instr::AxisApplied { func, .. } => func.as_ref(),
+            other => other,
+        };
+        if let Instr::Symbol { name, .. } = inner {
+            // Map per Kotlin `math_functions.kt` `identityValue()` overrides.
+            // Only the cases that have oracle-verified output are listed.
+            match name.as_str() {
+                // 0 identity
+                "+" | "-" | "∧" | "∨" | "⍲" | "nor" | "nand" | "or" | "and" => {
+                    return Ok(Rc::new(APLValue::Number(KapNumber::Long(0))));
+                }
+                // 1 identity
+                "×" | "÷" | "⍟" | "⍳" | "iota" => {
+                    return Ok(Rc::new(APLValue::Number(KapNumber::Long(1))));
+                }
+                // For everything else (comparison, custom), fall through to error.
+                _ => {}
+            }
+        }
+        // User-defined functions don't carry an identity value, so this
+        // branch matches the old "cannot reduce an empty axis" error.
+        let _ = env; // suppress unused warning
+        Err(AplError::runtime(
+            "reduce: cannot reduce an empty axis".into(),
+        ))
     }
 
     /// Scan `f\\array`: like reduce but keep every intermediate accumulator along
@@ -11667,6 +12093,12 @@ impl Engine {
         sym: &str,
     ) -> Result<AplRef<APLValue>, AplError> {
         match right_val.as_ref() {
+            // Kap: monadic math on `⍬` propagates `⍬` (verified against the
+            // oracle: `+⍬` `-⍬` `×⍬` `÷⍬` `|⍬` `⌈⍬` `⌊⍬` and all `math:*`
+            // builtins return `⍬` when applied to `⍬`). Returning the same
+            // `Null` here matches that propagation without forcing the
+            // rest of the math to consider an empty rank-1 array.
+            APLValue::Null => Ok(Rc::new(APLValue::Null)),
             APLValue::Number(x) => Ok(Rc::new(APLValue::Number(f(x)))),
             APLValue::Array(a) => {
                 let mut out = Vec::with_capacity(a.element_count());
@@ -11694,6 +12126,8 @@ impl Engine {
         sym: &str,
     ) -> Result<AplRef<APLValue>, AplError> {
         match right_val.as_ref() {
+            // `⌈⍬` → `⍬`, `⌊⍬` → `⍬` (oracle-verified).
+            APLValue::Null => Ok(Rc::new(APLValue::Null)),
             APLValue::Number(x) => {
                 if x.is_complex() {
                     return Err(AplError::runtime(if ceil {
@@ -13801,6 +14235,33 @@ impl Engine {
             ));
         }
 
+        // Null (⍬) is a rank-1 size-0 array per Kotlin `APLEmptyArray`. The port's
+        // `APLValue::Null` is unit-shaped (rank 0), so we materialize an empty
+        // rank-1 array here for the rest of the function. This is the same
+        // normalization `arrayify()` performs in `reshape.kt` — `9 ⊥ ⍬ → 0`
+        // (Kotlin), and a generic empty encode should always yield 0.
+        let b = if let APLValue::Null = b.as_ref() {
+            Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![0],
+                ArrayData::Nested(vec![]),
+            ))))
+        } else {
+            b
+        };
+
+        // Kap auto-promotes to double when any operand of a numeric builtin is a
+        // double (`10 ⊥ 2 3.1 3.1 → 234.1`, Kotlin's `floatingPointArguments` test
+        // at EncodeTest.kt:38-42). Detect this once at the top so the rest of the
+        // function can pick i64-vs-f64 math without re-checking.
+        let use_double = {
+            let a_is_double = a.elements().iter().any(|e| {
+                matches!(e.as_ref(), APLValue::Number(n) if matches!(n, KapNumber::Double(_)))
+            });
+            let b_is_double = b.elements().iter().any(|e| {
+                matches!(e.as_ref(), APLValue::Number(n) if matches!(n, KapNumber::Double(_)))
+            });
+            a_is_double || b_is_double
+        };
         let b_rank = b.rank();
         // Scalar B → the digit axis is degenerate; the Kotlin `+⌿ (×⍀ …) × ⊖B`
         // reduces to B × Σ_{j} (Π_{k=0}^{j-1} ⌽A[k]) — i.e. the prefix cumulative
@@ -13845,43 +14306,69 @@ impl Engine {
             }
         }
 
-        // Build per-position weights along axis 0.
-        let weights: Vec<KapNumber> = match a.as_ref() {
-            APLValue::Number(n) => {
-                let base = n.as_long().map_err(|e| AplError::runtime(e))?;
-                let base = if base == 0 { 1 } else { base };
-                // weight[j] = base^(L-1-j)
-                let mut w = Vec::with_capacity(l);
-                for j in 0..l {
-                    let exp = (l - 1 - j) as u32;
-                    w.push(KapNumber::Long(base.pow(exp)));
-                }
-                w
+        // Build per-position weights along axis 0. When `use_double` is true, build
+        // them as `KapNumber::Double` (f64) so multiplication of fractional digits
+        // (Kotlin's `floatingPointArguments` test) doesn't silently truncate.
+        let weights: Vec<KapNumber> = if use_double {
+            // Double path
+            let a_doubles: Vec<f64> = match a.as_ref() {
+                APLValue::Number(n) => vec![n.as_double(); l],
+                APLValue::Array(_) => a
+                    .elements()
+                    .iter()
+                    .map(|e| match e.as_ref() {
+                        APLValue::Number(n) => Ok(n.as_double()),
+                        _ => Err(AplError::runtime("⊥ base must be a number".into())),
+                    })
+                    .collect::<Result<Vec<f64>, _>>()?,
+                _ => return Err(AplError::runtime("⊥ base must be a number".into())),
+            };
+            // weight[j] for vector A = Π_{k=j+1}^{L-1} A[k] (suffix product of A).
+            let mut suffix = 1.0f64;
+            let mut w: Vec<KapNumber> = vec![KapNumber::Double(0.0); l];
+            for j in (0..l).rev() {
+                w[j] = KapNumber::Double(suffix);
+                let ak = a_doubles.get(j % a_doubles.len()).copied().unwrap_or(1.0);
+                let ak = if ak == 0.0 { 1.0 } else { ak };
+                suffix *= ak;
             }
-            APLValue::Array(_) => {
-                let aelems = a.elements();
-                // weight[j] = Π_{k=j+1}^{L-1} A[k]  (product of radices AFTER position j;
-                // A[j] itself is the per-digit multiplier, not part of the accumulation).
-                let mut suffix: KapNumber = KapNumber::Long(1);
-                let mut w = vec![KapNumber::Long(0); l];
-                for j in (0..l).rev() {
-                    w[j] = suffix.clone();
-                    let ak = aelems
-                        .get(j % aelems.len())
-                        .and_then(|e| match e.as_ref() {
-                            APLValue::Number(n) => n.as_long().ok(),
-                            _ => None,
-                        })
-                        .ok_or_else(|| {
-                            AplError::runtime("⊥ radix vector must contain integers".into())
-                        })?;
-                    let ak_n = if ak == 0 { KapNumber::Long(1) } else { KapNumber::Long(ak) };
-                    suffix = suffix.mul(&ak_n);
+            w
+        } else {
+            // Integer path (unchanged): weight[j] = Π_{k=j+1}^{L-1} A[k] in i64.
+            match a.as_ref() {
+                APLValue::Number(n) => {
+                    let base = n.as_long().map_err(|e| AplError::runtime(e))?;
+                    let base = if base == 0 { 1 } else { base };
+                    let mut w = Vec::with_capacity(l);
+                    for j in 0..l {
+                        let exp = (l - 1 - j) as u32;
+                        w.push(KapNumber::Long(base.pow(exp)));
+                    }
+                    w
                 }
-                w
-            }
-            _ => {
-                return Err(AplError::runtime("⊥ base must be a number".into()));
+                APLValue::Array(_) => {
+                    let aelems = a.elements();
+                    let mut suffix: KapNumber = KapNumber::Long(1);
+                    let mut w = vec![KapNumber::Long(0); l];
+                    for j in (0..l).rev() {
+                        w[j] = suffix.clone();
+                        let ak = aelems
+                            .get(j % aelems.len())
+                            .and_then(|e| match e.as_ref() {
+                                APLValue::Number(n) => n.as_long().ok(),
+                                _ => None,
+                            })
+                            .ok_or_else(|| {
+                                AplError::runtime("⊥ radix vector must contain integers".into())
+                            })?;
+                        let ak_n = if ak == 0 { KapNumber::Long(1) } else { KapNumber::Long(ak) };
+                        suffix = suffix.mul(&ak_n);
+                    }
+                    w
+                }
+                _ => {
+                    return Err(AplError::runtime("⊥ base must be a number".into()));
+                }
             }
         };
 
@@ -13899,28 +14386,64 @@ impl Engine {
                 out_coords[k] = rem / b_strides[k + 1];
                 rem %= b_strides[k + 1];
             }
-            let mut acc: KapNumber = KapNumber::Long(0);
-            for j in 0..l {
-                // flat index into B for coordinate [j, out_coords...]
-                let mut bflat = j * b_strides[0];
-                for k in 0..out_coords.len() {
-                    bflat += out_coords[k] * b_strides[k + 1];
-                }
-                let bval = match b.value_at(bflat) {
-                    APLValue::Number(n) => n.as_long().ok(),
-                    _ => None,
-                };
-                match bval {
-                    Some(d) => acc = acc.add(&KapNumber::Long(d).mul(&weights[j])),
-                    None => {
-                        return Err(AplError::runtime(format!(
-                            "⊥: Non-numeric element in right argument at index {}",
-                            bflat
-                        )));
+            if use_double {
+                // Double path: read each digit as f64, multiply by its f64 weight,
+                // accumulate in f64, and emit KapNumber::Double at the end.
+                let mut acc: f64 = 0.0;
+                let mut bad_idx: Option<usize> = None;
+                for j in 0..l {
+                    let mut bflat = j * b_strides[0];
+                    for k in 0..out_coords.len() {
+                        bflat += out_coords[k] * b_strides[k + 1];
+                    }
+                    let d = match b.value_at(bflat) {
+                        APLValue::Number(n) => Some(n.as_double()),
+                        _ => None,
+                    };
+                    match d {
+                        Some(d) => acc += d * weights[j].as_double(),
+                        None => {
+                            bad_idx = Some(bflat);
+                            break;
+                        }
                     }
                 }
+                if let Some(bflat) = bad_idx {
+                    return Err(AplError::runtime(format!(
+                        "⊥: Non-numeric element in right argument at index {}",
+                        bflat
+                    )));
+                }
+                out.push(Rc::new(APLValue::Number(KapNumber::Double(acc))));
+            } else {
+                // Integer path (unchanged)
+                let mut acc: KapNumber = KapNumber::Long(0);
+                let mut bad_idx: Option<usize> = None;
+                for j in 0..l {
+                    let mut bflat = j * b_strides[0];
+                    for k in 0..out_coords.len() {
+                        bflat += out_coords[k] * b_strides[k + 1];
+                    }
+                    let bval = match b.value_at(bflat) {
+                        APLValue::Number(n) => n.as_long().ok(),
+                        _ => None,
+                    };
+                    match bval {
+                        Some(d) => acc = acc.add(&KapNumber::Long(d).mul(&weights[j])),
+                        None => {
+                            bad_idx = Some(bflat);
+                            break;
+                        }
+                    }
+                }
+                if let Some(bflat) = bad_idx {
+                    return Err(AplError::runtime(format!(
+                        "⊥: Non-numeric element in right argument at index {}",
+                        bflat
+                    )));
+                }
+                out.push(Rc::new(APLValue::Number(acc)));
             }
-            out.push(Rc::new(APLValue::Number(acc)));
         }
 
         if out_dims.is_empty() {

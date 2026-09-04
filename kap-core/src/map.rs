@@ -23,6 +23,16 @@ use std::rc::Rc;
 /// Keys are compared by VALUE with TYPE DISCRIMINATION (`td=true`): a Long `1`
 /// and a Double `1.0` are DIFFERENT keys, but `1` equals `1`. Faithful to
 /// Kotlin's `compareEqualsTotalOrdering(td=true)`.
+/// Treat `None` and `Some("default")` as equivalent symbol namespaces.
+/// See `values_key_equal` for context.
+fn normalize_sym_ns(ns: &Option<String>) -> Option<&str> {
+    match ns {
+        None => Some("default"),
+        Some(s) if s == "default" => Some("default"),
+        Some(other) => Some(other.as_str()),
+    }
+}
+
 pub fn values_key_equal(a: &APLValue, b: &APLValue) -> bool {
     match (a, b) {
         (APLValue::Number(x), APLValue::Number(y)) => {
@@ -36,7 +46,11 @@ pub fn values_key_equal(a: &APLValue, b: &APLValue) -> bool {
         (APLValue::Str(x), APLValue::Str(y)) => x == y,
         (APLValue::Null, APLValue::Null) => true,
         (APLValue::Symbol { name: n1, namespace: ns1 }, APLValue::Symbol { name: n2, namespace: ns2 }) => {
-            n1 == n2 && ns1 == ns2
+            // Per the oracle, bare symbol literals (`'foo`) have implicit namespace
+            // `default`. A bare name and its `default:foo` qualified form are the
+            // same symbol — so for key equality we treat `None` and
+            // `Some("default")` as equivalent. Other namespaces must match exactly.
+            n1 == n2 && normalize_sym_ns(ns1) == normalize_sym_ns(ns2)
         }
         (APLValue::Array(x), APLValue::Array(y)) => {
             if x.dimensions != y.dimensions {
