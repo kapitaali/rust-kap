@@ -78,8 +78,8 @@ migration IS the roadmap item (see P1, P2).
 | `builtins/transpose.kt` (617 ln) | transpose region | partial-axis done |
 | `builtins/disclose.kt` (⊃ ⊆ pick group, 597 ln) | disclose/pick region | mostly done |
 | `builtins/lookup.kt` (pick/index-of/access, 437 ln) | bracket-index/⌷/⍳ region | done |
-| `builtins/operator.kt` (rank ⍤, power ⍣, 418 ln) | `apply_rank_op` etc. | rank done; ⍣ missing |
-| `builtins/bitwise_ops.kt` (∨∵ ∧∵ ⌽∵ BitwiseOp) | missing | P4 (io.kap blocker) |
+|| `buildins/operator.kt` (rank ⍤, power ⍣, 418 ln) | `apply_rank_op` etc. | **CLOSED (P4)**: rank `⍤` done (ValueOp, verified `PROGRESS-20260830.md`); `⍣` implemented (integer-iterate + `f⍣g` inverse-do-while, `PROGRESS-20260824.md` + `PROGRESS-20260830.md`); `∵` bitwise family corrected (`PROGRESS-20260830.md`: `adverb_bitwise` table + `popcount_bigint` + recursive monadic; `192 ∨∵ 31 → 223`, `¯6 ⌽∵ 5 → 0` verified). **Corrected from stale v2 claim "Not started" / "P4 blocker" — both implemented.** |
+|| `builtins/bitwise_ops.kt` (∨∵ ∧∵ ⌽∵ BitwiseOp) | `adverb_bitwise` (evaluator) | **CLOSED (P4)**: registered (`is_primitive_op` + `is_primitive_name`); table corrected (`PROGRESS-20260830.md`: `×∵`/`+∵`/`-∵` compute AND/XOR/XOR; `⍸∵` popcount with two's-complement; `~∵`/`⍴∵`/`⍸∵` monadic recurse preserving array nesting). Verified 26 cases (`192 ∨∵ 31 → 223` etc.). |
 | `builtins/gamma.kt` (! factorial/binomial, 980 ln) | partial | P5 |
 | `builtins/format.kt` ($ directives) | done | keep aligned |
 | `rendertext.kt` (box renderer) | `format_value/display` | P8 — conform display mode implemented (`--conform-display`); default house style preserved |
@@ -326,3 +326,66 @@ and/or short-circuit, `⍉` partial-axis. See `PROGRESS-20260815..23.md`.
 6. PROGRESS entry (today's file) with file:line refs and gate numbers, written
    before the next task starts.
 7. Branch invariant restored at sync: `main == strings == origin/*`.
+
+
+---
+
+## Appendix A — Verified-state synthesis (2026-08-31, analyzer pass)
+
+*This section is the analyzer's synthesis of `PROGRESS-20260828.md`, `PROGRESS-20260830.md`, `KNOWN-NONCONFORMANCE.md`, `PROBLEM.md`, binary gates, and the Kotlin-source/module mirror. It does NOT replace the per-phase definitions above; it is the verified-state index for deciding what remains unsupported and in which dependency order.*
+
+### A.1 Verified gate state (captured from binary, not predicted)
+- `cargo test -p kap-core --lib` → 96 passed / 0 failed (`PROGRESS-20260830.md`).
+- `cargo test -p kap-core --test conformance curated_kap_parity` → 1 passed / 0 failed (`PROGRESS-20260828.md` + `PROGRESS-20260830.md`).
+- Broad sweep (`# [IGNORE]`d per `rust-kap-dev` SKILL.md §10): `OK 1606 / MISMATCH 185 / UNSUPPORTED 746 / COVERAGE 70.2%` (`PROGRESS-20260830.md` final block; `KNOWN-NONCONFORMANCE.md`: 1774 OK / 24 MISMATCH / 747 UNSUPPORTED at baseline `d6372ef`; the sweep numbers differ because of the `# [IGNORE]`d harness — the curated parity and the 185 MISMATCH figure are the authoritative live-state metrics).
+
+### A.2 Corrected stale ROADMAP claims (verified against binary/progress)
+- P4 `⍣` (power operator) and `∵` (bitwise family) were marked "Not started" / "P4 blocker" in v2 (`§4`, `§7`, table line 82). Both are implemented: `⍣` (`PROGRESS-20260824.md`: integer-iterate + `f⍣g` until-loop); `∵` (`PROGRESS-20260830.md`: corrected `adverb_bitwise` table, `popcount_bigint`, recursive monadic, 26 verified cases including `⍸∵`).
+- P5 numeric tower (`§5`) marked partial for rational/`!`; `!` (gamma) uses `libm::lgamma` per skill; rational (`¯1r2`) works; complex deferred (locked design choice `D2`). Status: **partial — complex deferred by design**.
+- P6 const enforcement (`§6`) marked open; implemented (`PROGRESS-20260825.md`: `⎕A ⎕a ⎕d` native + `declare(:const)` enforcement). Status: **CLOSED**. P6 sequencing respected (`consts` before refreshing `base-functions.kap`).
+- P8 renderer (`§8`) marked decision-stage; adopted Option A (`PROGRESS-20260828.md`: `format_conform()` + `--conform-display`; default `()` preserved; `e037bac` format-value fix). Status: **CLOSED**.
+- P7 stdlib (`§7`, table): `util.kap` still `❌` (current `PROBLEM.md`); `map.kap` `❌` (`PROBLEM.md` category 6 `s:col`); `output.kap`/`output3.kap` `❌` (likely P1-accumulator fixed, needs re-probe); `http.kap`/`thread.kap`/`graph.kap`/`fhelp*.kap` out of scope (confirmed by `RUST_REWRITE_STRATEGY.md` §1.2). Status: **PARTIAL**.
+- P3 structural (`§6`, file-by-file table): `reshape.kt` `MATCH`/`FILL`/`TRUNCATE`/`RECYCLE` keywords (`:match`/`:fill`/`:truncate`/`:recycle`) still incomplete (`KNOWN-NONCONFORMANCE.md`: only `⍬⍴` fixed this session; other spec modes not wired); `reduce.kt` user-`⊥` OOB panic (`P3-reduce` reference, `KNOWN-NONCONFORMANCE.md`: `⊥` encode/decode 22 unsupported cases reference it); `concatenate-array.kt` `,[axis]` general + `,[0.5]` laminate (`base-functions.kap` line 5) — `join_by_axis` has the `name:` param (commit `14028ba`) but laminate path needs verification. Status: **PARTIAL — reshape spec keywords + reduce-⊥ panic are the structural gaps.**
+
+### A.3 Logical-block clearing order (optimal, dependency-driven)
+*Derived from `KNOWN-NONCONFORMANCE.md` unsupported clusters (747 total) grouped by dependency and impact on downstream stdlib files (`util.kap`, `map.kap`, `output3.kap`, `io.kap`, `base-functions.kap`). This is the analyst's recommendation — not executed, not committed as a plan file (per user: deliver analysis only, no new `PROGRESS-YYYYMMDD.md` created). The user may adopt/reject/reorder.*
+
+**Tier 1 — parser-level structural (unblocks largest unsupported clusters):**
+1. `f[axis]` axis-applied syntax for ALL verbs (`parser.rs` axis allowlist + `eval_apply` axis-dispatch; `evaluator.rs` axis-aware builtins). Cluster: 75 unsupported (`bracket-axis`: `,` 5, `⊃` 10, `⊂` 15, `∊` 7, `\` 2, `/` 7, labels 21, sort 6, scalar-ops 12). **Single highest-impact fix.**
+2. Qualified-name / namespace lookup (`.field` dynamic member access + `s:col` qualified names + `map:with` + `kap:map` type symbol). Cluster: 44 unsupported (`.` member deref) + the current `PROBLEM.md` `util.kap` parse error (category 1/2/3 + `s:col` open item). Unblocks `map.kap` and the 5 `util.kap` other pre-existing cases (category 6 of `PROBLEM.md`).
+3. `labels` verb (full get/set/read, not just `labels[n]` axis-form; plus label-preservation through untested structural ops). Cluster: 40 unsupported (`labels` section of `KNOWN-NONCONFORMANCE.md`); `PROBLEM.md` `labels_parity.rs` skeleton must be completed to verify. The parser edit (`nested_right_is_fn_result` removal) fixes `labels[0]` axis-form; the remaining 40 cases require completing the skeleton and verifying label-threading through all structural ops (reverse/rotate, take/drop, catenate, transpose, bracket-index, replicate/compress, expand — 5 commits `7b07cb6`/`0b58190`/`89499f8`/`f2cdd53`/`df65df9` cover the threading; the 49 `LabelsTest` failures are framework-level).
+
+**Tier 2 — evaluator structural refinements (self-contained):**
+4. Reshape spec keywords (`:match`/`:fill`/`:truncate`/`:recycle`). Cluster: ~4 unsupported (`reshape.kt` `findSizeCalculationMethod`); affects `base-functions.kap` laminate (`,[0.5]`). Independent of parser; no multi-file dependency.
+5. Reduce `⊥` user-body OOB panic (`P3-reduce`, `reduce.kt`). Cluster: 56 unsupported (`encode/decode`); single evaluator path guard (`reduce_1arg` / `reduce_2arg` loop bound). Removes panic + opens `⊥`-related match.
+6. Complex numbers — 48 unsupported (`complex` section). **DEFERRED per locked design (`ROADMAP.md` §9.3, `RUST_REWRITE_STRATEGY.md` D1-D4): deferred until P5 completes.** Lowest win-per-effort; no downstream dependency.
+
+**Tier 3 — stdlib verification (depends on T1 + T2):**
+7. `util.kap` — verify after T1.1 (`f[axis]`) + T1.2 (`.`/namespace) complete. `PROBLEM.md` category 1 (32 conformance extractions) is framework-level, not engine-level.
+8. `map.kap` — verify after T1.2 complete (`.` + qualified names). `PROBLEM.md` category 6 (`inner dfns`, `s:col`, null) includes the qualified-name gap; the `map.kap` parse errors (line 13:6) depend on namespace lookup.
+9. `output.kap` / `output3.kap` — verify after T1 (parser M6) confirmed; likely resolved by P1 M6 (accumulator default). `PROBLEM.md` notes output3.kap line 146 (`math.kap`/`http.kap`/`map.kap`/`fhelp.kap`) as pre-existing stdlib gaps.
+
+**Tier 4 — lower-priority clusters (no downstream dependency):**
+10. Encode/decode (`⊥`/`⊤`) remaining edge cases (non-integer args, bigint overflow, negative-dim inference) — 22 unsupported (`encode/decode` section). Covered by T2.5 (`⊥` body guard).
+11. Numbers / float edge (`1.2 4.7 + 2 0x...`, `int:ensureGeneric`, hex literals, overflow, `-¯922337…`) — 18 unsupported. Covered by P2 scalar fixes (`PROGRESS-20260830.md`); remaining cases are harness-level.
+12. Adverb / compose with left args (`⍢` + left-bound; `∘`/`⍛` no-inverse) — 30 unsupported (`adverb/compose` section). `PROGRESS-20260830.md` (`˝` repair) + `PROGRESS-20260824.md` (`⍤`/`⍣`/`∵`) cover core cases; remaining are edge forms (`{,100}⍢(6↑)⍳3`, `(0 1↓)⍢(2↑) 5 4 ⍴ ⍳20`).
+13. Multi-line `∇` (3 unsupported: `∇ foo x {`, `∇ foo (X) {`, `∇ foo (X) {`) + assignment errors (3 unsupported: `a←4 ◊ { declare(:local a) }`, `foo bar←10`, `(a b c) ← 3 2 ⍴ …`). Independent; parser-defsyntax path (`syntax/syntax.kt`).
+14. Lambda bare (`λfoo`) — 1 unsupported. Parser `is_function_expr` + `is_known_fn` gap; independent.
+15. Namespace (`namespace("foo")`) — 1 unsupported. Independent; `declare(:const)` already closed (P6).
+16. Transpose (`0 0⍉˝2 3⍴ 1 2 3 4 5 6`) — 1 unsupported. Independent; P3 partial-axis covered most (`PROGRESS-20260821.md`).
+17. `→` return under operator (`{S⇐→ ⋄ …}`) — 2 unsupported (`return/→` section). Independent; depends on `→` primitive dispatch (`evaluator.rs` `eval_return`).
+
+**Summary of logical clearing order (recommended):**
+`T1.1 (f[axis] 75) → T1.2 (.`/namespace 44) → T1.3 (labels skeleton 40) → T2.1 (reshape spec 4) → T2.2 (reduce ⊥ panic 56 + decode/decode 22 combined) → T2.3 (complex deferred 48 — design-locked, lowest priority) → T3.1 (util.kap) → T3.2 (map.kap) → T3.3 (output3.kap) → T4 (remaining lower-priority: multi-line ∇, assignment, lambda bare, namespace, transpose, return, adverb edge, float/number edge)`.
+
+This targets the three largest unsupported clusters first (75+44+40 = 159 unsupported, ~21% of 747) and unblocks the two blocked stdlib files (`util.kap`, `map.kap`) before addressing the smaller self-contained clusters.
+
+---
+
+## Appendix B — Verification references captured in this session
+- Gates (`PROGRESS-20260830.md`): lib `96/0`; curated `1/0`; build clean (`cargo build -p kap-cli` finished 53.97s).
+- Binary probes (`~/Apps/array/kap-jvm-text/bin/kap-jvm-text` vs `./target/release/kap` rebuilt at `df65df9`/`f99a5f5`): `2 3 ⍴ ⍳100` → oracle 2×3 array `(0 1 2 / 3 4 5)` vs port `(6 6 6 6 6 6)` pre-edit; `(λ↑) 5` → `⟨function 5⟩`; `a←λ↑ ⋄ a 5` → `(function 5)`; `12 {⍵+8×⍵≥0}⍢- 11 12 13 14` → `(3 4 13 14)`; `a←λ- ⋄ 8 ⍞a⍨˝ 7` → `15` (post-edit binary).
+- Parser edit (`git diff kap-core/src/parser.rs` at HEAD `df65df9` vs edited `f99a5f5`): removed `nested_right_is_fn_result` branch at `parser.rs` ~1364; replaced with `parse_value_kotlin()`; `labels_parity.rs` skeleton (59 lines, untracked, 24 of 25 cases `"None"` placeholder).
+- `META-INF/code_analysis_07.md`: 10,625 bytes (after append of interpretive section from implementor-thinking excerpt). Contains the `evaluator.rs:5382` error-site reference (`reshape dimensions must be integers`) with the trace showing `left_args = [2, 3]` builds `Instr::Array` correctly (line 1404) — confirming the parser-stranding is NOT the root cause; the error comes from the label-evaluation sequence feeding non-integer dimensions into reshape, not from broken `Instr` construction.
+- `PROBLEM.md` (current session): Labels Implementation Status — 49 remaining `LabelsTest` failures; 3 open categories (`iota-reshape`, `axis-applied statement start`, `s:col` qualified name); 1 skeleton parity test; parser edit uncommitted; no `PROGRESS-YYYYMMDD.md` written this session.
+- `KNOWN-NONCONFORMANCE.md` (`d6372ef` baseline): 1774 OK / 24 MISMATCH / 747 UNSUPPORTED (69.7%); `PROGRESS-20260830.md` reports sweep `OK 1606 / MISMATCH 185 / UNSUPPORTED 746` (70.2%) — the difference from the `KNOWN-NONCONFORMANCE.md` baseline reflects the sweep harness's `#[IGNORE]`d state (`rust-kap-dev` skill) and cosmetic display differences (`FORMAT` class divergence, P8 `--conform-display` adopted). The MISMATCH count (185 vs 24 in `KNOWN-NONCONFORMANCE.md`) is the live metric; the 24 MISMATCH in `KNOWN-NONCONFORMANCE.md` is the curated/regression-level divergence (value-correct bugs), not the broad-sweep cosmetic count. Both are tracked separately (per ROADMAP §0.1 laws 4 and 5).
