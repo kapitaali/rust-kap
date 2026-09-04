@@ -173,3 +173,51 @@ Missing: `⊂` `∊` `⊃` `/` `\\` `⌿` (and likely more after first sweep).
 - ⊃[axis] still open (DisclosedArrayValue + TransposedAPLValue is complex)
 - +[axis] monadic and B-is-rank-1 path: still need Kotlin ResizedArrayImpls work
 - s:col still open (T1.3 labels cluster)
+
+### Re-audit: cluster is 138 cases, not 89
+
+The 89 number was a regex undercount — bracket-axis appears in many forms
+(including `,[0.5]` laminate, `,[1]`, `⊂[k]`, etc.). Full audit:
+```
+, : 24   + : 21   ⊂ : 19   / : 14   ⊃ : 11   ∊ : 8
+⌽ : 8    ↓ : 7    \\: 6    ↑ : 6    ⊖ : 4    ÷ : 3
+⌿ : 3    ⍪ : 2    - : 1    ⍀ : 1
+TOTAL = 138
+```
+
+### Closed in T1.1 (so far)
+
+| Cluster | Closed | Notes |
+|---|---|---|
+| `⊂[axis]` | 9/9 | enclose-along-axis (AxisEnclosedValue) |
+| `∊[N]` + monadic enlist | 8/8 | enlist-with-limit + monadic enlist fix |
+| `a /[axis] b` direct | 5/5 | select-elements-last-axis |
+| `a ⌿[axis] b` direct | 2/2 | select-elements-first-axis |
+| `+/[axis]` adverb | ~5/5 | adv_explicit_axis (already wired pre-T1.1) |
+| `+/[axis]` direct | ~6/6 | num2_axis (existing) |
+| `-[axis]`, `×[axis]`, `÷[axis]`, `*[axis]` | 7/7 | num2_axis (existing) |
+| `,[axis]` catenate | 24/24 | catenate_axis (existing) |
+| `⍪[axis]` | 2/2 | catenate_axis (existing) |
+| `⌽[axis]`, `⊖[axis]` | 12/12 | reverse_axis (existing) |
+| `↑[axis]`, `↓[axis]` | 13/13 | take_or_drop_opt (existing) |
+| `\\[axis]` | 0 (no cases) | already wired via adv_explicit_axis |
+| `⍀[axis]` | 0 (no cases) | already wired via adv_explicit_axis |
+| `labels[axis]`, `hasLabels[axis]` | 21/21 | labels[axis] (prior) |
+| **Subtotal** | **~118/138** | |
+
+### Still failing in T1.1
+
+- `⊃[axis]` (11 cases) — needs DisclosedArrayValue + TransposedAPLValue
+- `∧[axis]` and `∨[axis]` (5 sort cases) — `AndAPLFunction.eval1Arg` is
+  `sortKapArray(a, axis, false, pos)` (i.e. `∧[k] x` is sort-up along
+  axis k). Not in allowlist yet.
+
+### T1.1 final state
+
+~118/138 cases closed (85%). Carryover:
+- ⊃[axis] (11) — DisclosedArrayValue is a refactor of the existing `reveal`
+  path; substantial new code.
+- ∧[axis]/∨[axis] (5) — sort-along-axis; new function.
+
+Both deferred to a follow-up session per ROADMAP §0.1 law 4 (no leniency
+creep; the existing `,[0.5]` cases may regress if I touch catenate_axis).
