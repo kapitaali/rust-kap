@@ -1605,6 +1605,17 @@ impl Engine {
             if fn_name == "," || fn_name == "⍪" {
                 return self.catenate_axis(left_v, right_v, &axis_number);
             }
+            // Kotlin `MathCombineAPLFunction.eval1Arg` silently drops the axis
+            // (oracle-verified): `+[0] 3`, `-[1] 5`, `×[2] 7`, `÷[3] 8`, `*[0] 2` all
+            // return the monadic form (`+ x` identity, `- x` negate, `× x` signum,
+            // `÷ x` reciprocal, `* x` exponential). For MONADIC axis-applied
+            // arithmetic, strip the `AxisApplied` and re-enter eval_apply with the
+            // plain symbol so the existing monadic dispatch runs.
+            if matches!(fn_name, "+" | "-" | "×" | "÷" | "*") {
+                if left_v.is_none() {
+                    return self.eval_apply(func, &None, right, env);
+                }
+            }
             // Kotlin `MathCombineAPLFunction.eval2Arg` short-circuits scalar+scalar BEFORE
             // any axis handling: `if (a0 is APLSingleValue && b0 is APLSingleValue)
             // return combine2Arg(a0, b0)`. The axis is silently ignored for two scalars,
