@@ -8044,10 +8044,6 @@ impl Engine {
         let v = right_val.force(self)?;
         let arr = match v.as_ref() {
             APLValue::Array(a) => a,
-            APLValue::Number(_) | APLValue::Char(_) | APLValue::Null => {
-                // Scalar input: enclose returns the scalar itself.
-                return Ok(v.clone());
-            }
             _ => {
                 return Err(AplError::runtime(format!(
                     "⊂[axis]: argument must be an array, got {:?}",
