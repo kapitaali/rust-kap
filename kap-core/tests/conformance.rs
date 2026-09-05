@@ -337,6 +337,8 @@ fn curated_kap_parity() {
         // Long overflow promotes to bigint, never wraps (oracle: `MAX+1` → `…808`)
         ("9223372036854775807 + 1", "9223372036854775808"),
         ("1297036692682702848 × 16", "20752587082923245568"),
+        // Bigint isPrime uses Miller-Rabin (oracle: `…873+⍳10` → `(0 0 0 0 1 …)`)
+        ("math:isPrime 36893488147419103873+⍳10", "(0 0 0 0 1 0 0 0 0 0)"),
         ("⍋ 3 1 4 2", "(1 3 0 2)"), // grade-up (monadic): 0-based indices ascending
         // Bracket indexing (pick + multi-axis access) — dyadic ⍴ required
         ("(10 20 30 40)[2]", "30"),

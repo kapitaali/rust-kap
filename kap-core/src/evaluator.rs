@@ -2489,6 +2489,7 @@ impl Engine {
                         v >= 2 && Self::is_prime_u64(v as u64)
                     }
                     KapNumber::Double(_) => false,
+                    KapNumber::BigInt(v) => Self::is_prime_bigint(v),
                     _ => {
                         let v = x.as_long().unwrap_or(-1);
                         v >= 2 && Self::is_prime_u64(v as u64)
@@ -12664,6 +12665,54 @@ impl Engine {
             return KapNumber::Long(xa.abs());
         }
         KapNumber::Long(gcd_u(xa.unsigned_abs(), xb.unsigned_abs()) as i64)
+    }
+
+    /// Miller-Rabin probable-prime for bigint inputs (Kotlin `prime.kt` uses
+    /// Miller-Rabin beyond the long domain; fixed small-prime bases give a
+    /// negligible error rate, matching `BigInteger.isProbablePrime` answers).
+    fn is_prime_bigint(n: &num_bigint::BigInt) -> bool {
+        use num_bigint::BigInt;
+        if *n < BigInt::from(2) {
+            return false;
+        }
+        // Small-prime trial division doubles as the even/case handling.
+        const BASES: [i64; 12] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37];
+        for p in BASES {
+            let b = BigInt::from(p);
+            if n == &b {
+                return true;
+            }
+            if n % &b == BigInt::from(0) {
+                return false;
+            }
+        }
+        // n - 1 = d * 2^r with d odd.
+        let n1 = n - BigInt::from(1);
+        let mut d = n1.clone();
+        let mut r = 0u32;
+        while (&d % 2) == BigInt::from(0) {
+            d /= 2;
+            r += 1;
+        }
+        let one = BigInt::from(1);
+        'witness: for p in BASES {
+            let a = BigInt::from(p);
+            if a >= n1 {
+                continue;
+            }
+            let mut x = a.modpow(&d, n);
+            if x == one || x == n1 {
+                continue 'witness;
+            }
+            for _ in 1..r {
+                x = (&x * &x) % n;
+                if x == n1 {
+                    continue 'witness;
+                }
+            }
+            return false;
+        }
+        true
     }
 
     /// Trial-division primality (sufficient for the port's i64 domain; Kotlin uses
