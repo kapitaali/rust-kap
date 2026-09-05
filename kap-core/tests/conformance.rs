@@ -350,6 +350,14 @@ fn curated_kap_parity() {
         ("a←4 ◊ { declare(:local a) a←3 ◊ ⍵+a } 2 ◊ a+5", "9"),
         // Range needs integer-family endpoints; bigints step exactly
         ("9223372036854775807 … 9223372036854775808", "(9223372036854775807 9223372036854775808)"),
+        // A bound return escape exits its DEFINING fn, skipping inner frames
+        ("{ S ⇐ → ◊ 100 + { S ⍵+20 ◊ ⍵+1 } 10 } 0", "30"),
+        // Direct `→` in a bare block exits the block
+        ("{ →5 } 0", "5"),
+        // A bound escape called directly exits its defining function
+        ("{ S ⇐ → ⋄ S 30 } 0", "30"),
+        // `λ→` captures the enclosing escape
+        ("{ f ⇐ λ→ ⋄ f 30 } 0", "30"),
         ("⍋ 3 1 4 2", "(1 3 0 2)"), // grade-up (monadic): 0-based indices ascending
         // Bracket indexing (pick + multi-axis access) — dyadic ⍴ required
         ("(10 20 30 40)[2]", "30"),

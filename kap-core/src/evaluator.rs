@@ -794,15 +794,37 @@ impl Engine {
                     ArrayData::Nested(vals),
                 )))))
             }
-            Instr::Lambda { params, body } => Ok(Rc::new(APLValue::UserFn {
-                params: params.clone(),
-                // The last param is the right argument (⍵); any preceding params are
-                // left arguments (⍺). So `λ(a)` is monadic (split 0) and `λ(a b)` is
-                // dyadic (split 1), matching Kap dfn conventions.
-                split: params.len().saturating_sub(1),
-                body: Rc::new(*body.clone()),
-                env: env.clone(),
-            })),
+            Instr::Lambda { params, body } => {
+                // `λ→` (inside a fn): the body is the bare return primitive — the
+                // lambda IS the captured escape (Kotlin `processLambda` resolves
+                // `→` via lookupFunction and `make()` captures the return env at
+                // that point). Eval-time capture is exact: the lambda evaluates
+                // inline at the capture site. No enclosing fn → the oracle's
+                // error, without the "→: " prefix (`λ→` → "Call to return …").
+                if let Instr::Symbol { name, .. } = body.as_ref() {
+                    if name == "→" || name == "branch" {
+                        match self.return_target_env(env) {
+                            Some(t) => {
+                                return Ok(Rc::new(APLValue::Escape { target: Some(t) }))
+                            }
+                            None => {
+                                return Err(AplError::runtime(
+                                    "Call to return without a function call".into(),
+                                ))
+                            }
+                        }
+                    }
+                }
+                Ok(Rc::new(APLValue::UserFn {
+                    params: params.clone(),
+                    // The last param is the right argument (⍵); any preceding params are
+                    // left arguments (⍺). So `λ(a)` is monadic (split 0) and `λ(a b)` is
+                    // dyadic (split 1), matching Kap dfn conventions.
+                    split: params.len().saturating_sub(1),
+                    body: Rc::new(*body.clone()),
+                    env: env.clone(),
+                }))
+            }
             Instr::Assign { target, value } => {
                 if let Instr::Symbol { name, namespace } = target.as_ref() {
                     let v = self.eval_instr(value, env)?;
@@ -1144,12 +1166,29 @@ impl Engine {
                     //    handles a bare user-symbol by looking it up and applying it, but
                     //    the delegation preserves lexical closure of the defining scope.
                     Instr::Symbol { name, .. } if Self::is_primitive_name(name) => {
-                        Rc::new(APLValue::UserFn {
-                            params: vec![],
-                            split: 0,
-                            body: Rc::new(*value.clone()),
-                            env: env.clone(),
-                        })
+                        // `S ⇐ →`: bind the return escape itself, capturing the
+                        // CURRENT return target (Kotlin `ReturnFunction.make`:
+                        // `findReturnEnvironment` at bind time). Calling `S` later
+                        // raises `Return` for THAT frame, skipping inner frames.
+                        // No enclosing function → bind-time error, exactly like the
+                        // oracle (`S ⇐ →` → "→: Call to return without a function call").
+                        if name == "→" || name == "branch" {
+                            match self.return_target_env(env) {
+                                Some(t) => Rc::new(APLValue::Escape { target: Some(t) }),
+                                None => {
+                                    return Err(AplError::runtime(
+                                        "→: Call to return without a function call".into(),
+                                    ))
+                                }
+                            }
+                        } else {
+                            Rc::new(APLValue::UserFn {
+                                params: vec![],
+                                split: 0,
+                                body: Rc::new(*value.clone()),
+                                env: env.clone(),
+                            })
+                        }
                     }
                     _ => {
                         let deleg = Instr::Apply {
@@ -1362,6 +1401,7 @@ impl Engine {
             APLValue::Null => true,
             APLValue::Nil => true,
             APLValue::UserFn { .. } => true,
+            APLValue::Escape { .. } => true,
             APLValue::UserOp { .. } => true,
             APLValue::Deferred { .. } => false,
             APLValue::Symbol { .. } => true,
@@ -2024,8 +2064,13 @@ impl Engine {
                     env: env.clone(),
                 }));
                 // Return early on `→` (branch/return) so it exits the block.
+                // A directly-applied block is its own call frame (Kotlin
+                // `withStackFrame`): mark it a return target so a direct `→`
+                // inside (`{ →5 } 0` → `5`) resolves here, while a captured
+                // escape aimed at an outer frame propagates through.
+                child.is_return_target.set(true);
                 return match self.eval_block(body, &child) {
-                    Err(AplError::Return(v)) => Ok(v),
+                    Err(AplError::Return(v, t)) if t == Some(child.id) => Ok(v),
                     other => other,
                 };
             }
@@ -2047,6 +2092,11 @@ impl Engine {
                             fenv,
                             Some(name),
                         );
+                    }
+                    // A captured return escape applies by raising for its
+                    // bind-time target frame (`⍞S` invokes `S` dynamically).
+                    APLValue::Escape { target } => {
+                        return self.apply_escape(*target, left, right, env);
                     }
                     APLValue::UserOp { .. } => {
                         return Err(AplError::runtime(format!(
@@ -2335,6 +2385,11 @@ impl Engine {
                         Some(&name),
                     );
                 }
+                // A captured return escape (`S ⇐ →`) applies by raising for its
+                // bind-time target frame — no new frame is created.
+                if let APLValue::Escape { target } = v.as_ref() {
+                    return self.apply_escape(*target, left, right, env);
+                }
             }
         } else if let Some(v) = env.lookup(&name, &None) {
             if let APLValue::UserFn { params, split, body, env: fenv } = v.as_ref() {
@@ -2348,6 +2403,11 @@ impl Engine {
                     fenv,
                     Some(&name),
                 );
+            }
+            // A captured return escape (`S ⇐ →`) applies by raising for its
+            // bind-time target frame — no new frame is created.
+            if let APLValue::Escape { target } = v.as_ref() {
+                return self.apply_escape(*target, left, right, env);
             }
         }
         // --- Inner/outer product `f₁ ∙ f₂` (Kotlin OuterInnerJoinOp) ---
@@ -3293,7 +3353,7 @@ impl Engine {
             },
             "⊆" => self.partitioned_enclose(left_val, right_val),
             "⊇" => self.pick_apl(left_val, right_val),
-            "→" | "branch" => self.return_arrow(left_val, right_val),
+            "→" | "branch" => self.return_arrow(left_val, right_val, env),
             "⍮" | "pair" => self.pair(left_val, right_val),
             "⌷" | "reveal" => self.access_from_index(left_val, right_val),
             // `≬` / `toList` (Kotlin `ToListFunction`, div_functions.kt): monadic-only.
@@ -4107,8 +4167,12 @@ impl Engine {
         };
         // Only Block bodies (`{}` dfns) create a return-target frame. All bodies
         // must propagate `Return` to the enclosing frame (nested `◊` / inner dfn).
+        // A frame catches ONLY a signal targeted at its own env id (Kotlin
+        // `withStackFrame`: `if (returnEnvironment === environment)` else rethrow)
+        // so a captured escape (`S ⇐ →`) skips inner frames and exits its
+        // defining function.
         match result {
-            Err(AplError::Return(v)) => Ok(v),
+            Err(AplError::Return(v, t)) if t == Some(child.id) => Ok(v),
             other => other,
         }
     }
@@ -8637,7 +8701,8 @@ impl Engine {
             APLValue::Number(_) | APLValue::Char(_) | APLValue::Null | APLValue::Nil
             | APLValue::Str(_)
             | APLValue::List(_) | APLValue::Map(_) | APLValue::Symbol { .. }
-            | APLValue::Deferred { .. } | APLValue::UserFn { .. } | APLValue::UserOp { .. } => {
+            | APLValue::Deferred { .. } | APLValue::UserFn { .. } | APLValue::UserOp { .. }
+            | APLValue::Escape { .. } => {
                 out.push(Rc::new(value.clone()));
             }
             APLValue::Array(arr) => {
@@ -9782,24 +9847,68 @@ impl Engine {
         )))))
     }
 
+    /// Nearest enclosing return-target scope id (Kotlin `ReturnFunction`
+    /// `findReturnEnvironment`, div_functions.kt:535): walk the lexical parent
+    /// chain for the first env with `is_return_target` set. A `→` applied here
+    /// returns from that frame; `None` = no enclosing function.
+    fn return_target_env(&self, env: &AplRef<Environment>) -> Option<usize> {
+        let mut cur: Option<&Environment> = Some(env);
+        while let Some(e) = cur {
+            if e.is_return_target.get() {
+                return Some(e.id);
+            }
+            cur = e.parent.as_deref();
+        }
+        None
+    }
+
     /// Kap's branch/return primitive `→`.
     /// - Monadic `→ value`: immediately returns `value` from the enclosing function.
     /// - Dyadic `cond → value`: if `cond` is truthy, returns `value`; otherwise
     ///   yields `value` and control continues (the function does not exit).
-    /// Implemented as a control-flow signal (`AplError::Return`) that the enclosing
-    /// user-function frame catches. If it escapes to top level (no enclosing
+    /// Implemented as a control-flow signal (`AplError::Return`) carrying the
+    /// target frame id captured above: only the frame with that id catches it,
+    /// all others re-raise. If it escapes to top level (no enclosing
     /// function), `eval_string_in_env` converts it to a runtime error.
     /// Mirrors Kotlin `ReturnFunction` (div_functions.kt).
     fn return_arrow(
         &self,
         left_val: Option<AplRef<APLValue>>,
         right_val: AplRef<APLValue>,
+        env: &AplRef<Environment>,
     ) -> Result<AplRef<APLValue>, AplError> {
+        let target = self.return_target_env(env);
         match left_val {
-            None => Err(AplError::Return(right_val)),
+            None => Err(AplError::Return(right_val, target)),
             Some(cond) => {
                 if self.truthy(&cond) {
-                    Err(AplError::Return(right_val))
+                    Err(AplError::Return(right_val, target))
+                } else {
+                    Ok(right_val)
+                }
+            }
+        }
+    }
+
+    /// Apply a captured return escape (`S` from `S ⇐ →`) to call-site arguments.
+    /// Raises `Return` for the frame captured at bind time — NOT the caller's
+    /// frame — so the signal skips inner dfns and exits the defining function
+    /// (Kotlin `ReturnFunctionImpl.eval1Arg`: `throw ReturnValue(a, returnEnvironment)`).
+    /// Arg evaluation follows the port's right-then-left convention.
+    fn apply_escape(
+        &self,
+        target: Option<usize>,
+        left: &Option<Box<Instr>>,
+        right: &Box<Instr>,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let right_val = self.eval_instr(right, env)?.force(self)?;
+        match left {
+            None => Err(AplError::Return(right_val, target)),
+            Some(l) => {
+                let cond_val = self.eval_instr(l, env)?.force(self)?;
+                if self.truthy(&cond_val) {
+                    Err(AplError::Return(right_val, target))
                 } else {
                     Ok(right_val)
                 }
@@ -10180,6 +10289,9 @@ impl Engine {
                 Ok(Instr::List { elements: elems })
             }
             APLValue::UserFn { .. } => {
+                Err(AplError::runtime("cannot use a function as an array element".into()))
+            }
+            APLValue::Escape { .. } => {
                 Err(AplError::runtime("cannot use a function as an array element".into()))
             }
             APLValue::UserOp { .. } => {
@@ -12241,7 +12353,7 @@ impl Engine {
                     out.push(
                         self.apply_fn_instr(fn_instr, Some(&le), re, env)
                             .map_err(|e| match e {
-                                AplError::Return(_) => AplError::runtime(
+                                AplError::Return(..) => AplError::runtime(
                                     "→: Return outside of expected frame".into(),
                                 ),
                                 other => other,
@@ -12255,7 +12367,7 @@ impl Engine {
                     out.push(
                         self.apply_fn_instr(fn_instr, None, e, env)
                             .map_err(|e| match e {
-                                AplError::Return(_) => AplError::runtime(
+                                AplError::Return(..) => AplError::runtime(
                                     "→: Return outside of expected frame".into(),
                                 ),
                                 other => other,

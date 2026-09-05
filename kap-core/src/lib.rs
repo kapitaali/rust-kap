@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 pub mod number;
 pub mod array;
@@ -95,6 +96,16 @@ pub enum APLValue {
         body: AplRef<ast::Instr>,
         env: AplRef<Environment>,
     },
+    /// A captured **return escape** (Kotlin `ReturnFunctionImpl`): the value of
+    /// `→` in function position (`S ⇐ →`, `λ→` inside a fn). `target` is the id
+    /// of the nearest enclosing return-target frame at capture time. Applying it
+    /// raises `AplError::Return(value, target)`, which propagates outward until
+    /// the frame with that id catches it. `None` = captured with no enclosing
+    /// function (only constructible transiently; binding/applying reports
+    /// "Call to return without a function call" like the oracle).
+    Escape {
+        target: Option<usize>,
+    },
     /// A first-class **symbol** value (Kap `APLSymbol` wrapping a `Symbol`).
     /// Created by the `'foo` literal and `int:intern`; read by `int:symbolName`.
     /// `namespace` is `None` for the default namespace, `Some("keyword")` for the
@@ -144,6 +155,9 @@ impl APLValue {
             APLValue::Deferred { .. } => "deferred",
             APLValue::UserFn { .. } => "lambda",
             APLValue::UserOp { .. } => "operator",
+            // A captured return escape reports as a function (it only ever
+            // appears where a function value is expected: `S ⇐ →`, `λ→`).
+            APLValue::Escape { .. } => "lambda",
             APLValue::Symbol { .. } => "symbol",
             APLValue::Map(_) => "map",
         }
@@ -178,6 +192,7 @@ impl APLValue {
             }
             APLValue::Deferred { .. } => "<deferred>".to_string(),
             APLValue::UserFn { .. } => "<function>".to_string(),
+            APLValue::Escape { .. } => "<function>".to_string(),
             APLValue::UserOp { .. } => "<operator>".to_string(),
             APLValue::Symbol { name, namespace } => match namespace {
                 Some(ns) if ns == "keyword" => format!(":{}", name),
@@ -209,6 +224,7 @@ impl APLValue {
             }
             APLValue::Deferred { .. } => "<deferred>".to_string(),
             APLValue::UserFn { .. } => "<function>".to_string(),
+            APLValue::Escape { .. } => "<function>".to_string(),
             APLValue::UserOp { .. } => "<operator>".to_string(),
             APLValue::Symbol { name, namespace } => match namespace {
                 Some(ns) if ns == "keyword" => format!(":{}", name),
@@ -266,6 +282,7 @@ impl APLValue {
             }
             APLValue::Deferred { .. } => "<deferred>".to_string(),
             APLValue::UserFn { .. } => "<function>".to_string(),
+            APLValue::Escape { .. } => "<function>".to_string(),
             APLValue::UserOp { .. } => "<operator>".to_string(),
             APLValue::List(a) => {
                 let parts: Vec<String> = a.elements().iter().map(|e| e.format_display()).collect();
@@ -300,6 +317,7 @@ impl APLValue {
             APLValue::List(a) => Self::format_conform_array(a, true),
             APLValue::Deferred { .. } => "<deferred>".to_string(),
             APLValue::UserFn { .. } => "<function>".to_string(),
+            APLValue::Escape { .. } => "<function>".to_string(),
             APLValue::UserOp { .. } => "<operator>".to_string(),
             APLValue::Symbol { name, namespace } => match namespace {
                 Some(ns) if ns == "keyword" => format!(":{}", name),
@@ -823,6 +841,10 @@ impl NamespaceRegistry {
 /// module-level namespace table, shared (via `Rc`) across all scopes.
 #[derive(Debug, Default, Clone)]
 pub struct Environment {
+    /// Unique scope id. Tags `AplError::Return` signals with their target frame
+    /// (Kotlin `ReturnValue` carries its `returnEnvironment`). `0` = never
+    /// assigned (a `Default`-built value not yet passed through `child`/`new_root`).
+    pub id: usize,
     /// Lexical (block-scope) bindings: key = (name, namespace). Values are shared refs.
     /// Holds dfn params (`⍵`/`⍺`), block locals, and operator operands — NOT module symbols.
     pub symbols: RefCell<HashMap<(String, Option<String>), AplRef<APLValue>>>,
@@ -860,10 +882,22 @@ pub struct Environment {
     pub is_return_target: std::cell::Cell<bool>,
 }
 
+/// Process-wide counter issuing unique [`Environment`] ids. Ids tag
+/// `AplError::Return` signals with their target frame (Kotlin `ReturnValue`
+/// carries its `returnEnvironment`; each call frame only catches its own).
+static ENV_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Issue a fresh environment id (`0` is reserved for `Default`-built values,
+/// which always receive a real id in `child`/`new_root`).
+pub fn next_env_id() -> usize {
+    ENV_ID_COUNTER.fetch_add(1, AtomicOrdering::Relaxed) as usize
+}
+
 impl Environment {
     /// Build a child lexical scope that inherits the same shared namespace registry.
     pub fn child(parent: &Rc<Environment>) -> Rc<Environment> {
         Rc::new(Environment {
+            id: next_env_id(),
             symbols: RefCell::new(HashMap::new()),
             function_defs: parent.function_defs.clone(),
             unassigned_locals: RefCell::new(HashSet::new()),
@@ -881,7 +915,9 @@ impl Environment {
     /// (no stdlib) already has `⎕A → "ABCDEFGHIJKLMNOPQRSTUVWXYZ"` and
     /// `⎕A ← 5` errors "Assignment to constant variable: kap:⎕A" (oracle-verified).
     pub fn new_root() -> Rc<Environment> {
-        let env = Rc::new(Environment::default());
+        let mut root = Environment::default();
+        root.id = next_env_id();
+        let env = Rc::new(root);
         {
             let reg = &env.ns_registry;
             for (name, val) in [
@@ -975,12 +1011,14 @@ pub enum AplError {
     /// evaluating a well-formed expression. Position is not tracked for these.
     #[error("error: {0}")]
     Runtime(String),
-    /// Control-flow return signal raised by the `→` (branch/return) primitive. It is
-    /// caught by the enclosing user-function frame, which returns the wrapped value.
-    /// If it escapes to the top level (no enclosing function), the evaluator converts
-    /// it to a "Call to return without a function call" runtime error.
+    /// Control-flow return signal raised by the `→` (branch/return) primitive.
+    /// Carries the id of the frame it returns from (Kotlin `ReturnValue` carries
+    /// its `returnEnvironment`): a frame only catches a signal targeted at its own
+    /// env id, all others re-raise it outward. `None` = raised with no enclosing
+    /// function — it propagates to the top level, which converts it to a "Call to
+    /// return without a function call" runtime error.
     #[error("return: {0:?}")]
-    Return(AplRef<APLValue>),
+    Return(AplRef<APLValue>, Option<usize>),
 }
 
 impl AplError {

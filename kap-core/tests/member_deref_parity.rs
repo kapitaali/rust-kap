@@ -68,6 +68,7 @@ fn format_value(v: &APLValue) -> String {
         APLValue::Map(_) => "map".to_string(),
         APLValue::Deferred { .. } => "<deferred>".to_string(),
         APLValue::UserFn { .. } => "<fn>".to_string(),
+        APLValue::Escape { .. } => "<fn>".to_string(),
         APLValue::UserOp { .. } => "<op>".to_string(),
     }
 }

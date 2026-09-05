@@ -170,7 +170,7 @@ fn run(session: &Session, src: &str) {
                 eprintln!("parse error at {}:{}: {}", line, col, msg)
             }
             AplError::Runtime(msg) => eprintln!("error: {}", msg),
-            AplError::Return(_) => eprintln!("→: Call to return without a function call"),
+            AplError::Return(..) => eprintln!("→: Call to return without a function call"),
         },
     }
 }
