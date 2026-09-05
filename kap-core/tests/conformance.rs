@@ -298,9 +298,9 @@ fn curated_kap_parity() {
         ("1 1 0 1 1 ⊆ 1 2 3 4 5", "((1) (2 3) (4) (5))"),
         ("0 1 0 1 0 ⊆ 1 2 3 4 5", "((1) (2 3) (4 5))"),
         // Pick `⊇` (Phase 6 — mirrors Kotlin PickAPLFunction / PickResultValue)
-        ("0 ⊇ 1 2 3 4 5", "(1)"),
-        ("2 ⊇ 1 2 3 4 5", "(3)"),
-        ("¯1 ⊇ 1 2 3 4 5", "(5)"),
+        ("0 ⊇ 1 2 3 4 5", "1"),
+        ("2 ⊇ 1 2 3 4 5", "3"),
+        ("¯1 ⊇ 1 2 3 4 5", "5"),
         ("1 0 2 ⊇ 10 20 30 40", "(20 10 30)"),
         // Builtins (ambivalent max/min, arithmetic) — Phase 6
         // Oracle: `⌈3.2` → `4` typed `kap:integer` (whole results normalise to Long).
@@ -314,6 +314,15 @@ fn curated_kap_parity() {
         ("~ 0", "1"),
         ("1 2 3 ∊ 1 2 3 4", "(1 1 1)"), // membership is element-wise (returns vector)
         ("5 ∊ 1 2 3 4", "0"),
+        // Rank-0/enclosed left → scalar result (oracle: `(⊂1 2) ∊ 10 11 12` → `0`)
+        ("(⊂1 2) ∊ 10 11 12", "0"),
+        ("(⊂1 2) ∊ 10.1 11.1 12.1", "0"),
+        ("(⊂\"bar\") ∊ \"foo\" \"bar\"", "1"),
+        // Monadic × on doubles returns longs (oracle: `× 1.1 ¯1.6 0.0` → `⟨1 -1 0⟩`)
+        ("× 1.1 ¯1.6 0.0", "(1 -1 0)"),
+        ("× 0.5", "1"),
+        // Scalar ⊇ index → scalar result (oracle: `2 ⊇ 10 20 30` → `30`)
+        ("1 + (0 ⊇ 2 3 4 5 6 7)", "3"),
         ("⍋ 3 1 4 2", "(1 3 0 2)"), // grade-up (monadic): 0-based indices ascending
         // Bracket indexing (pick + multi-axis access) — dyadic ⍴ required
         ("(10 20 30 40)[2]", "30"),

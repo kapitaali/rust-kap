@@ -9384,6 +9384,11 @@ impl Engine {
             }
             out.push(Rc::new(b_elems[flat].as_ref().clone()));
         }
+        if a_dims.is_empty() && out.len() == 1 {
+            // Scalar / rank-0 index → scalar result, not a 0-d wrapper
+            // (oracle: `2 ⊇ 10 20 30` → `30`, `1 + (0 ⊇ 2 3 4 5 6 7)` → `3`).
+            return Ok(out.pop().unwrap());
+        }
         Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
             a_dims,
             ArrayData::Nested(out),
@@ -13624,8 +13629,20 @@ impl Engine {
             elems_b.iter().any(|e| Self::deep_equal(needle, e.as_ref()))
         };
         let mut out = Vec::new();
+        let mut left_dims: Option<Vec<usize>> = None;
         match a.as_ref() {
             APLValue::Array(aa) => {
+                if aa.rank() == 0 {
+                    // Rank-0 (e.g. enclosed `(⊂1 2)`) left → scalar result, same
+                    // as a scalar left (oracle: `(⊂1 2) ∊ 10 11 12` → `0`).
+                    let hit = match aa.elements().first() {
+                        Some(e) => contains(e.as_ref()),
+                        None => false,
+                    };
+                    let bit = if hit { 1 } else { 0 };
+                    return Ok(Rc::new(APLValue::Number(KapNumber::Long(bit))));
+                }
+                left_dims = Some(aa.dimensions.clone());
                 for e in aa.elements() {
                     let hit = if contains(e.as_ref()) { 1 } else { 0 };
                     out.push(Rc::new(APLValue::Number(KapNumber::Long(hit))));
@@ -13640,8 +13657,10 @@ impl Engine {
                 return Ok(Rc::new(APLValue::Number(KapNumber::Long(hit))));
             }
         }
+        // Result keeps the left argument's shape (rank-0/scalar returned above).
+        let dims = left_dims.unwrap_or_else(|| vec![out.len()]);
         Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-            vec![out.len()],
+            dims,
             ArrayData::Nested(out),
         )))))
     }

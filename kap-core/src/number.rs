@@ -1026,7 +1026,7 @@ impl KapNumber {
         use KapNumber::*;
         match self {
             Long(v) => Long(if *v > 0 { 1 } else if *v < 0 { -1 } else { 0 }),
-            Double(v) => Double(if *v > 0.0 { 1.0 } else if *v < 0.0 { -1.0 } else { 0.0 }),
+            Double(v) => Long(if *v > 0.0 { 1 } else if *v < 0.0 { -1 } else { 0 }),
             BigInt(v) => Long(if *v > num_bigint::BigInt::from(0) { 1 } else if *v < num_bigint::BigInt::from(0) { -1 } else { 0 }),
             Rational(v) => Long(if *v.numer() > num_bigint::BigInt::from(0) { 1 } else if *v.numer() < num_bigint::BigInt::from(0) { -1 } else { 0 }),
             Complex(r, i) => {
