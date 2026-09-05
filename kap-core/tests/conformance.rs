@@ -263,7 +263,7 @@ fn curated_kap_parity() {
         ("3 (×) 4", "12"),
         // Iota (1-based, just fixed)
         ("⍳5", "(0 1 2 3 4)"),
-        ("⍳0", "()"),
+        ("⍳0", "⍬"),
         // Control flow (Phase 8)
         ("if (1 < 2) { 42 }", "42"),
         ("if (1 > 2) { 42 } else { 7 }", "7"),
@@ -881,7 +881,7 @@ fn curated_kap_parity() {
         ("≡⊂⊂ 5", "0"),
         // --- `⊂` enclose: primitive returns unchanged, non-primitive becomes 0-d box ---
         ("⊂5", "5"),
-        ("⍴⊂5", "()"),
+        ("⍴⊂5", "⍬"),
         // --- `⍮` pair: monadic `⍮x`=`⟨x⟩`, dyadic `a ⍮ b`=`⟨a b⟩` ---
         ("⍮5", "(5)"),
         ("⍮1 2 3", "((1 2 3))"),

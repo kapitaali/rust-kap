@@ -420,7 +420,12 @@ impl<'a> Parser<'a> {
                 }
                 Token::APLNullSym => {
                     self.advance();
-                    left_args.push(Instr::Empty);
+                    // `⍬` is Kotlin `APLNullValue`: a rank-1 EMPTY array
+                    // (dimensions [0]), NOT the nil singleton (`null` keyword
+                    // → `APLNilValue`). Strand it as an empty vector so
+                    // `1 ⍬ 2` → `(1 ⍬ 2)` (3-element nested) and bare `⍬`
+                    // evaluates to the empty array (`⍴⍬` → `(0)`, `⍬+5` → `⍬`).
+                    left_args.push(Instr::Array { elements: vec![] });
                 }
                 // P1-M7 (parser.kt:1014–1015 IfToken/WhileToken → processIf/processWhile):
                 // control-flow keyword blocks are plain INSTRUCTIONS. They are
@@ -5398,7 +5403,8 @@ impl<'a> Parser<'a> {
             }
             Token::APLNullSym => {
                 self.advance();
-                Ok(Instr::Empty)
+                // `⍬` = empty vector (see the strand-site comment above).
+                Ok(Instr::Array { elements: vec![] })
             }
             Token::LambdaToken => {
                 // `λ` — Kap's "create function reference" operator (Kotlin

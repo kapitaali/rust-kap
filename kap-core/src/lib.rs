@@ -57,7 +57,17 @@ pub enum APLValue {
     /// `typeof (1 2 3)` → `kap:array`. Destructuring assignment `(a;b;c)←RHS`
     /// requires the RHS to be a list, not an array.
     List(AplRef<KapArray>),
+    /// The APL **empty-array** value (Kotlin `APLNullValue : APLArray`, source
+    /// spelling `⍬`). Rank-1, zero elements. Displays as `⍬`. This is NOT the
+    /// nil singleton: `⍬≡null` → `0`, `⍴⍬` → `(0)` but `⍴null` → `⍬`.
     Null,
+    /// The APL **nil** singleton (Kotlin `APLNilValue : APLSingleValue`, source
+    /// spelling the `null` keyword). A rank-0 scalar with its own class
+    /// (`typeof null` → `kap:null`). Displays as `null` (bare, and inside
+    /// strands: `1 null 2` → `(1 null 2)`). Dyadic `+ - × ÷ ⌊ ⌈` treat it as a
+    /// missing operand (identity / other-side / error per function); every
+    /// other scalar function errors on it.
+    Nil,
     /// An unevaluated expression (lazy thunk). `instr` is the tree; `env` is the lexical
     /// environment captured at the point of deferral.
     Deferred { instr: AplRef<ast::Instr>, env: AplRef<Environment> },
@@ -105,6 +115,10 @@ impl APLValue {
         matches!(self, APLValue::Null)
     }
 
+    pub fn is_nil(&self) -> bool {
+        matches!(self, APLValue::Nil)
+    }
+
     /// Kap class name for the `typeof` builtin (Kotlin `SystemClass` names:
     /// `INTEGER`, `FLOAT`, `COMPLEX`, `RATIONAL`, `CHAR`, `ARRAY`, `SYMBOL`,
     /// `LAMBDA_FN`, `LIST`, `MAP`, …). Returns the bare class name; the `typeof`
@@ -126,6 +140,7 @@ impl APLValue {
             APLValue::Array(_) => "array",
             APLValue::List(_) => "list",
             APLValue::Null => "null",
+            APLValue::Nil => "null",
             APLValue::Deferred { .. } => "deferred",
             APLValue::UserFn { .. } => "lambda",
             APLValue::UserOp { .. } => "operator",
@@ -147,6 +162,7 @@ impl APLValue {
             APLValue::Char(c) => c.to_string(),
             APLValue::Str(s) => s.clone(),
             APLValue::Null => "null".to_string(),
+            APLValue::Nil => "null".to_string(),
             APLValue::Array(a) => {
                 // Kap vectors render with parentheses, not brackets (brackets are
                 // reserved for array indexing). Simple 1-D vector render; nested
@@ -184,6 +200,7 @@ impl APLValue {
             APLValue::Char(c) => c.to_string(),
             APLValue::Str(s) => s.clone(),
             APLValue::Null => String::new(),
+            APLValue::Nil => "null".to_string(),
             APLValue::Array(a) => {
                 a.elements().iter().map(|e| e.format_plain()).collect()
             }
@@ -218,8 +235,15 @@ impl APLValue {
             APLValue::Char(c) => format!("@{}", c),
             APLValue::Str(s) => format!("\"{}\"", escape_string(s)),
             APLValue::Null => "⍬".to_string(),
+            APLValue::Nil => "null".to_string(),
             APLValue::Array(a) => {
                 let elems = a.elements();
+                // An empty array displays as `⍬` (Real Kap: `↓⍬`, `⍬ ∩ ⍳10`,
+                // `⊃⍬` all print `⍬`, and `⍬` itself is now a real empty
+                // rank-1 array rather than Null).
+                if elems.is_empty() && a.dimensions.len() <= 1 {
+                    return "⍬".to_string();
+                }
                 // A 1-D vector of characters is a "string value" in Real Kap and
                 // renders as a *quoted string* (`@a @b @c` -> "abc"), not as a
                 // parenthesised `@a @b @c` list. Only the scalar Char gets `@`.
@@ -271,6 +295,7 @@ impl APLValue {
             APLValue::Char(c) => c.to_string(),
             APLValue::Str(s) => s.clone(),
             APLValue::Null => "⍬".to_string(),
+            APLValue::Nil => "null".to_string(),
             APLValue::Array(a) => Self::format_conform_array(a, false),
             APLValue::List(a) => Self::format_conform_array(a, true),
             APLValue::Deferred { .. } => "<deferred>".to_string(),
@@ -586,6 +611,7 @@ impl APLValue {
                 Some(ea.len().cmp(&eb.len()))
             }
             (Null, Null) => Some(Equal),
+            (Nil, Nil) => Some(Equal),
             (Symbol { name: n1, namespace: ns1 }, Symbol { name: n2, namespace: ns2 }) => {
                 Some(ns1.cmp(ns2).then(n1.cmp(n2)))
             }
@@ -601,7 +627,7 @@ impl APLValue {
                         Symbol { .. } => Some(6),
                         Str(_) | Array(_) => Some(7),
                         List(_) => Some(9),
-                        Null => Some(11),
+                        Null | Nil => Some(11),
                         _ => None,
                     }
                 };
@@ -860,12 +886,13 @@ impl Environment {
                 reg.declare_const("kap", name);
                 reg.ns_define("kap", name, Rc::new(APLValue::Str(val.to_string())));
             }
-            // Kap's `null` symbol (Kotlin `APLNullValue`) — the APL null, equivalent
-            // to `⍬` (the port's `APLValue::Null`). `fhelp.kap` / `standard-lib.kap`
-            // reference it (`fhelpFn ← null`). Bind it as a constant to Null so the
-            // symbol resolves like the oracle (`null` and `⍬` both evaluate to 0).
+            // Kap's `null` keyword (Kotlin `NilToken` → `APLNilValue`, the nil
+            // singleton — NOT `⍬`, which is the empty array `APLNullValue`).
+            // `fhelp.kap` / `standard-lib.kap` reference it (`fhelpFn ← null`).
+            // Bind it as a constant to Nil so the symbol resolves like the
+            // oracle (`null` → `null`, `⍬` → `⍬`, `⍬≡null` → `0`).
             reg.declare_const("default", "null");
-            reg.ns_define("default", "null", Rc::new(APLValue::Null));
+            reg.ns_define("default", "null", Rc::new(APLValue::Nil));
         }
         env
     }

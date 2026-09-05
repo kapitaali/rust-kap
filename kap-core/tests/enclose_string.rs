@@ -48,7 +48,9 @@ fn enclose_primitive_still_passthrough() {
     // Numbers and chars still pass through unchanged.
     assert_eq!(run(&e, "⊂5").unwrap(), "5");
     assert_eq!(run(&e, "⊂@a").unwrap(), "a");
-    assert_eq!(run(&e, "⊂⍬").unwrap(), "(null)");
+    // `⊂⍬` boxes the (now real) empty array: 0-D box whose element renders
+    // `()` in plain format → `"(())"`. (Display form is `(⍬)`.)
+    assert_eq!(run(&e, "⊂⍬").unwrap(), "(())");
 }
 
 #[test]

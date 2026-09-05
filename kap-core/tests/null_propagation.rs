@@ -27,7 +27,13 @@ use kap_core::KapNumber;
 fn show(v: &APLValue) -> String {
     match v {
         APLValue::Null => "⍬".to_string(),
+        APLValue::Nil => "null".to_string(),
         APLValue::Array(a) => {
+            // `⍬` is now a real rank-1 empty array (not Null): render it as
+            // `⍬`, matching `format_conform`/`format_display`.
+            if a.element_count() == 0 && a.dimensions.len() <= 1 {
+                return "⍬".to_string();
+            }
             let elems: Vec<String> = a.elements().iter().map(|e| show(e)).collect();
             if a.dimensions.len() > 1 {
                 format!("[{}]", elems.join(" "))
@@ -139,4 +145,123 @@ fn shape_of_null_is_one_element_zero() {
     let e = Engine::new();
     let r = run(&e, "⍴⍬").unwrap();
     assert_eq!(r, "(0)", "shape of ⍬ is a 1-element [0] vector; got {:?}", r);
+}
+
+// --- `null` (nil singleton) vs `⍬` (empty array), 2026-09-05 ---
+//
+// Kotlin ground truth: `⍬` → `APLNullValue` (rank-1 empty array),
+// the `null` keyword → `NilToken` → `APLNilValue` (rank-0 singleton).
+// Every case below was verified against `kap-jvm-text` before coding.
+
+#[test]
+fn nil_is_distinct_from_empty() {
+    let e = Engine::new();
+    assert_eq!(run(&e, "null").unwrap(), "null");
+    assert_eq!(run(&e, "⍬").unwrap(), "⍬");
+    assert_eq!(run(&e, "⍬≡null").unwrap(), "0");
+    assert_eq!(run(&e, "null≡null").unwrap(), "1");
+    assert_eq!(run(&e, "⍬≡⍬").unwrap(), "1");
+    assert_eq!(run(&e, "≢⍬").unwrap(), "0");
+    assert_eq!(run(&e, "≢null").unwrap(), "1");
+    assert_eq!(run(&e, "⍴null").unwrap(), "⍬");
+    assert_eq!(run(&e, "1 null 2").unwrap(), "(1 null 2)");
+}
+
+#[test]
+fn nil_arithmetic_identity() {
+    // `+`: nil+nil → 0; one-sided nil passes the other side through.
+    // `×`: nil×nil → 1; one-sided nil passes through.
+    // `-`/`÷`: nil on the right passes numbers/arrays through.
+    let e = Engine::new();
+    for (expr, expected) in [
+        ("null+null", "0"),
+        ("null+5", "5"),
+        ("5+null", "5"),
+        ("null×null", "1"),
+        ("null×5", "5"),
+        ("5×null", "5"),
+        ("5-null", "5"),
+        ("5÷null", "5"),
+        ("(1 2 3)+null", "(1 2 3)"),
+        ("null+(1 2 3)", "(1 2 3)"),
+        ("(1 2 3)-null", "(1 2 3)"),
+        ("(1 2 3)×null", "(1 2 3)"),
+        ("(1 2 3)÷null", "(1 2 3)"),
+        ("\"ab\"+null", "ab"),
+        ("null+\"ab\"", "ab"),
+        ("@a+null", "a"),
+        ("null+@a", "a"),
+        ("(1 null 2)+(10 20 30)", "(11 20 32)"),
+    ] {
+        assert_eq!(run(&e, expr).unwrap(), expected, "{}", expr);
+    }
+}
+
+#[test]
+fn nil_arithmetic_errors() {
+    // `-`/`÷` with nil on the left, nil beside Char/Str under `-`,
+    // and monadic math on nil all error (oracle-verified).
+    let e = Engine::new();
+    for expr in [
+        "null-5",
+        "null-null",
+        "\"ab\"-null",
+        "null-\"ab\"",
+        "@a-null",
+        "null-@a",
+        "null÷5",
+        "null÷null",
+        "+null",
+        "-null",
+        "×null",
+        "2⋆null",
+        "null⋆2",
+        "5|null",
+    ] {
+        assert!(run(&e, expr).is_err(), "expected {} to error", expr);
+    }
+}
+
+#[test]
+fn nil_minmax_identity() {
+    // `⌊`/`⌈`: one-sided nil returns the other side; both-nil errors.
+    let e = Engine::new();
+    for (expr, expected) in [
+        ("null⌊5", "5"),
+        ("5⌊null", "5"),
+        ("null⌈5", "5"),
+        ("5⌈null", "5"),
+    ] {
+        assert_eq!(run(&e, expr).unwrap(), expected, "{}", expr);
+    }
+    assert!(run(&e, "null⌊null").is_err());
+    assert!(run(&e, "null⌈null").is_err());
+}
+
+#[test]
+fn nil_equality_and_ordering() {
+    // `=`/`≠` are value-like on nil; ordering throws.
+    let e = Engine::new();
+    for (expr, expected) in [
+        ("null=null", "1"),
+        ("null≠null", "0"),
+        ("null=5", "0"),
+        ("5=null", "0"),
+        ("null≠5", "1"),
+    ] {
+        assert_eq!(run(&e, expr).unwrap(), expected, "{}", expr);
+    }
+    for expr in ["null<5", "5<null", "null<null"] {
+        assert!(run(&e, expr).is_err(), "expected {} to error", expr);
+    }
+}
+
+#[test]
+fn nil_other_builtins() {
+    // Enclose/disclose/ravel/tally with nil (all oracle-verified).
+    let e = Engine::new();
+    assert_eq!(run(&e, "⊂null").unwrap(), "null");
+    assert_eq!(run(&e, "⊃null").unwrap(), "null");
+    assert_eq!(run(&e, ",null").unwrap(), "(null)");
+    assert_eq!(run(&e, "≢null").unwrap(), "1");
 }

@@ -1244,6 +1244,7 @@ impl Engine {
             APLValue::Str(s) => !s.is_empty(),
             APLValue::Char(_) => true,
             APLValue::Null => true,
+            APLValue::Nil => true,
             APLValue::UserFn { .. } => true,
             APLValue::UserOp { .. } => true,
             APLValue::Deferred { .. } => false,
@@ -2247,10 +2248,23 @@ impl Engine {
             "+" => {
                 // Ambivalent: monadic `+ x` = identity (return x); dyadic = add.
                 match left_val {
-                    None => Ok(right_val),
+                    None => {
+                        // Monadic `+null` errors (oracle: "Function does not
+                        // support arguments of type: null"); `+⍬` → `⍬` flows
+                        // through the Array path below via scalar1/identity.
+                        if matches!(right_val.as_ref(), APLValue::Nil) {
+                            return Err(AplError::runtime(
+                                "+: Function does not support arguments of type: null".into(),
+                            ));
+                        }
+                        Ok(right_val)
+                    }
                     Some(ref lv) => {
                         if let Some(r) = self.compute_char_op(lv.as_ref(), right_val.as_ref(), true)
                         {
+                            return r;
+                        }
+                        if let Some(r) = self.nil_dyadic(lv.as_ref(), right_val.as_ref(), "+") {
                             return r;
                         }
                         self.num2(left_val, right_val, |a, b| a.add(b), "+")
@@ -2265,6 +2279,9 @@ impl Engine {
                         if let Some(r) =
                             self.compute_char_op(lv.as_ref(), right_val.as_ref(), false)
                         {
+                            return r;
+                        }
+                        if let Some(r) = self.nil_dyadic(lv.as_ref(), right_val.as_ref(), "-") {
                             return r;
                         }
                         self.num2(left_val, right_val, |a, b| a.sub(b), "-")
@@ -2984,7 +3001,12 @@ impl Engine {
             }
             "÷" => match left_val {
                 None => self.scalar1(right_val, |x| x.recip(), "÷"),
-                Some(_) => self.num2(left_val, right_val, |a, b| a.div(b), "÷"),
+                Some(ref lv) => {
+                    if let Some(r) = self.nil_dyadic(lv.as_ref(), right_val.as_ref(), "÷") {
+                        return r;
+                    }
+                    self.num2(left_val, right_val, |a, b| a.div(b), "÷")
+                }
             },
             // DUAL-NATURE `/ ⌿ \ ⍀`: Kotlin registers each as BOTH a native function
             // (value-left select/expand) AND a native operator (reduce/scan). The
@@ -3255,7 +3277,12 @@ impl Engine {
             },
             "×" => match left_val {
                 None => self.scalar1(right_val, |x| x.signum(), "×"),
-                Some(_) => self.num2(left_val, right_val, |a, b| a.mul(b), "×"),
+                Some(ref lv) => {
+                    if let Some(r) = self.nil_dyadic(lv.as_ref(), right_val.as_ref(), "×") {
+                        return r;
+                    }
+                    self.num2(left_val, right_val, |a, b| a.mul(b), "×")
+                }
             },
             "⍟" | "log" => match left_val {
                 None => self.scalar1(right_val, |x| x.nat_log(), "⍟"),
@@ -4969,6 +4996,75 @@ impl Engine {
         self.num2_impl(left_val, right_val, &f, sym)
     }
 
+    /// Nil-operand rule for dyadic `+ - × ÷` (Kotlin per-function `fnOther` nil
+    /// arms in math_functions.kt: Add 621-630, Sub 711-717, Mul 787-794,
+    /// Div 874-879). Returns `Some(result)` when either side is `Nil`;
+    /// `None` when neither is, so callers fall through to the numeric path.
+    ///
+    /// Oracle-verified (2026-09-05):
+    /// - `+`: nil+nil → `0`; one-sided nil passes the other side through
+    ///   (numbers, chars, strings, whole arrays: `(1 2 3)+null` → `(1 2 3)`).
+    /// - `×`: nil+nil → `1`; one-sided nil passes the other side through.
+    /// - `-`/`÷`: nil+nil → incompatible-arg error; nil on the LEFT errors
+    ///   (`null-5`, `null-(1 2 3)`); nil on the RIGHT passes numbers/arrays
+    ///   through (`5-null` → `5`) but errors beside Char/Str (`"ab"-null`,
+    ///   `@a-null`).
+    fn nil_dyadic(
+        &self,
+        left: &APLValue,
+        right: &APLValue,
+        sym: &str,
+    ) -> Option<Result<AplRef<APLValue>, AplError>> {
+        let l_nil = matches!(left, APLValue::Nil);
+        let r_nil = matches!(right, APLValue::Nil);
+        if !l_nil && !r_nil {
+            return None;
+        }
+        let incompat = || {
+            AplError::runtime(format!(
+                "{}: Incompatible argument types. Left arg: {}, Right arg: {}",
+                sym,
+                left.class_name(),
+                right.class_name()
+            ))
+        };
+        if l_nil && r_nil {
+            return Some(match sym {
+                "+" => Ok(Rc::new(APLValue::Number(KapNumber::Long(0)))),
+                "×" => Ok(Rc::new(APLValue::Number(KapNumber::Long(1)))),
+                _ => Err(incompat()),
+            });
+        }
+        let (other, nil_on_left) = if l_nil { (right, true) } else { (left, false) };
+        let other_is_passable = matches!(
+            other,
+            APLValue::Number(_) | APLValue::Char(_) | APLValue::Str(_) | APLValue::Array(_) | APLValue::List(_)
+        );
+        Some(match sym {
+            "+" | "×" => {
+                if other_is_passable {
+                    Ok(Rc::new(other.clone()))
+                } else {
+                    Err(incompat())
+                }
+            }
+            _ => {
+                // `-`/`÷`: a Nil left always errors; a Nil right passes
+                // numbers and whole arrays through, errors beside Char/Str.
+                if nil_on_left {
+                    Err(incompat())
+                } else if matches!(
+                    other,
+                    APLValue::Number(_) | APLValue::Array(_) | APLValue::List(_)
+                ) {
+                    Ok(Rc::new(other.clone()))
+                } else {
+                    Err(incompat())
+                }
+            }
+        })
+    }
+
     fn num2_impl(
         &self,
         left_val: Option<AplRef<APLValue>>,
@@ -4984,6 +5080,18 @@ impl Engine {
         // the monadic case.
         if matches!(a.as_ref(), APLValue::Null) || matches!(right_val.as_ref(), APLValue::Null) {
             return Ok(Rc::new(APLValue::Null));
+        }
+        // Nil elements (direct operands reach here via nested-cell recursion or
+        // reduce/scan internals; direct dyadic operands are intercepted by the
+        // `nil_dyadic` pre-check in the `+ - × ÷` arms). Other functions
+        // (`| ⋆ √ ⍟` …) fall through to the arms below and error on Nil,
+        // matching the oracle (`2⋆null` errors).
+        if matches!(sym, "+" | "-" | "×" | "÷")
+            && (matches!(a.as_ref(), APLValue::Nil) || matches!(right_val.as_ref(), APLValue::Nil))
+        {
+            if let Some(r) = self.nil_dyadic(a.as_ref(), right_val.as_ref(), sym) {
+                return r;
+            }
         }
         match (a.as_ref(), right_val.as_ref()) {
             (APLValue::Number(x), APLValue::Number(y)) => {
@@ -5051,6 +5159,17 @@ impl Engine {
                 for e in xa.elements() {
                     if let APLValue::Number(x) = e.as_ref() {
                         out.push(Rc::new(APLValue::Number(f(x, y))));
+                    } else if matches!(e.as_ref(), APLValue::Nil)
+                        && matches!(sym, "+" | "-" | "×" | "÷")
+                    {
+                        // Nil strand element under `+ - × ÷`: per-cell nil rule
+                        // (`(1 null 2)+10` → `(11 10 12)`; `-`/`÷` with nil on
+                        // the left errors the whole operation).
+                        if let Some(r) =
+                            self.nil_dyadic(e.as_ref(), &APLValue::Number(y.clone()), sym)
+                        {
+                            out.push(r?);
+                        }
                     }
                 }
                 Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
@@ -5063,6 +5182,17 @@ impl Engine {
                 for e in xa.elements() {
                     if let APLValue::Number(x) = e.as_ref() {
                         out.push(Rc::new(APLValue::Number(f(y, x))));
+                    } else if matches!(e.as_ref(), APLValue::Nil)
+                        && matches!(sym, "+" | "-" | "×" | "÷")
+                    {
+                        // Nil strand element on the right: `(10 20 30)` with a
+                        // nil cell under `10+…` — nil on the right passes the
+                        // number through for all four (`-`/`÷` included).
+                        if let Some(r) =
+                            self.nil_dyadic(&APLValue::Number(y.clone()), e.as_ref(), sym)
+                        {
+                            out.push(r?);
+                        }
                     }
                 }
                 Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
@@ -5211,6 +5341,11 @@ impl Engine {
         match right_val.as_ref() {
             // `-⍬` → `⍬` (oracle-verified).
             APLValue::Null => Ok(Rc::new(APLValue::Null)),
+            // Monadic `-null` errors (oracle: "Function does not support
+            // arguments of type: null").
+            APLValue::Nil => Err(AplError::runtime(
+                "-: Function does not support arguments of type: null".into(),
+            )),
             APLValue::Number(x) => Ok(Rc::new(APLValue::Number(x.neg()))),
             APLValue::Array(a) => {
                 let mut out = Vec::with_capacity(a.element_count());
@@ -5239,6 +5374,25 @@ impl Engine {
         // `⍬ <op> X` and `X <op> ⍬` propagate `⍬` (oracle-verified for `=` `≠`).
         if matches!(a.as_ref(), APLValue::Null) || matches!(right_val.as_ref(), APLValue::Null) {
             return Ok(Rc::new(APLValue::Null));
+        }
+        // Nil (`null` singleton) in `=`/`≠` is value-like: `null=null` → `1`,
+        // `null=5` / `5=null` → `0` (and symmetrically `≠`). Ordering
+        // operators (`< ≤ > ≥`) throw on nil (oracle: "Cannot compare values
+        // of type: null to integer").
+        if matches!(a.as_ref(), APLValue::Nil) || matches!(right_val.as_ref(), APLValue::Nil) {
+            if matches!(sym, "=" | "≠") {
+                let eq = matches!(a.as_ref(), APLValue::Nil)
+                    && matches!(right_val.as_ref(), APLValue::Nil);
+                let r = if (sym == "=") == eq { 1 } else { 0 };
+                return Ok(Rc::new(APLValue::Number(KapNumber::Long(r))));
+            } else {
+                return Err(AplError::runtime(format!(
+                    "{}: Cannot compare values of type: {} to {}",
+                    sym,
+                    a.class_name(),
+                    right_val.class_name()
+                )));
+            }
         }
         // `=`/`≠` use value-equality (Kotlin `numericCompareEquals` / `compareEqualsComplexToSingleValue`):
         // a complex with im≠0 only equals an identical complex, and never errors. The
@@ -5301,6 +5455,17 @@ impl Engine {
                 (APLValue::Char(a), APLValue::Char(b)) => {
                     Some(pred((*a as i64).cmp(&(*b as i64))))
                 }
+                // Nil cells: `=`/`≠` are value-like (`null=null` → `1` for `=`,
+                // one-sided nil → `0` for `=` / `1` for `≠`); ordering falls
+                // through to `None` → the Kotlin-class error below.
+                (APLValue::Nil, APLValue::Nil) => Some(sym == "="),
+                (APLValue::Nil, _) | (_, APLValue::Nil) => {
+                    if matches!(sym, "=" | "≠") {
+                        Some(sym == "≠")
+                    } else {
+                        None
+                    }
+                }
                 _ => None,
             }
         };
@@ -5337,6 +5502,15 @@ impl Engine {
             _ => 1,
         };
         let n = l_len.max(r_len);
+        if l_len == 0 || r_len == 0 {
+            // An empty side yields an empty result (oracle: `⍬=5` → `⍬`,
+            // `5<⍬` → `⍬`). Guard before indexing: `v[0]` on a 0-element
+            // side would panic.
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![0],
+                ArrayData::Long(vec![]),
+            )))));
+        }
         if l_len != 1 && r_len != 1 && l_len != r_len {
             return Err(AplError::runtime(format!(
                 "{}: Arguments must be of the same dimension, or one of the arguments must be a scalar. aDimensions=[{}], bDimensions=[{}]",
@@ -5743,6 +5917,54 @@ impl Engine {
         )))))
     }
 
+    /// Kotlin reshape.kt:249-257 — an empty (rank-1, size-0) left shape (`⍬`)
+    /// returns the first element of the *arrayified* right arg, enclosed exactly
+    /// ONCE via `EnclosedAPLValue.make`. `arrayify()` raises a scalar to a 1-D
+    /// array (so `⍬⍴5 → 5`, depth 0) and `valueAt(0)` then discloses the box for
+    /// an enclosed right arg (so `⍬⍴⊂1 2 3 → (1 2 3)`, depth 1 — NOT double-boxed).
+    /// Mimic that by returning the element at position 0 of `arrayify(b)` without
+    /// adding any further boxing. The right arg's "is it an array" question is
+    /// decided by KapArray semantics: a genuine scalar is rank 0 and gets wrapped
+    /// to a 1-element array; `⍬` (empty array, rank 1) yields
+    /// the empty-array prototype (`⍬⍴⍬ → 0`).
+    fn reshape_disclose_first(
+        &self,
+        right_val: AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let b = right_val.force(self)?;
+        let first: Rc<APLValue> = match b.as_ref() {
+            // `⍬⍴⍬` (or any empty right arg): Kap's empty array prototype is 0,
+            // and `EnclosedAPLValue.make(0)` returns the rank-0 box `⍬`.
+            APLValue::Array(a) if a.element_count() == 0 => {
+                Rc::new(APLValue::Number(KapNumber::Long(0)))
+            }
+            APLValue::Null => Rc::new(APLValue::Number(KapNumber::Long(0))),
+            _ => {
+                // Mirror Kotlin `arrayify(b).valueAt(0)`: a scalar becomes a
+                // 1-element array first, then we take element 0 (which for an
+                // enclosed value is the inner value disclosed once).
+                let b_arr = match b.as_ref() {
+                    APLValue::Array(a) => a.elements(),
+                    other => vec![Rc::new(other.clone())],
+                };
+                b_arr[0].clone()
+            }
+        };
+        // Kotlin `reshape.kt:257` wraps the disclosed value in
+        // `EnclosedAPLValue.make(v)`, but for a primitive scalar the box
+        // is a no-op (`EnclosedAPLValue.make(5) === 5`). For a non-
+        // primitive value (an array — which the disclosed element of
+        // `⊂1 2 3` IS), the box is a real 0-D enclosure. Mirror that:
+        // if `first` is an array, wrap it; otherwise pass through.
+        if let APLValue::Array(a) = first.as_ref() {
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![],
+                ArrayData::Nested(vec![Rc::new(APLValue::Array(a.clone()))]),
+            )))));
+        }
+        Ok(first)
+    }
+
     fn reshape(&self, left_val: AplRef<APLValue>, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
         // Dyadic `⍴`: `(dims) ⍴ data` builds an array of shape `dims`, filled by
         // cycling through the flat elements of `data` (Kap/APL reshape semantics).
@@ -5797,6 +6019,12 @@ impl Engine {
         }
         let mut specs: Vec<DimSpec> = Vec::new();
         match dims_val.as_ref() {
+            // `⍬` (now a real rank-1 empty array, not Null) as a shape takes
+            // the disclose-first path (Kotlin reshape.kt:249-257), same as the
+            // legacy Null spelling below.
+            APLValue::Array(a) if a.element_count() == 0 => {
+                return self.reshape_disclose_first(right_val);
+            }
             APLValue::Array(a) => {
                 for e in a.elements() {
                     specs.push(match method_of(e.as_ref()) {
@@ -5833,40 +6061,7 @@ impl Engine {
             // decided by KapArray semantics: a genuine scalar is rank 0 and gets wrapped
             // to a 1-element array; `⍬` (Null, rank 0) is Kap's empty array and yields
             // the empty-array prototype (`⍬⍴⍬ → ⍬`).
-            APLValue::Null => {
-                let b = right_val.force(self)?;
-                let first: Rc<APLValue> = match b.as_ref() {
-                    // `⍬⍴⍬` (or any empty right arg): Kap's empty array prototype is 0,
-                    // and `EnclosedAPLValue.make(0)` returns the rank-0 box `⍬`.
-                    APLValue::Array(a) if a.element_count() == 0 => {
-                        Rc::new(APLValue::Number(KapNumber::Long(0)))
-                    }
-                    APLValue::Null => Rc::new(APLValue::Number(KapNumber::Long(0))),
-                    _ => {
-                        // Mirror Kotlin `arrayify(b).valueAt(0)`: a scalar becomes a
-                        // 1-element array first, then we take element 0 (which for an
-                        // enclosed value is the inner value disclosed once).
-                        let b_arr = match b.as_ref() {
-                            APLValue::Array(a) => a.elements(),
-                            other => vec![Rc::new(other.clone())],
-                        };
-                        b_arr[0].clone()
-                    }
-                };
-                // Kotlin `reshape.kt:257` wraps the disclosed value in
-                // `EnclosedAPLValue.make(v)`, but for a primitive scalar the box
-                // is a no-op (`EnclosedAPLValue.make(5) === 5`). For a non-
-                // primitive value (an array — which the disclosed element of
-                // `⊂1 2 3` IS), the box is a real 0-D enclosure. Mirror that:
-                // if `first` is an array, wrap it; otherwise pass through.
-                if let APLValue::Array(a) = first.as_ref() {
-                    return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                        vec![],
-                        ArrayData::Nested(vec![Rc::new(APLValue::Array(a.clone()))]),
-                    )))));
-                }
-                return Ok(first);
-            }
+            APLValue::Null => return self.reshape_disclose_first(right_val),
             // A scalar KEYWORD symbol left arg (`:match ⍴ 1 2 3 4`) is ALSO a computed
             // dimension (Kotlin reshape.kt:259-271, `findSizeCalculationMethod(v0)` on
             // the scalar left value). Only the known :match/:fill/:truncate/:recycle
@@ -8024,6 +8219,9 @@ impl Engine {
         // still get the 0-D box.
         match v.as_ref() {
             APLValue::Number(_) | APLValue::Char(_) => Ok(v.clone()),
+            // `⊂null` → `null`: the nil singleton passes through enclose
+            // unwrapped (oracle-verified), like a primitive scalar.
+            APLValue::Nil => Ok(v.clone()),
             _ => Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
                 vec![],
                 ArrayData::Nested(vec![v]),
@@ -8319,7 +8517,8 @@ impl Engine {
             }
         }
         match value {
-            APLValue::Number(_) | APLValue::Char(_) | APLValue::Null | APLValue::Str(_)
+            APLValue::Number(_) | APLValue::Char(_) | APLValue::Null | APLValue::Nil
+            | APLValue::Str(_)
             | APLValue::List(_) | APLValue::Map(_) | APLValue::Symbol { .. }
             | APLValue::Deferred { .. } | APLValue::UserFn { .. } | APLValue::UserOp { .. } => {
                 out.push(Rc::new(value.clone()));
@@ -9857,6 +10056,12 @@ impl Engine {
                 Err(AplError::runtime("cannot use an operator as an array element".into()))
             }
             APLValue::Null => Ok(Instr::Empty),
+            // The nil singleton round-trips via the `null` keyword constant
+            // (bound in the root environment, lib.rs).
+            APLValue::Nil => Ok(Instr::Symbol {
+                name: "null".to_string(),
+                namespace: None,
+            }),
             APLValue::Deferred { .. } => {
                 Err(AplError::runtime("cannot use a deferred value as an array element".into()))
             }
@@ -12170,6 +12375,7 @@ impl Engine {
             (APLValue::Char(x), APLValue::Char(y)) => x == y,
             (APLValue::Str(x), APLValue::Str(y)) => x == y,
             (APLValue::Null, APLValue::Null) => true,
+            (APLValue::Nil, APLValue::Nil) => true,
             (APLValue::Symbol { name: n1, namespace: ns1 }, APLValue::Symbol { name: n2, namespace: ns2 }) => {
                 n1 == n2 && ns1 == ns2
             }
@@ -12202,6 +12408,7 @@ impl Engine {
             (APLValue::Char(x), APLValue::Char(y)) => x == y,
             (APLValue::Str(x), APLValue::Str(y)) => x == y,
             (APLValue::Null, APLValue::Null) => true,
+            (APLValue::Nil, APLValue::Nil) => true,
             (APLValue::Symbol { name: n1, namespace: ns1 }, APLValue::Symbol { name: n2, namespace: ns2 }) => {
                 n1 == n2 && ns1 == ns2
             }
@@ -12238,6 +12445,7 @@ impl Engine {
             (APLValue::Char(x), APLValue::Char(y)) => x == y,
             (APLValue::Str(x), APLValue::Str(y)) => x == y,
             (APLValue::Null, APLValue::Null) => true,
+            (APLValue::Nil, APLValue::Nil) => true,
             (APLValue::Symbol { name: n1, namespace: ns1 }, APLValue::Symbol { name: n2, namespace: ns2 }) => {
                 n1 == n2 && ns1 == ns2
             }
@@ -12651,6 +12859,43 @@ impl Engine {
                     "{}: Incompatible argument types. Left arg: null, Right arg: null",
                     sym
                 )));
+            }
+        }
+        // Nil (`null` singleton) is a one-sided identity for `⌊`/`⌈`
+        // (oracle: `null⌊5` → `5`, `5⌊null` → `5`, same for `⌈`); both-nil
+        // errors (above for legacy Null, here for Nil).
+        let l_nil = matches!(left_ref, Some(APLValue::Nil));
+        let r_nil = matches!(right_val.as_ref(), APLValue::Nil);
+        if l_nil && r_nil {
+            return Err(AplError::runtime(format!(
+                "{}: Incompatible argument types. Left arg: null, Right arg: null",
+                sym
+            )));
+        } else if l_nil {
+            match right_val.as_ref() {
+                APLValue::Number(_) | APLValue::Char(_) | APLValue::Array(_) | APLValue::List(_) => {
+                    return Ok(right_val.clone())
+                }
+                _ => {
+                    return Err(AplError::runtime(format!(
+                        "{}: Incompatible argument types. Left arg: null, Right arg: {}",
+                        sym,
+                        right_val.class_name()
+                    )))
+                }
+            }
+        } else if r_nil {
+            match left_ref {
+                Some(APLValue::Number(_) | APLValue::Char(_) | APLValue::Array(_) | APLValue::List(_)) => {
+                    return Ok(left_val.clone().unwrap())
+                }
+                _ => {
+                    return Err(AplError::runtime(format!(
+                        "{}: Incompatible argument types. Left arg: {}, Right arg: null",
+                        sym,
+                        left_val.as_ref().map(|l| l.class_name()).unwrap_or("unknown")
+                    )))
+                }
             }
         }
         if let Some(APLValue::Char(_)) = left_ref {

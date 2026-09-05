@@ -59,6 +59,7 @@ fn format_value(v: &APLValue) -> String {
         APLValue::Char(c) => c.to_string(),
         APLValue::Str(s) => format!("\"{}\"", s),
         APLValue::Null => "⍬".to_string(),
+        APLValue::Nil => "null".to_string(),
         APLValue::Symbol { name, namespace } => match namespace {
             Some(ns) => format!("{}:{}", ns, name),
             None => format!(":{}", name),
