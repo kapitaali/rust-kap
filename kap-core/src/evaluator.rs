@@ -11884,6 +11884,21 @@ impl Engine {
             Some(l) => Some(self.eval_instr(l, env)?.force(self)?),
             None => None,
         };
+        // Kotlin ForEachFunctionDescriptor: scalar arg(s) → scalar result.
+        // `1+¨11` → `12` (not `(12)`), `+¨1` → `1` (not `(1)`).
+        // Only numbers/chars count as scalar — strings iterate as char arrays.
+        let is_true_scalar = |v: &AplRef<APLValue>| matches!(
+            v.as_ref(),
+            APLValue::Number(_) | APLValue::Char(_)
+        );
+        if is_true_scalar(&right_val)
+            && left_val.as_ref().map_or(true, is_true_scalar)
+        {
+            return match left_val {
+                Some(lv) => self.apply_fn_instr(fn_instr, Some(&lv), &right_val, env),
+                None => self.apply_fn_instr(fn_instr, None, &right_val, env),
+            };
+        }
         let right_elems = self.flat_elements(&right_val);
         let mut out = Vec::with_capacity(right_elems.len());
         match left_val {
