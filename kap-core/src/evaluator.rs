@@ -8023,7 +8023,7 @@ impl Engine {
         // pass-through rule. Reverted to primitive-passthrough; arrays + Null
         // still get the 0-D box.
         match v.as_ref() {
-            APLValue::Number(_) | APLValue::Char(_) | APLValue::Str(_) => Ok(v.clone()),
+            APLValue::Number(_) | APLValue::Char(_) => Ok(v.clone()),
             _ => Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
                 vec![],
                 ArrayData::Nested(vec![v]),
@@ -12632,6 +12632,16 @@ impl Engine {
     ) -> Result<AplRef<APLValue>, AplError> {
         // Char on either side → "Incompatible argument types. Left arg: char, Right arg: <n>".
         let left_ref = left_val.as_ref().map(|l| l.as_ref());
+        // Kotlin MinAPLFunction/MaxAPLFunction fnOther: null + null → incompatible error.
+        // (null is identity for ⌊/⌈ when paired with a number, but errors when both are null.)
+        if let Some(APLValue::Null) = left_ref {
+            if let APLValue::Null = right_val.as_ref() {
+                return Err(AplError::runtime(format!(
+                    "{}: Incompatible argument types. Left arg: null, Right arg: null",
+                    sym
+                )));
+            }
+        }
         if let Some(APLValue::Char(_)) = left_ref {
             let rt = match right_val.as_ref() {
                 APLValue::Number(KapNumber::Long(_)) => "integer",
