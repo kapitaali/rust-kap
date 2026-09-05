@@ -3828,6 +3828,15 @@ impl<'a> Parser<'a> {
     fn try_parse_train(&mut self) -> Option<Instr> {
         // We are positioned just after the opening '('.
         let mut funcs = Vec::new();
+        // `Some(tine_count)` iff the last member came from a `«b»` (or `«b»c`) postfix:
+        // 2 for a 2-train `a « b »` and 3 for a 3-fork `a « b » c`. A «…» postfix
+        // produces a FLAT 3-member fork `[tine1, tine2, tine3]` (middle = combiner,
+        // NOT right-folded). The fold below would otherwise right-associate a flat
+        // 3-tine into `Train[tine1, Train[tine2, tine3]]` (= tine1(tine2(tine3 y))),
+        // which silently broke `(÷«⊢»⊣)` — the fork's middle combiner is tine2, not
+        // an atop-applied value. Kap's `«»` always denotes a flat 3-train (oracle
+        // verified: `(⊢«⊣»,) x` = `[x x x]`, NOT right-folded atop).
+        let mut fork_members: Option<usize> = None;
         loop {
             self.skip_newlines();
             match self.peek() {
@@ -4083,11 +4092,32 @@ impl<'a> Parser<'a> {
                             };
                             funcs.push(b);
                             funcs.push(c);
+                            // FLAT 3-fork: 3 tines, no right-fold. See flag at top.
+                            fork_members = Some(3);
                         } else {
                             funcs.push(b);
+                            // «b» with no trailing c: this is a 2-train atop
+                            // `[a, b]` (Kotlin parses `f « g »` with nothing after
+                            // `»` the same as a 2-member left/right-tine 2-train).
+                            // Keep flat so the right-fold doesn't nest.
+                            fork_members = Some(2);
                         }
                     }
                 }
+            }
+        }
+        // A `«b»` (or `«b»c`) postfix produced a flat 2- or 3-member Train.
+        // Bypass the right-fold below — Kap's `«»` always denotes a flat train
+        // whose middle member is the COMBINER (not an atop-applied value). Without
+        // this, `(÷«⊢»⊣)` parses as `÷(⊢(⊣y))` instead of `⊢(÷y, ⊣y)`. The
+        // 2-member form is also flat — `(f « g »)` = `Train[f, g]`, not folded.
+        if let Some(n) = fork_members {
+            if funcs.len() == n {
+                return Some(Instr::Train {
+                    funcs,
+                    reverse: false,
+                    compose: false,
+                });
             }
         }
         // A train needs >= 2 members. Either all are functions, OR it is a 2-train

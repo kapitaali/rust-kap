@@ -1194,6 +1194,34 @@ impl Engine {
                             env: env.clone(),
                         })
                     }
+                    // A Train with the left-bind shape `[value, fn]` (e.g. `10 (÷«⊢»⊣)`)
+                    // is a callable function: calling it MONADICALLY binds the value as ⍺
+                    // (Kotlin LeftAssignedFunction). The existing apply_train left-bind arm
+                    // handles this — store the Train as the body so apply_user_fn routes
+                    // through eval_apply → apply_train. Storing a delegation `Apply{train, ⍺, ⍵}`
+                    // here is wrong: the outer call's monadic `a 20` would route to
+                    // dyadic-call (1 arg ⍵ passed, ⍺ unbound) and either error or use the
+                    // Train as a left-hand (e.g. `÷«⊢»⊣ 20` → which treats `÷«⊢»⊣` as the
+                    // dyadic function, 20 as both ⍺ and ⍵, yielding `20÷20 ⊢ 20⊣20 = 1`).
+                    Instr::Train { funcs, .. } if funcs.len() == 2 && Self::is_value(&funcs[0]) => {
+                        Rc::new(APLValue::UserFn {
+                            params: vec![],
+                            split: 0,
+                            body: Rc::new(*value.clone()),
+                            env: env.clone(),
+                        })
+                    }
+                    // A general Train (atop, fork, or single fn) is itself a function.
+                    // Store the Train as the body; apply_user_fn dispatches through
+                    // eval_apply → apply_train with the *call's* data arguments.
+                    Instr::Train { .. } | Instr::Derived { .. } | Instr::ValueOp { .. } => {
+                        Rc::new(APLValue::UserFn {
+                            params: vec![],
+                            split: 0,
+                            body: Rc::new(*value.clone()),
+                            env: env.clone(),
+                        })
+                    }
                     // Bare symbol RHS:
                     //  * a primitive (`foo ⇐ -`) — store the symbol directly as the body;
                     //    `apply_user_fn` routes it through `eval_apply`, which dispatches
@@ -1254,7 +1282,13 @@ impl Engine {
                 // treats later uses as applicable. ←-bound lambdas do NOT add
                 // here — they are values. See PROBLEM.md (A2).
                 env.function_defs.borrow_mut().insert(name.clone());
-                Ok(v)
+                // Kap's `name ⇐ fn-expr` is a STATEMENT-LIKE expression that
+                // returns `⍬` (Kotlin UpdateLocalFunctionInstruction.evalWithContext
+                // returns APLNullValue, parser.kt:595/598). Catenating onto the
+                // assignment then strands as `1 , ⍬` → `(1)`, not `(1 <function>)`.
+                // Tests: `functionAssignmentReturnsNull` (`1 , (a ⇐ +[2])` → `(1)`)
+                // and the side-effect form with `+[io:print 2]`.
+                Ok(Rc::new(APLValue::Null))
             }
             Instr::UserOpDef {
                 name,
@@ -9367,23 +9401,38 @@ impl Engine {
     /// A rank>1 argument is an error ("Argument must be a scalar or 1-dimensional array").
     fn to_list(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
         let v = right_val.force(self)?;
-        let dims = v.dimensions();
-        if dims.len() > 1 {
-            return Err(AplError::runtime(
-                "≬: Argument must be a scalar or 1-dimensional array".into(),
-            ));
+        // Kotlin `ToListFunction`: arrayify, require rank ≤ 1, wrap members in a list.
+        match v.as_ref() {
+            APLValue::List(_) => Ok(v.clone()),
+            APLValue::Array(a) => {
+                if a.dimensions.len() > 1 {
+                    return Err(AplError::runtime(
+                        "≬: Argument must be a scalar or 1-dimensional array".into(),
+                    ));
+                }
+                Ok(Rc::new(APLValue::List(a.clone())))
+            }
+            APLValue::Null => Ok(Rc::new(APLValue::List(Rc::new(KapArray::new(
+                vec![0],
+                ArrayData::Long(vec![]),
+            ))))),
+            APLValue::Str(s) => {
+                let chars: Vec<AplRef<APLValue>> =
+                    s.chars().map(|c| Rc::new(APLValue::Char(c))).collect();
+                Ok(Rc::new(APLValue::List(Rc::new(KapArray::new(
+                    vec![chars.len()],
+                    ArrayData::Nested(chars),
+                )))))
+            }
+            _ => Ok(Rc::new(APLValue::List(Rc::new(KapArray::new(
+                vec![1],
+                ArrayData::Nested(vec![v.clone()]),
+            ))))),
         }
-        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-            vec![],
-            ArrayData::Nested(vec![Rc::new(v.as_ref().clone())]),
-        )))))
     }
 
-    /// Kap's `fromList` (Kotlin `FromListFunction`, div_functions.kt) — the inverse of
-    /// `≬`: recovers the array from a rank-0 list box. The port's list box is just a
-    /// rank-0 `Nested([v])`, so `fromList` discloses that single element. (The curated
-    /// parity cases only exercise `≬`; `fromList` is wired for completeness/consistency
-    /// with the Kotlin registration pair.)
+    /// Kap's `fromList` (Kotlin `FromListFunction`, div_functions.kt): a list
+    /// becomes the 1-D array of its members; a rank-0 nested box discloses.
     fn from_list(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
         let v = right_val.force(self)?;
         match v.as_ref() {
@@ -13341,6 +13390,10 @@ impl Engine {
                 xe.len() == ye.len()
                     && xe.iter().zip(ye.iter()).all(|(p, q)| Self::total_equal(p.as_ref(), q.as_ref()))
             }
+            // Maps: equal when the key/value multisets are equal (Kotlin
+            // `APLMap.equals` ignores insertion order; oracle: `≡` of two maps
+            // built from `:a 1 :b 10` and `:b 10 :a 1` returns 1).
+            (APLValue::Map(am), APLValue::Map(bm)) => am.deep_equal(bm),
             _ => false,
         }
     }
@@ -13377,6 +13430,10 @@ impl Engine {
                         .zip(ye.iter())
                         .all(|(p, q)| Self::type_equal(p.as_ref(), q.as_ref()))
             }
+            // Maps: equal when the key/value multisets are equal (Kotlin
+            // `APLMap.equals` ignores insertion order; oracle: `≡` of two maps
+            // built from `:a 1 :b 10` and `:b 10 :a 1` returns 1).
+            (APLValue::Map(am), APLValue::Map(bm)) => am.deep_equal(bm),
             _ => false,
         }
     }

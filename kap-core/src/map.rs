@@ -104,6 +104,36 @@ impl KapMap {
             .map(|(_, v)| v.clone())
     }
 
+    /// Order-INsensitive deep equality: two maps are equal when their key/value
+    /// multisets are equal (Kotlin `APLMap.equals` ignores insertion order).
+    /// Used by `≡`/`≢`; `=`/`≠` would also route here via deep_equal.
+    /// Both maps must be value-equal pairwise: for every (k, v) in self there
+    /// must be a (k', v') in other with `k == k'` (by `values_key_equal`) AND
+    /// `v == v'` (by `Rc<APLValue>` pointer equality — maps are immutable, so
+    /// same value means same Rc). Lengths must match.
+    pub fn deep_equal(&self, other: &KapMap) -> bool {
+        if self.pairs.len() != other.pairs.len() {
+            return false;
+        }
+        // For every (k, v) in self there must be a (k', v') in other with
+        // `k == k'` (by `values_key_equal`) AND `v == v'` (by value, since
+        // `APLValue::Number` does not have a custom `Eq` impl). Without the
+        // value-equal check on `v`, two maps built from the SAME literals
+        // (e.g. `map:with :a 1 :b 10` and `map:with :b 10 :a 1`) compare unequal
+        // because the per-literal `APLValue::Number(1)` `Rc`s differ.
+        for (k, v) in &self.pairs {
+            match other
+                .pairs
+                .iter()
+                .find(|(ok, _)| values_key_equal(ok, k))
+            {
+                Some((_, ov)) if values_key_equal(v, ov) => {}
+                _ => return false,
+            }
+        }
+        true
+    }
+
     /// Insert/replace a single key (immutably): returns a new `KapMap` with the
     /// pair set. Kotlin `content.copyAndPut`.
     pub fn with_pair(&self, key: Rc<APLValue>, value: Rc<APLValue>) -> KapMap {

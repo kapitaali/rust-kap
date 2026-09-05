@@ -124,27 +124,50 @@ def extract_method_bodies(src: str):
 
 
 def first_expr_in_call(body: str):
-    """Find the first parseAPLExpression(...) call and return its raw string-literal arg."""
+    """Find the first parseAPLExpression(...) call and return its raw string-literal arg.
+
+    Many tests pass a `src` variable holding a triple-quoted multi-statement
+    program (`val src = \"\"\"...\"\"\".trimMargin()`); resolve the identifier to
+    its declaration above the call. Without this the extractor grabbed the
+    first string *after* the call (often an assertion literal like `"a"`).
+    """
     for call in PARSE_CALLS:
         idx = body.find(call + '(')
         if idx == -1:
             continue
-        # walk to first string literal
         j = idx + len(call) + 1
-        while j < len(body):
-            if body[j] == '"':
-                text, _ = find_string_literal(body, j)
-                return text
-            if body[j] == '{':  # parseAPLExpressionWithTest("...", callback = { ... })
-                # the first string before the callback lambda is the expr
-                text, _ = find_string_literal(body, j + 1) if False else (None, 0)
-                # fallback: search forward for first '"'
-                q = body.find('"', j)
-                if q != -1:
-                    text, _ = find_string_literal(body, q)
-                    return text
-                return None
+        while j < len(body) and body[j] in ' \t\n':
             j += 1
+        if j < len(body) and body[j] == '"':
+            text, _ = find_string_literal(body, j)
+            return text
+        m = re.match(r'[A-Za-z_]\w*', body[j:])
+        if not m:
+            continue
+        ident = m.group(0)
+        decl = re.search(
+            r'val\s+' + re.escape(ident) + r'\s*=\s*"""(.*?)"""',
+            body[:idx], re.DOTALL)
+        if decl:
+            lines = decl.group(1).split('\n')
+            out = []
+            for line in lines:
+                s = line.lstrip()
+                if s.startswith('|'):
+                    s = s[1:]
+                out.append(s)
+            text = '\n'.join(out).strip('\n')
+            # Kotlin triple-quoted strings still process backslash escapes.
+            text = text.replace('\\\\', '\x00').replace('\\"', '"').replace('\x00', '\\')
+            return text
+        decl2 = re.search(
+            r'val\s+' + re.escape(ident) + r'\s*=\s*"',
+            body[:idx])
+        if decl2:
+            q = body.find('"', decl2.start())
+            if q != -1:
+                text, _ = find_string_literal(body, q)
+                return text
     return None
 
 
