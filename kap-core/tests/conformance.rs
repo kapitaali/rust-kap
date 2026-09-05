@@ -334,6 +334,9 @@ fn curated_kap_parity() {
         ("bar←1 ⋄ foo ← 8 ⋄ bar foo +← 3", "(1 11)"),
         // Group modified assign updates all names (oracle: `(bar foo) +← 3` → `⟨4 11⟩`)
         ("bar←1 ⋄ foo ← 8 ⋄ (bar foo) +← 3 ⋄ bar + foo", "15"),
+        // Long overflow promotes to bigint, never wraps (oracle: `MAX+1` → `…808`)
+        ("9223372036854775807 + 1", "9223372036854775808"),
+        ("1297036692682702848 × 16", "20752587082923245568"),
         ("⍋ 3 1 4 2", "(1 3 0 2)"), // grade-up (monadic): 0-based indices ascending
         // Bracket indexing (pick + multi-axis access) — dyadic ⍴ required
         ("(10 20 30 40)[2]", "30"),

@@ -501,7 +501,12 @@ impl KapNumber {
     pub fn add(&self, other: &KapNumber) -> KapNumber {
         use KapNumber::*;
         match (self, other) {
-            (Long(a), Long(b)) => Long(a + b),
+            (Long(a), Long(b)) => match a.checked_add(*b) {
+                // Kap promotes overflowing long arithmetic to bigint (oracle:
+                // `9223372036854775807 + 1` → `9223372036854775808`), never wraps.
+                Some(v) => Long(v),
+                None => BigInt(num_bigint::BigInt::from(*a) + num_bigint::BigInt::from(*b)),
+            },
             (Long(a), Double(b)) | (Double(b), Long(a)) => Double(*a as f64 + *b),
             (Double(a), Double(b)) => Double(a + b),
             (BigInt(a), BigInt(b)) => BigInt(a + b),
@@ -522,7 +527,12 @@ impl KapNumber {
     pub fn mul(&self, other: &KapNumber) -> KapNumber {
         use KapNumber::*;
         match (self, other) {
-            (Long(a), Long(b)) => Long(a * b),
+            (Long(a), Long(b)) => match a.checked_mul(*b) {
+                // Overflow promotes to bigint (oracle: `1297036692682702848 × 16`
+                // → `20752587082923245568`), never wraps or panics.
+                Some(v) => Long(v),
+                None => BigInt(num_bigint::BigInt::from(*a) * num_bigint::BigInt::from(*b)),
+            },
             (Long(a), Double(b)) | (Double(b), Long(a)) => Double(*a as f64 * *b),
             (Double(a), Double(b)) => Double(a * b),
             (BigInt(a), BigInt(b)) => BigInt(a * b),
@@ -543,7 +553,11 @@ impl KapNumber {
     pub fn neg(&self) -> KapNumber {
         use KapNumber::*;
         match self {
-            Long(v) => Long(-v),
+            Long(v) => match v.checked_neg() {
+                // `-9223372036854775808` overflows long → bigint.
+                Some(n) => Long(n),
+                None => BigInt(-num_bigint::BigInt::from(*v)),
+            },
             Double(v) => Double(-v),
             BigInt(v) => BigInt(-v.clone()),
             Rational(v) => Rational(-v),
@@ -555,7 +569,11 @@ impl KapNumber {
     pub fn sub(&self, other: &KapNumber) -> KapNumber {
         use KapNumber::*;
         match (self, other) {
-            (Long(a), Long(b)) => Long(a - b),
+            (Long(a), Long(b)) => match a.checked_sub(*b) {
+                // Overflow promotes to bigint (same rule as add/mul).
+                Some(v) => Long(v),
+                None => BigInt(num_bigint::BigInt::from(*a) - num_bigint::BigInt::from(*b)),
+            },
             // Mixed Long/Double: operand order matters. `self - other`:
             //   Long - Double ⇒ a - b;  Double - Long ⇒ b - a.
             (Long(a), Double(b)) => Double(*a as f64 - *b),
