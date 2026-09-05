@@ -4956,9 +4956,17 @@ impl<'a> Parser<'a> {
                             let name = name.clone();
                             let ns = namespace.clone();
                             self.advance();
+                            // Kotlin processLambda (parser.kt:1210-1212): a Name
+                            // operand must resolve via lookupFunction, else
+                            // ParseException "Symbol is not a valid function"
+                            // (oracle: `λfoo` → error; `foo←5 ⋄ λfoo` → error —
+                            // a VALUE binding is not a function).
+                            if !Self::is_primitive_op(&name) && !self.is_known_fn(&name, &ns) {
+                                return Err(self.err("Symbol is not a valid function"));
+                            }
                             // `λ↑` / `λfoo` is a FUNCTION VALUE (Kotlin processLambda,
                             // parser.kt:1204), never auto-applied. `(λ↑) 5` strands to
-                            // `⟨function 5⟩` and it is only invoked via `⍞`/`˝`/`⍢`.
+                            // `⟨function 5⟩` and is only invoked via `⍞`/`˝`/`⍢`.
                             // Return a `Lambda` value so the bare-fn guard in the main
                             // parser loop does not fire and juxtaposition strands.
                             Ok(Instr::Lambda {
@@ -5489,6 +5497,13 @@ impl<'a> Parser<'a> {
                             let name = name.clone();
                             let ns = namespace.clone();
                             self.advance();
+                            // Kotlin processLambda (parser.kt:1210-1212): a Name
+                            // operand must resolve via lookupFunction, else
+                            // "Symbol is not a valid function" (same guard as the
+                            // train-member handler at parser.rs:~4954).
+                            if !Self::is_primitive_op(&name) && !self.is_known_fn(&name, &ns) {
+                                return Err(self.err("Symbol is not a valid function"));
+                            }
                             // `λ↑` / `λfoo` is a FUNCTION VALUE (Kotlin processLambda,
                             // parser.kt:1204), never auto-applied. `(λ↑) 5` strands to
                             // `⟨function 5⟩` and is only invoked via `⍞`/`˝`/`⍢`. Return a

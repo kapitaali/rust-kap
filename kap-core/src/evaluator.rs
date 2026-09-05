@@ -582,8 +582,15 @@ impl Engine {
         loop {
             let ns_now = env.ns_registry.current_ns();
             *anchor.home_ns.borrow_mut() = Some(ns_now);
-            let fn_names: Vec<String> = env.function_names();
-            let op_names: Vec<String> = env.operator_names();
+            // Seed from the ANCHOR, not `env`: file-local `∇`/`⇐` defs evaluate
+            // into the anchor (acts_as_root), and `function_defs` is a deep-cloned
+            // per-scope set — so `env` never sees them. Kotlin parses+evaluates a
+            // file incrementally, hence `λrenderNumber` (defined line 58) resolves
+            // at line 275 via lookupFunction, while a never-defined `λfoo` throws
+            // "Symbol is not a valid function". The anchor's parent chain reaches
+            // `env`, so this is a strict superset of the old seed.
+            let fn_names: Vec<String> = anchor.function_names();
+            let op_names: Vec<String> = anchor.operator_names();
             let macros = self.macros.borrow().clone();
             let mut p = parser::Parser {
                 toks: &toks,
