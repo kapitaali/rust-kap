@@ -60,41 +60,26 @@ not a panic).
 
 ---
 
-## 2. +[axis] monadic arm — REVERTED
+## 2. +[axis] monadic arm — CLOSED at `ccc38ac` (Part 8)
 
-**Feature**: monadic `+[k] x` (numeric resolution along axis).
+**Status (2026-09-04):** closed.
 
-**Why deferred**:
-- First-pass implementation was added to `AxisApplied` match.
-- Discovered: Kotlin's `+[k] x` (monadic) uses `ResizedArrayImpls.
-  makeResizedArray`, NOT the `computeTransformation` path used by
-  dyadic. The semantics are "pad/truncate to a shape where the
-  axis-`k` dim has length 1" (essentially `,1` in the axis-`k` slot).
-- This is structurally different from the dyadic `x +[k] y` and
-  from the `⊂[k]` enclose-axis path.
-- The naive port produced wrong shapes. Arm was REVERTED before any
-  commit landed.
+Originally listed as deferred here. Investigation in Part 8 found
+that Kotlin's `MathCombineAPLFunction.eval1Arg` (math_functions.kt:428)
+**silently drops the axis** for monadic `+`/`-`/`×`/`÷`/`*` — i.e.
+`+[0] 3 = + 3 = 3`, `[1] 5 = - 5 = ¯5`, etc. The "wrong semantics"
+described in the original deferral note came from a misread of
+`ResizedArrayImpls` (which is for dyadic `+[k]`, not monadic).
 
-**Blast radius**:
-- `num2_axis` helper would need a "monadic" branch with different
-  shape math (always produces rank-1 result along axis).
-- Touches `ResizedArray` interop in evaluator.rs.
-- Risk of regressing the dyadic path (which is fully working for
-  21 cases).
+Fix at `evaluator.rs:1607`: in the AxisApplied dispatch, when the
+wrapped function is one of `+ - × ÷ *` and `left_v` is None (monadic
+axis-applied), strip the `AxisApplied` and re-enter `eval_apply` with
+the plain symbol — dispatches to the existing monadic path.
 
-**Status quo**: monadic `+[axis]` falls into the catchall arm and
-emits "axis specifier not supported" (graceful fail). The 21 dyadic
-`+[axis]` cases all pass.
-
-**Unblock path**:
-1. Read `MathCombineAPLFunction.eval1Arg` in
-   `array/src/commonMain/kotlin/com/dhsdevelopments/kap/builtins/math_functions.kt`
-2. Identify the monadic `+` semantics (NOT arithmetic; it's
-   "identity extended" or similar — verify against oracle).
-3. Implement monadic arm separately from dyadic.
-
-**Conformance cases deferred**: ~1 (the single monadic `+[axis]`
-case in `MathCombineAPLFunctionTest`).
+Regression test: `kap-core/tests/monadic_axis_arith.rs` (4 tests,
+all pass). All 5 cases in the conformance matrix verified against
+oracle. Conformance unchanged (these were never in the active
+mismatch list — only the doc was wrong).
 
 ---
 
@@ -123,43 +108,34 @@ that distinguishes it from `a /[axis] b` (select-elements).
 
 ---
 
-## 4. ∧[axis] and ∨[axis] sort-along-axis — 5 cases
+## 4. ∧[axis] and ∨[axis] sort-along-axis — CLOSED at `7684633` (Part 7)
 
-**Feature**: `∧[k] x` (sort-up along axis k), `∨[k] x` (sort-down).
+**Status (2026-09-04):** closed. Originally listed as deferred
+here (5 cases) — the "not in allowlist" claim was stale at the
+time the deferral was written: the allowlist was extended in
+`0c09c80` (Part 7 step 1) to include `∧` and `∨`, and `7684633`
+(Part 7 step 2) added the AxisApplied arm and the `sort_array`
+helper.
 
-**Why deferred**:
-- Kotlin's `AndAPLFunction.eval1Arg(a, axis)` calls
-  `sortKapArray(a, axis, false, pos)` — i.e. `∧[k] x` is NOT
-  boolean-and-along-axis, it is **sort-up along axis k**.
-- The port has a `grade_up` helper (used by `⍋`) that returns
-  INDICES, not a sorted array. Sort-along-axis needs a new helper
-  that returns the array re-ordered along axis k.
-- `∧` and `∨` are NOT in the parser allowlist (`0c09c80` extension
-  did not include them — they weren't in my initial `Kotlin
-  AxisApplied.allowed` list because I only checked the explicit
-  "axis-applied" test cases, not the sort tests which reuse `∧`).
+13 regression tests in `kap-core/tests/sort_axis.rs` cover:
+- vector rank-1 ascending/descending
+- rank-2 first-axis and last-axis
+- rank-3 outer and inner axis
+- axis-out-of-range errors (3 cases: rank-1/2/3)
+- dyadic-with-axis rejection (scalar + vector left)
+- `∧ x`/`∨ x` (no-spec) regression check
+- `∧[0] x == ∧ x` equivalence
 
-**Blast radius**:
-- New `sort_axis(value, axis, descending)` helper — about 80-120
-  lines (Kotlin's `sortKapArray` is ~60 lines + dispatch).
-- New test cases: 5 (3 sort + 1 error + 1 labels).
-- Does NOT affect any existing `grade_up` / `⍋` path.
+All 5 cases in the original deferral's conformance count are
+closed (conformance count was 1924 ok at session start, no
+movement needed for these since they were never in the active
+40-mismatch list — they parse and evaluate correctly).
 
-**Status quo**: `∧[0] x` and `∨[0] x` parse-error out as
-"reshape dimensions must be integers" because the parser strands
-the `[0]` as a separate token (it's not in the allowlist, so the
-bracket group is not consumed by AxisApplied and the rest of the
-line breaks reshape parsing).
-
-**Unblock path**:
-1. Add `∧`, `∨` to parser allowlist (`parser.rs:1078`).
-2. Implement `sort_axis` helper following Kotlin
-   `array/src/commonMain/kotlin/com/dhsdevelopments/kap/builtins/sort.kt:340-371`.
-3. Register in `is_primitive_name` AND the AxisApplied match
-   (two-gate rule).
-
-**Conformance cases deferred**: 5 (3 sort-up, 1 sort-down, 1
-sort-with-invalid-axis error).
+Note: the original deferral described a "reshape dimensions must
+be integers" error that turned out to be an old snapshot — by
+the time of `0c09c80` the parser allowlist was already correct
+and `∧[0]`/`∨[0]` parsed fine, the missing piece was the
+evaluator arm at `evaluator.rs:1766-1783`.
 
 ---
 
@@ -294,13 +270,13 @@ aren't enumerated in the audit).
 | # | Feature | Cases | Why |
 |---|---|---|---|
 | 1 | ⊃[axis] | 11 | New value type, half-day |
-| 2 | +[axis] monadic | ~1 | Reverted: wrong semantics |
+| 2 | +[axis] monadic | 0 | **CLOSED** at `ccc38ac` (Part 8) |
 | 3 | +/ adverb distinguish | 0 | Already works via adv_explicit_axis |
-| 4 | ∧/∨ sort-along-axis | 5 | New helper, not in allowlist |
+| 4 | ∧/∨ sort-along-axis | 0 | **CLOSED** at `7684633` (Part 7) |
 | 5 | Byte-identical probe | 0 | P8 display noise, useless signal |
 | 6 | T1.3 labels cluster | 40 | Separate workstream |
 | 7 | T2.1 reshape spec | 4 | Separate workstream |
 | 8 | s:col | ~4 | Depends on ⊃[axis] (#1) |
 
-**Total T1.1 carryover**: 17 cases (⊃[axis] 11 + sort 5 + +monadic 1).
+**T1.1 carryover**: 11 cases (⊃[axis] 11 only — sort and +monadic closed in Parts 7-8).
 **Adjacent clusters**: 48 cases (T1.3 40 + T2.1 4 + s:col ~4).
