@@ -14824,38 +14824,55 @@ impl Engine {
         let b_first = b.value_at(0);
         match (&a_last, &b_first) {
             (APLValue::Number(x), APLValue::Number(y)) => {
-                let x_long = x.as_long();
-                let y_long = y.as_long();
-                if let (Ok(xv), Ok(yv)) = (x_long, y_long) {
-                    let mut out: Vec<AplRef<APLValue>> = Vec::new();
-                    for i in 0..a_len - 1 {
-                        out.push(Rc::new(a.value_at(i)));
+                // Oracle: range endpoints must both be integer-family (Long or
+                // BigInt, mixed OK — both report as "integer"). Float, rational
+                // and complex endpoints ALWAYS error, even when paired alike
+                // (`1.5 … 2.5` → "A=float, B=float"; `1j2 … 10` →
+                // "A=complex, B=integer"). The port used to interpolate doubles
+                // and silently range the real parts of complexes.
+                fn int_value(n: &KapNumber) -> Option<num_bigint::BigInt> {
+                    match n {
+                        KapNumber::Long(v) => Some(num_bigint::BigInt::from(*v)),
+                        KapNumber::BigInt(v) => Some(v.clone()),
+                        _ => None,
                     }
-                    let step = if xv <= yv { 1i64 } else { -1i64 };
-                    let n = (yv - xv).unsigned_abs() as usize + 1;
-                    for j in 0..n {
-                        out.push(Rc::new(APLValue::Number(KapNumber::Long(
-                            xv + j as i64 * step,
-                        ))));
-                    }
-                    for i in 1..b_len {
-                        out.push(Rc::new(b.value_at(i)));
-                    }
-                    let len = out.len();
-                    return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                        vec![len],
-                        ArrayData::Nested(out),
-                    )))));
                 }
+                fn type_name(n: &KapNumber) -> &'static str {
+                    match n {
+                        KapNumber::Long(_) | KapNumber::BigInt(_) => "integer",
+                        KapNumber::Double(_) => "float",
+                        KapNumber::Rational(_) => "rational",
+                        KapNumber::Complex(_, _) => "complex",
+                    }
+                }
+                let (xb, yb) = match (int_value(x), int_value(y)) {
+                    (Some(a), Some(b)) => (a, b),
+                    _ => {
+                        return Err(AplError::runtime(format!(
+                            "…: Range types not compatible. A={}, B={}",
+                            type_name(x),
+                            type_name(y)
+                        )))
+                    }
+                };
                 let mut out: Vec<AplRef<APLValue>> = Vec::new();
                 for i in 0..a_len - 1 {
                     out.push(Rc::new(a.value_at(i)));
                 }
-                let n = ((y.as_double() - x.as_double()).abs() as usize) + 1;
-                for j in 0..n {
-                    let v = x.as_double()
-                        + (j as f64) * (y.as_double() - x.as_double()) / (n as f64 - 1.0);
-                    out.push(Rc::new(APLValue::Number(KapNumber::Double(v))));
+                // BigInt stepping: exact for huge endpoints, Long-collapsed per
+                // element (`2 … 9` stays longs; `…807 … …808` mixes long+bigint).
+                let step = if xb <= yb {
+                    num_bigint::BigInt::from(1)
+                } else {
+                    num_bigint::BigInt::from(-1)
+                };
+                let mut cur = xb.clone();
+                loop {
+                    out.push(Rc::new(APLValue::Number(bigint_to_kap(&cur))));
+                    if cur == yb {
+                        break;
+                    }
+                    cur += &step;
                 }
                 for i in 1..b_len {
                     out.push(Rc::new(b.value_at(i)));

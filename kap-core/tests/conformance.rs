@@ -348,6 +348,8 @@ fn curated_kap_parity() {
         ("1r2 0.9 ⍸ 0 0.5 1r2 0.8 0.9 0.91 0.92", "(0 1 1 1 2 2 2)"),
         // declare(:local) scopes assignment to the fn (oracle: `… ◊ a+5` → `9`)
         ("a←4 ◊ { declare(:local a) a←3 ◊ ⍵+a } 2 ◊ a+5", "9"),
+        // Range needs integer-family endpoints; bigints step exactly
+        ("9223372036854775807 … 9223372036854775808", "(9223372036854775807 9223372036854775808)"),
         ("⍋ 3 1 4 2", "(1 3 0 2)"), // grade-up (monadic): 0-based indices ascending
         // Bracket indexing (pick + multi-axis access) — dyadic ⍴ required
         ("(10 20 30 40)[2]", "30"),
