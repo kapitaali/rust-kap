@@ -1462,6 +1462,32 @@ impl<'a> Parser<'a> {
         }
         // FunctionCall2Arg (parser.kt:474): ⍺ = makeResultList(leftArgs) — ONE operand
         // passes through UNWRAPPED (`3 g 4` binds ⍺=3, NOT ⍺=(3)).
+        //
+        // parser.kt:485–491 FnParseResult branch with NON-empty leftArgs: when the
+        // right argument is itself a FUNCTION (e.g. a trailing left-bind like the
+        // `10+` in `(1+10+)`), Kotlin does NOT apply — it builds
+        // Chain2(makeLeftBindFunction(leftArgs, f), g), i.e. atop of `⍺ f` after
+        // `g`. Without this, `(1+10+)` parsed as `Apply{1 + Train[10,+]}` (applying
+        // `+` to a function), and `(1+10+) 4` stranded `(⍬ 4)` instead of `15`.
+        if self.nested_right_is_fn_result(&right) {
+            let bound = if left_args.len() == 1 {
+                left_args.pop().unwrap()
+            } else {
+                Instr::Array {
+                    elements: std::mem::take(left_args),
+                }
+            };
+            let b = Instr::Train {
+                funcs: vec![bound, fn_instr],
+                reverse: false,
+                compose: false,
+            };
+            return Ok(Instr::Train {
+                funcs: vec![b, right],
+                reverse: false,
+                compose: false,
+            });
+        }
         if left_args.len() == 1 {
             let left = left_args.pop().unwrap();
             return Ok(Instr::Apply {
