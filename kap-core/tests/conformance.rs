@@ -358,6 +358,10 @@ fn curated_kap_parity() {
         ("{ S ⇐ → ⋄ S 30 } 0", "30"),
         // `λ→` captures the enclosing escape
         ("{ f ⇐ λ→ ⋄ f 30 } 0", "30"),
+        // Take-under overlays the updated take region (unclamped take width)
+        ("{10+⍵}⍢(2↑) ⍳5", "(10 11 2 3 4)"),
+        // Negative over-take under: the region starts before the source
+        ("{⊢⍵}⍢(¯10↑) ⍳3", "(0 1 2)"),
         ("⍋ 3 1 4 2", "(1 3 0 2)"), // grade-up (monadic): 0-based indices ascending
         // Bracket indexing (pick + multi-axis access) — dyadic ⍴ required
         ("(10 20 30 40)[2]", "30"),

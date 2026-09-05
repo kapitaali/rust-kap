@@ -10985,7 +10985,7 @@ impl Engine {
         src: &AplRef<APLValue>,
         src_replacement_dims: &[usize],
         replacement: &AplRef<APLValue>,
-        offset: &[usize],
+        offset: &[i64],
     ) -> Result<AplRef<APLValue>, AplError> {
         let src_dims = Self::value_dims(src);
         let mut repl_dims = Self::value_dims(replacement);
@@ -11012,19 +11012,44 @@ impl Engine {
             )));
         }
         let rank = src_dims.len();
-        // Result shape per axis (array_functions.kt:158).
+        // Result shape per axis (array_functions.kt:158):
+        //   out[i] = src[i] - srcRepl[i] + repl[i]
+        // A negative dimension is Kotlin's `Dimensions` ctor failure
+        // ("Dimensions contains negative values") — e.g. `{,100}⍢(6↑) ⍳3`:
+        // 3 - 6 + 1 = -2. This check comes FIRST (Kotlin init order).
         let mut out_dims = Vec::with_capacity(rank);
         for i in 0..rank {
-            let grown = src_dims[i] + repl_dims[i];
-            if grown < src_replacement_dims[i] {
+            let d =
+                src_dims[i] as i64 - src_replacement_dims[i] as i64 + repl_dims[i] as i64;
+            if d < 0 {
                 return Err(AplError::runtime(
-                    "replacement array size overflows".to_string(),
+                    "Dimensions contains negative values".to_string(),
                 ));
             }
-            out_dims.push(grown - src_replacement_dims[i]);
+            out_dims.push(d as usize);
+        }
+        // Resize validation (array_functions.kt:175-191): at most ONE axis may
+        // change size relative to the source, and every OTHER axis must keep
+        // the selected region's width. E.g. `((0 1↓)⍢(2↑)) 5 4 ⍴ ⍳20` shrinks
+        // axis 1 of a 2-axis selection → "cannot resize axis: 1".
+        let mut resizable: Option<i64> = None;
+        for i in 0..rank {
+            if repl_dims[i] != src_dims[i] {
+                resizable = Some(match resizable {
+                    None => i as i64,
+                    _ => -1,
+                });
+            }
+        }
+        if let Some(r) = resizable {
+            for i in 0..rank {
+                if src_replacement_dims[i] != repl_dims[i] && i as i64 != r {
+                    return Err(AplError::runtime(format!("cannot resize axis: {}", i)));
+                }
+            }
         }
         for i in 0..rank {
-            if out_dims[i] < offset[i] + repl_dims[i] {
+            if (out_dims[i] as i64) < offset[i] + repl_dims[i] as i64 {
                 return Err(AplError::runtime(format!(
                     "replacement array size overflows at index {}",
                     i
@@ -11051,13 +11076,18 @@ impl Engine {
         let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(total);
         let mut coord = vec![0usize; rank];
         for _ in 0..total {
-            // isWithinReplacement (array_functions.kt:222)
-            let inside = (0..rank)
-                .all(|i| coord[i] >= offset[i] && coord[i] < repl_dims[i] + offset[i]);
+            // isWithinReplacement (array_functions.kt:222). Coordinates and
+            // offsets are compared in i64: an over-take from the tail selects a
+            // region starting BEFORE the source (e.g. offset -7 for `(¯10↑)` on
+            // a 3-vector), and only the overlap is visible.
+            let inside = (0..rank).all(|i| {
+                (coord[i] as i64) >= offset[i]
+                    && (coord[i] as i64) < repl_dims[i] as i64 + offset[i]
+            });
             if inside {
                 let mut idx = 0usize;
                 for i in 0..rank {
-                    idx = idx * repl_dims[i] + (coord[i] - offset[i]);
+                    idx = idx * repl_dims[i] + (coord[i] as i64 - offset[i]) as usize;
                 }
                 out.push(if repl_total == 0 {
                     Rc::new(APLValue::Number(KapNumber::Long(0)))
@@ -11068,13 +11098,13 @@ impl Engine {
                 // Outside: shift by the per-axis size delta (array_functions.kt:210).
                 let mut idx = 0usize;
                 for i in 0..rank {
-                    let p = coord[i];
+                    let p = coord[i] as i64;
                     let mapped = if p < offset[i] {
                         p
                     } else {
-                        p + src_replacement_dims[i] - repl_dims[i]
+                        p + src_replacement_dims[i] as i64 - repl_dims[i] as i64
                     };
-                    idx = idx * src_dims[i] + mapped;
+                    idx = idx * src_dims[i] + mapped as usize;
                 }
                 out.push(
                     src_flat
@@ -11169,8 +11199,8 @@ impl Engine {
             let sel_dims: Vec<usize> = (0..src_dims.len())
                 .map(|i| if i == axis { sel_dim } else { src_dims[i] })
                 .collect();
-            let offset: Vec<usize> = (0..src_dims.len())
-                .map(|i| if i == axis { off } else { 0 })
+            let offset: Vec<i64> = (0..src_dims.len())
+                .map(|i| if i == axis { off as i64 } else { 0 })
                 .collect();
             return self.overlay_replacement(&a, &sel_dims, &bwa, &offset);
         }
@@ -11246,7 +11276,7 @@ impl Engine {
                 }
                 if let Some((is_take, counts)) = self.under_take_drop_spec(f1, env)? {
                     let mut sel_dims = Vec::with_capacity(rank);
-                    let mut offset = Vec::with_capacity(rank);
+                    let mut offset: Vec<i64> = Vec::with_capacity(rank);
                     for i in 0..rank {
                         let n = src_dims[i];
                         match counts.get(i).copied() {
@@ -11255,14 +11285,21 @@ impl Engine {
                                 offset.push(0);
                             }
                             Some(c) if is_take => {
-                                let keep = (c.unsigned_abs() as usize).min(n);
+                                // Unclamped take width (Kotlin TakeArrayValue):
+                                // over-take pads with fill, it does not shrink
+                                // the selected region to the source.
+                                let keep = c.unsigned_abs() as usize;
                                 sel_dims.push(keep);
-                                offset.push(if c >= 0 { 0 } else { n - keep });
+                                offset.push(if c >= 0 {
+                                    0
+                                } else {
+                                    n as i64 - keep as i64
+                                });
                             }
                             Some(c) => {
                                 let d = (c.unsigned_abs() as usize).min(n);
                                 sel_dims.push(n - d);
-                                offset.push(if c >= 0 { d } else { 0 });
+                                offset.push(if c >= 0 { d as i64 } else { 0 });
                             }
                         }
                     }
@@ -11393,7 +11430,7 @@ impl Engine {
             let bare = matches!(wrapper,
                 Instr::Symbol { name, namespace: None } if name == "↑");
             let mut sel_dims = Vec::with_capacity(rank);
-            let mut offset = Vec::with_capacity(rank);
+            let mut offset: Vec<i64> = Vec::with_capacity(rank);
             for i in 0..rank {
                 let n = src_dims[i];
                 let c = counts.get(i).copied();
@@ -11407,14 +11444,22 @@ impl Engine {
                             offset.push(0);
                         }
                         Some(c) if is_take => {
-                            let keep = (c.unsigned_abs() as usize).min(n);
+                            // Unclamped take width (Kotlin TakeArrayValue,
+                            // drop.kt:111): the region is |count| wide even past
+                            // the source (over-take pads with fill). Clamping
+                            // hid `{,100}⍢(6↑) ⍳3`'s negative dimension.
+                            let keep = c.unsigned_abs() as usize;
                             sel_dims.push(keep);
-                            offset.push(if c >= 0 { 0 } else { n - keep });
+                            offset.push(if c >= 0 {
+                                0
+                            } else {
+                                n as i64 - keep as i64
+                            });
                         }
                         Some(c) => {
                             let d = (c.unsigned_abs() as usize).min(n);
                             sel_dims.push(n - d);
-                            offset.push(if c >= 0 { d } else { 0 });
+                            offset.push(if c >= 0 { d as i64 } else { 0 });
                         }
                     }
                 }
