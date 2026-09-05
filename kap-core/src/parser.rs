@@ -314,6 +314,21 @@ impl<'a> Parser<'a> {
     ///
     /// Active only under KAP_KOTLIN_PARSER=1; default path byte-identical to pre-M1.
     fn parse_value_kotlin(&mut self) -> Result<Instr, AplError> {
+        // T1.3 / `onlyBrackets` conformance: a bare `[` at the start of a
+        // value expression (no left-arg context) is an INDEX DEREFERENCE per
+        // Kotlin `parser.kt:898-903` (processIndex → processLeftArgAdjustment
+        // throws "Index dereference without argument"). The port's
+        // `parse_primary` arm at `parser.rs:5359` unconditionally builds a
+        // list literal `Instr::Array { elements: [] }` from `[`, which is
+        // semantically wrong here — there is no left value to dereference.
+        //
+        // Only fire this check at the start of a fresh value expression
+        // (i.e. before the accumulator has any value). A `[` AFTER a value
+        // (e.g. `x[0]`, `f[axis]`) is consumed correctly by the existing
+        // `parse_index_suffix` / axis-applied paths.
+        if matches!(self.peek().map(|t| &t.token), Some(Token::OpenBracket)) {
+            return Err(self.err("Index dereference without argument"));
+        }
         self.parse_value_kotlin_with(Vec::new())
     }
 
@@ -6019,6 +6034,19 @@ mod tests {
         stmts.into_iter().next().unwrap()
     }
 
+    /// Returns Ok(instr) on success, Err(error_string) on parse failure. Used
+    /// to assert that an INVALID Kap form is rejected with a specific error
+    /// message (e.g. the top-level `[...]` index-deref case).
+    fn parse_or_err(src: &str) -> Result<Instr, String> {
+        let toks = tokenise(src);
+        let (stmts, errs) = parse(&toks, &[], &[], &std::collections::HashMap::new());
+        if !errs.is_empty() {
+            return Err(format!("{:?}", errs));
+        }
+        assert_eq!(stmts.len(), 1, "expected one statement for {:?}", src);
+        Ok(stmts.into_iter().next().unwrap())
+    }
+
     #[test]
     fn parse_number_literal() {
         assert!(matches!(parse_one("42"), Instr::Literal(LiteralValue::Number(_))));
@@ -6094,9 +6122,17 @@ mod tests {
 
     #[test]
     fn parse_array_literal() {
-        match parse_one("[1;2;3]") {
-            Instr::Array { elements } => assert_eq!(elements.len(), 3),
-            other => panic!("expected Array, got {:?}", other),
-        }
+        // Top-level `[...]` is an INDEX DEREFERENCE (Kotlin parser.kt:898-903
+        // processIndex), not a list literal — there is no left value to
+        // dereference. The error is "Index dereference without argument".
+        // The list-literal syntax still works inside an expression context
+        // (e.g. inside a paren group) where a left-arg context exists.
+        let r = parse_or_err("[1;2;3]");
+        let err = r.expect_err("top-level [...] should error");
+        assert!(
+            err.contains("Index dereference without argument"),
+            "expected index-deref error, got: {}",
+            err
+        );
     }
 }

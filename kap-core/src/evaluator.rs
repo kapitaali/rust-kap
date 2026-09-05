@@ -15301,7 +15301,14 @@ mod tests {
 
     #[test]
     fn eval_array_literal() {
-        assert_eq!(eval("[10; 20; 30]"), "(10 20 30)");
+        // Top-level `[10; 20; 30]` is an INDEX DEREFERENCE without argument
+        // (Kotlin parser.kt:898-903 processIndex), not a list literal.
+        // The list-literal syntax works inside an expression context
+        // (e.g. `(10; 20; 30)` is a paren-wrapped array literal).
+        assert!(
+            eval_fails("[10; 20; 30]"),
+            "top-level [...] should fail with index-deref error"
+        );
     }
 
     #[test]
