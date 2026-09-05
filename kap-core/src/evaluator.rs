@@ -13501,6 +13501,11 @@ impl Engine {
                 out.push(v);
             }
         }
+        if dims.is_empty() && out.len() == 1 {
+            // Scalar × scalar → scalar, not a 0-d wrapper (oracle:
+            // `2 (=⌻) 3` → `0`). Echo-shape, same as `⊇`/bitwise.
+            return Ok(out.pop().unwrap());
+        }
         Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
             dims,
             ArrayData::Nested(out),

@@ -323,6 +323,10 @@ fn curated_kap_parity() {
         ("× 0.5", "1"),
         // Scalar ⊇ index → scalar result (oracle: `2 ⊇ 10 20 30` → `30`)
         ("1 + (0 ⊇ 2 3 4 5 6 7)", "3"),
+        // Scalar ⌻ outer product → scalar (oracle: `2 (=⌻) 3` → `0`)
+        ("2 (=⌻) 3", "0"),
+        ("2 (+/=⌻) 3", "0"),
+        ("⊣«×»(+/=⌻)/ 4 2 ⍴ ⍳8", "(0 0 0 0)"),
         ("⍋ 3 1 4 2", "(1 3 0 2)"), // grade-up (monadic): 0-based indices ascending
         // Bracket indexing (pick + multi-axis access) — dyadic ⍴ required
         ("(10 20 30 40)[2]", "30"),
