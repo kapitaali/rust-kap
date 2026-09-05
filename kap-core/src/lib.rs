@@ -784,6 +784,11 @@ impl NamespaceRegistry {
             .map(|s| s.contains(name))
             .unwrap_or(false)
     }
+    /// Namespaces imported by `ns` (via `import("…")`, in order). Used by the
+    /// parser's macro-visibility check alongside [`is_exported`].
+    pub fn imports_of(&self, ns: &str) -> Vec<String> {
+        self.imports.borrow().get(ns).cloned().unwrap_or_default()
+    }
     pub fn add_import(&self, ns: &str, imported: &str) {
         self.imports
             .borrow_mut()

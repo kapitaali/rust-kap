@@ -521,6 +521,8 @@ impl Engine {
                 known_ops: op_names,
                 macros,
                 kotlin_close_stack: Vec::new(),
+                current_ns: env.ns_registry.current_ns(),
+                ns_registry: env.ns_registry.clone(),
             };
             match p.parse_statements()? {
                 Some(instr) => {
@@ -581,7 +583,7 @@ impl Engine {
         anchor.acts_as_root.set(true);
         loop {
             let ns_now = env.ns_registry.current_ns();
-            *anchor.home_ns.borrow_mut() = Some(ns_now);
+            *anchor.home_ns.borrow_mut() = Some(ns_now.clone());
             // Seed from the ANCHOR, not `env`: file-local `∇`/`⇐` defs evaluate
             // into the anchor (acts_as_root), and `function_defs` is a deep-cloned
             // per-scope set — so `env` never sees them. Kotlin parses+evaluates a
@@ -599,6 +601,8 @@ impl Engine {
                 known_ops: op_names,
                 macros,
                 kotlin_close_stack: Vec::new(),
+                current_ns: ns_now.clone(),
+                ns_registry: env.ns_registry.clone(),
             };
             match p.parse_statements() {
                 Ok(Some(instr)) => {
@@ -1044,18 +1048,22 @@ impl Engine {
                     Some(ns) => format!("{}:{}", ns, name),
                     None => name.clone(),
                 };
-                let macro_def = SyntaxMacro {
-                    rules: rules.clone(),
-                    body: body.clone(),
-                };
-                self.macros.borrow_mut().insert(qual, macro_def);
-                // Kotlin `processDefsyntax` returns `LiteralSymbol(triggerSymbol)`:
-                // the statement's value is the trigger symbol itself (oracle:
-                // `defsyntax foo …` → `default:foo`).
+                // The defining namespace (explicit trigger ns, else current):
+                // Kotlin `processDefsyntax` returns `LiteralSymbol(triggerSymbol)`
+                // — the statement's value is the trigger symbol itself (oracle:
+                // `defsyntax foo …` → `default:foo`) — and the namespace gates
+                // cross-namespace use (unexported macros stay invisible, even
+                // with import).
                 let sym_ns = match namespace {
                     Some(ns) => ns.clone(),
                     None => env.ns_registry.current_ns(),
                 };
+                let macro_def = SyntaxMacro {
+                    rules: rules.clone(),
+                    body: body.clone(),
+                    namespace: sym_ns.clone(),
+                };
+                self.macros.borrow_mut().insert(qual, macro_def);
                 Ok(Rc::new(APLValue::Symbol {
                     name: name.clone(),
                     namespace: Some(sym_ns),
@@ -1074,6 +1082,10 @@ impl Engine {
                 let macro_def = SyntaxMacro {
                     rules: rules.clone(),
                     body: body.clone(),
+                    namespace: match namespace {
+                        Some(ns) => ns.clone(),
+                        None => env.ns_registry.current_ns(),
+                    },
                 };
                 self.macros.borrow_mut().insert(qual, macro_def);
                 Ok(Rc::new(APLValue::Null))

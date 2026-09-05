@@ -73,6 +73,10 @@ pub fn parse(
         known_ops: known_ops.iter().map(|s| s.to_string()).collect(),
         macros: macros.clone(),
         kotlin_close_stack: Vec::new(),
+        // Legacy entry: no engine attached — default namespace, fresh registry
+        // (macros defined without a namespace check are same-ns visible).
+        current_ns: "default".to_string(),
+        ns_registry: std::rc::Rc::new(crate::NamespaceRegistry::default()),
     };
     let mut stmts = Vec::new();
     let mut errors = Vec::new();
@@ -106,6 +110,15 @@ pub struct Parser<'a> {
     /// When a bare symbol matches a trigger name here, the parser expands the macro inline
     /// (Kotlin `syntax.kt`'s `processCustomSyntax`). Keyed by bare trigger name.
     pub macros: std::collections::HashMap<String, crate::ast::SyntaxMacro>,
+    /// Namespace in effect where the parsed statement runs (mirrored from the
+    /// namespace registry at statement start). Macro triggers are
+    /// namespace-sensitive: a macro is visible here iff defined in this
+    /// namespace, or exported from its defining namespace AND that namespace
+    /// is imported here (unexported macros fail: `Variable not assigned: ns:name`).
+    pub current_ns: String,
+    /// Live namespace registry (exports/imports). Shared with the evaluator so
+    /// `declare(:export …)` / `import(…)` from earlier statements apply.
+    pub ns_registry: std::rc::Rc<crate::NamespaceRegistry>,
     /// P1-M5: stack of closing tokens for nested Kotlin-path group parses. While
     /// non-empty, `finish_fn_call` parses the right argument with the SAME
     /// accumulator loop (respecting the close token), mirroring Kotlin's
@@ -675,9 +688,11 @@ impl<'a> Parser<'a> {
                     if namespace.is_none() {
                         if let Some(m) = self.macros.get(&name) {
                             let m = m.clone();
-                            self.advance();
-                            left_args.push(self.expand_macro(&m)?);
-                            continue;
+                            if self.macro_visible(&name, &m) {
+                                self.advance();
+                                left_args.push(self.expand_macro(&m)?);
+                                continue;
+                            }
                         }
                         // `declare(…)` structural special form — same rationale as the
                         // legacy parse_primary arm: fn-valued members of an export list
@@ -5244,11 +5259,15 @@ impl<'a> Parser<'a> {
                 // A registered `defsyntax` macro: expand inline (Kotlin `processCustomSyntax`).
                 // Must be checked BEFORE the plain-symbol path, because a macro trigger is a
                 // bare symbol that should consume its argument tokens per the rule list.
+                // Namespace-gated: an invisible macro (defined elsewhere, neither
+                // exported nor imported here) falls through to the plain-symbol path.
                 if namespace.is_none() {
                     if let Some(m) = self.macros.get(&name) {
                         let m = m.clone();
-                        self.advance(); // consume the trigger symbol
-                        return self.expand_macro(&m);
+                        if self.macro_visible(&name, &m) {
+                            self.advance(); // consume the trigger symbol
+                            return self.expand_macro(&m);
+                        }
                     }
                     // `declare(…)` is a STRUCTURAL special form (Kotlin DeclareToken →
                     // processExport): its argument is never evaluated and must NOT go
@@ -5811,6 +5830,24 @@ impl<'a> Parser<'a> {
             },
             None => Err(self.err("expected a variable name in syntax rule")),
         }
+    }
+
+    /// Whether the macro trigger `name` (defined in `m.namespace`) is visible in
+    /// the statement being parsed. Kotlin scoping: same-namespace use always
+    /// works; cross-namespace use needs the trigger exported from its defining
+    /// namespace AND that namespace imported here. Otherwise the trigger parses
+    /// as an ordinary symbol and evaluation fails (`Variable not assigned:
+    /// ns:name` — cf. `unexportedNamesInCustomSyntaxShouldFail`).
+    fn macro_visible(&self, name: &str, m: &SyntaxMacro) -> bool {
+        if m.namespace == self.current_ns {
+            return true;
+        }
+        self.ns_registry.is_exported(&m.namespace, name)
+            && self
+                .ns_registry
+                .imports_of(&self.current_ns)
+                .iter()
+                .any(|ns| ns == &m.namespace)
     }
 
     /// Expand a registered macro at the current position (Kotlin `processCustomSyntax`).

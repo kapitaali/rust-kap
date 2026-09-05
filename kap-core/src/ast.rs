@@ -296,6 +296,10 @@ pub enum SpecialToken {
 pub struct SyntaxMacro {
     pub rules: Vec<SyntaxRule>,
     pub body: std::rc::Rc<Instr>,
+    /// Namespace the macro was defined in (explicit trigger ns, else the
+    /// current namespace at `defsyntax` eval). Gates cross-namespace use:
+    /// same-ns always visible; elsewhere needs export + import.
+    pub namespace: String,
 }
 
 impl Instr {
