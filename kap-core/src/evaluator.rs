@@ -3581,13 +3581,7 @@ impl Engine {
             // `~` (without/set-difference) is dyadic. Monadic `~` is strict boolean
             // logical NOT (0 → 1, 1 → 0, anything else → Error "Operation not supported for value").
             "~" | "bitnot" => match left_val {
-                None => match right_val.as_ref() {
-                    APLValue::Number(n) => {
-                        let b = self.as_strict_bool(n, "~")?;
-                        Ok(Rc::new(APLValue::Number(KapNumber::Long(if b { 0 } else { 1 }))))
-                    }
-                    _ => Err(AplError::runtime("~ requires a number".into())),
-                },
+                None => self.logical_not_broadcast(right_val),
                 Some(l) => self.without(l, right_val),
             },
             "∊" | "in" => match left_val {
@@ -5684,6 +5678,19 @@ impl Engine {
         if matches!(sym, "=" | "≠") {
             let eq = match (a.as_ref(), right_val.as_ref()) {
                 (APLValue::Number(x), APLValue::Number(y)) => Self::numbers_value_equal(x, y),
+                (APLValue::Char(x), APLValue::Char(y)) => x == y,
+                (
+                    APLValue::Symbol { name: an, namespace: ans },
+                    APLValue::Symbol { name: bn, namespace: bns },
+                ) => an == bn && ans == bns,
+                // Cross-type scalar pairs are simply unequal (oracle: `1=@a` → 0,
+                // `1='foo` → 0): `=` yields 0, `≠` yields 1, never an error.
+                (APLValue::Number(_), _)
+                | (_, APLValue::Number(_))
+                | (APLValue::Char(_), _)
+                | (_, APLValue::Char(_))
+                | (APLValue::Symbol { .. }, _)
+                | (_, APLValue::Symbol { .. }) => false,
                 _ => return Err(AplError::runtime(format!("{} requires numbers", sym))),
             };
             let r = if (sym == "=") == eq { 1 } else { 0 };
@@ -5699,6 +5706,37 @@ impl Engine {
         };
         // Kap booleans are 1 (true) / 0 (false).
         Ok(Rc::new(APLValue::Number(KapNumber::Long(if pred(ord) { 1 } else { 0 }))))
+    }
+
+    /// Deep value-equality for `=`/`≠` on nested values: numbers numerically,
+    /// chars by codepoint, symbols by name+namespace, strings by content, arrays
+    /// by identical dimensions + recursive elements. Cross-type pairs (and nil
+    /// vs non-nil) are unequal — never an error.
+    fn values_equal_deep(x: &APLValue, y: &APLValue) -> bool {
+        match (x, y) {
+            (APLValue::Number(a), APLValue::Number(b)) => Self::numbers_value_equal(a, b),
+            (APLValue::Char(a), APLValue::Char(b)) => a == b,
+            (
+                APLValue::Symbol { name: an, namespace: ans },
+                APLValue::Symbol { name: bn, namespace: bns },
+            ) => an == bn && ans == bns,
+            (APLValue::Str(a), APLValue::Str(b)) => a == b,
+            (APLValue::List(a), APLValue::List(b)) => {
+                a.element_count() == b.element_count()
+                    && a.elements().iter().zip(b.elements().iter()).all(|(e1, e2)| {
+                        Self::values_equal_deep(e1.as_ref(), e2.as_ref())
+                    })
+            }
+            (APLValue::Array(a), APLValue::Array(b)) => {
+                a.dimensions == b.dimensions
+                    && a.elements().iter().zip(b.elements().iter()).all(|(e1, e2)| {
+                        Self::values_equal_deep(e1.as_ref(), e2.as_ref())
+                    })
+            }
+            (APLValue::Null, APLValue::Null) => true,
+            (APLValue::Nil, APLValue::Nil) => true,
+            _ => false,
+        }
     }
 
     /// Element-wise scalar comparison `A f B` for the six comparison operators.
@@ -5750,13 +5788,127 @@ impl Engine {
                         None
                     }
                 }
-                _ => None,
+                // Symbol-vs-symbol compares by name+namespace for `=`/`≠`
+                // (oracle: `'foo='foo` → 1); ordering on symbols errors.
+                (
+                    APLValue::Symbol { name: an, namespace: ans },
+                    APLValue::Symbol { name: bn, namespace: bns },
+                ) => {
+                    if matches!(sym, "=" | "≠") {
+                        Some((an == bn && ans == bns) == (sym == "="))
+                    } else {
+                        None
+                    }
+                }
+                // Nested values compare by deep value-equality for `=`/`≠`
+                // (oracle: `(1;2)=(1;2)` → 1, `(1;2)=3` → 0, `((1;2);3)=…` → 1);
+                // ordering on nested values errors.
+                (APLValue::Array(_), _)
+                | (_, APLValue::Array(_))
+                | (APLValue::List(_), _)
+                | (_, APLValue::List(_)) => {
+                    if matches!(sym, "=" | "≠") {
+                        Some(Self::values_equal_deep(x, y) == (sym == "="))
+                    } else {
+                        None
+                    }
+                }
+                // Cross-type cells (number-vs-char, symbol-vs-anything, …) are
+                // simply unequal (oracle: `1=@a` → 0, `'foo="foo"` → all 0):
+                // `=` yields false, `≠` yields true. Ordering still errors.
+                _ => {
+                    if matches!(sym, "=" | "≠") {
+                        Some(sym == "≠")
+                    } else {
+                        None
+                    }
+                }
             }
         };
         let a = left_val.clone().ok_or_else(|| AplError::runtime(format!("{} needs two args", sym)))?;
         let (la, ra) = (a.as_ref(), right_val.as_ref());
         // Scalar-scalar fast path delegates to the original cmp2 — but two Str
         // operands (or Str + scalar) are element-wise char comparisons, so let
+        // Lists (`;`): `=`/`≠` on two lists is a scalar deep comparison (oracle:
+        // `(1;2)=(1;2)` → 1, `(1;2)=(1;2;3)` → 0); list-vs-scalar is scalar
+        // false; list-vs-array/string falls through to the element path below
+        // (each pair false unless deeply equal). Ordering with a list errors
+        // `Cannot compare values of type: X to Y`.
+        if matches!(la, APLValue::List(_)) || matches!(ra, APLValue::List(_)) {
+            // `⍬` propagates through lists as through everything else.
+            if matches!(la, APLValue::Null) || matches!(ra, APLValue::Null) {
+                return Ok(Rc::new(APLValue::Null));
+            }
+            if !matches!(sym, "=" | "≠") {
+                return Err(AplError::runtime(format!(
+                    "{}: Cannot compare values of type: {} to {}",
+                    sym,
+                    a.class_name(),
+                    right_val.class_name()
+                )));
+            }
+            let scalar_bool = |b: bool| {
+                Ok(Rc::new(APLValue::Number(KapNumber::Long(if b == (sym == "=") {
+                    1
+                } else {
+                    0
+                }))))
+            };
+            match (la, ra) {
+                (APLValue::List(x), APLValue::List(y)) => {
+                    let eq = x.element_count() == y.element_count()
+                        && x.elements().iter().zip(y.elements().iter()).all(|(e1, e2)| {
+                            Self::values_equal_deep(e1.as_ref(), e2.as_ref())
+                        });
+                    return scalar_bool(eq);
+                }
+                (APLValue::List(_), rhs)
+                    if !matches!(
+                        rhs,
+                        APLValue::Array(_) | APLValue::Str(_) | APLValue::List(_)
+                    ) =>
+                {
+                    return scalar_bool(false);
+                }
+                (lhs, APLValue::List(_))
+                    if !matches!(
+                        lhs,
+                        APLValue::Array(_) | APLValue::Str(_) | APLValue::List(_)
+                    ) =>
+                {
+                    return scalar_bool(false);
+                }
+                _ => {
+                    // One side is a list, the other an array or string: no
+                    // unwrapping — every position is false (oracle: `(1;2)=1 2`
+                    // → `(0 0)`). Lengths broadcast like arrays.
+                    let list_len = match (la, ra) {
+                        (APLValue::List(x), _) => x.element_count(),
+                        (_, APLValue::List(x)) => x.element_count(),
+                        _ => 1,
+                    };
+                    let other_len = match (la, ra) {
+                        (APLValue::List(_), APLValue::Array(b))
+                        | (APLValue::Array(b), APLValue::List(_)) => b.element_count(),
+                        (APLValue::List(_), APLValue::Str(s))
+                        | (APLValue::Str(s), APLValue::List(_)) => s.chars().count(),
+                        _ => 1,
+                    };
+                    if list_len != 1 && other_len != 1 && list_len != other_len {
+                        return Err(AplError::runtime(format!(
+                            "{}: Arguments must be of the same dimension, or one of the arguments must be a scalar. aDimensions=[{}], bDimensions=[{}]",
+                            sym, list_len, other_len
+                        )));
+                    }
+                    let n = list_len.max(other_len);
+                    let v = if sym == "=" { 0 } else { 1 };
+                    return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        vec![n],
+                        ArrayData::Long(vec![v; n]),
+                    )))));
+                }
+            }
+        }
         // them fall through to the general path.
         if !matches!(la, APLValue::Array(_) | APLValue::Str(_))
             && !matches!(ra, APLValue::Array(_) | APLValue::Str(_))
@@ -5903,6 +6055,136 @@ impl Engine {
             Ordering::Greater => 1i64,
         };
         Ok(Rc::new(APLValue::Number(KapNumber::Long(v))))
+    }
+
+    /// `⍸˝` bincount/histogram inverse (Kotlin `IntervalFunction.evalInverse1Arg`,
+    /// interval.kt:123): a rank-1 array of index locations becomes a count array
+    /// with `max+1` extent per axis. Duplicate locations accumulate; locations
+    /// must ascend (`All arguments must be ordered`); negatives error
+    /// (`Negative argument`); doubles truncate (`⍸˝ 1.5 2` → `(0 1 1)`).
+    fn interval_inverse(&self, v: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        const SYM: &str = "⍸";
+        if matches!(v.as_ref(), APLValue::Null) {
+            return Ok(Rc::new(APLValue::Null));
+        }
+        let dims = v.dimensions();
+        if dims.len() != 1 {
+            return Err(AplError::runtime(format!(
+                "{}: Argument must be a one-dimensional array, got [{}]",
+                SYM,
+                dims.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ")
+            )));
+        }
+        if dims[0] == 0 {
+            return Ok(Rc::new(APLValue::Null));
+        }
+        let bad_content = || {
+            AplError::runtime(format!(
+                "{}: All arguments must be scalars or one-dimensional arrays",
+                SYM
+            ))
+        };
+        let to_ints = |m: &APLValue| -> Result<Vec<i64>, AplError> {
+            let num_refs: Vec<KapNumber> = match m {
+                APLValue::Number(n) => vec![n.clone()],
+                APLValue::Array(a) if a.dimensions.len() == 1 => {
+                    let mut out = Vec::with_capacity(a.element_count());
+                    for e in a.elements() {
+                        match e.as_ref() {
+                            APLValue::Number(n) => out.push(n.clone()),
+                            _ => return Err(bad_content()),
+                        }
+                    }
+                    out
+                }
+                _ => return Err(bad_content()),
+            };
+            num_refs
+                .iter()
+                .map(|n| n.as_long().map_err(|_| bad_content()))
+                .collect()
+        };
+        // Collect locations with per-member negative rejection (Kotlin
+        // `makeLocationWithValue` inside the member loop).
+        let mut locs: Vec<Vec<i64>> = Vec::new();
+        match v.as_ref() {
+            APLValue::Array(a) => {
+                for e in a.elements() {
+                    let loc = to_ints(e.as_ref())?;
+                    if loc.iter().any(|c| *c < 0) {
+                        return Err(AplError::runtime(format!("{}: Negative argument", SYM)));
+                    }
+                    locs.push(loc);
+                }
+            }
+            APLValue::Str(s) => {
+                for c in s.chars() {
+                    let _ = c;
+                    return Err(bad_content());
+                }
+            }
+            other => {
+                let loc = to_ints(other)?;
+                if loc.iter().any(|c| *c < 0) {
+                    return Err(AplError::runtime(format!("{}: Negative argument", SYM)));
+                }
+                locs.push(loc);
+            }
+        }
+        // Ordered merge (duplicates accumulate) + per-axis extents. Order is
+        // lexicographic on equal-length locations (≡ row-major).
+        let lex_lt = |x: &[i64], y: &[i64]| {
+            for (a, b) in x.iter().zip(y.iter()) {
+                if a != b {
+                    return a < b;
+                }
+            }
+            false
+        };
+        let mut extents: Vec<usize> = Vec::new();
+        let mut counts: Vec<(Vec<i64>, i64)> = Vec::new();
+        for loc in &locs {
+            if extents.is_empty() {
+                extents = loc.iter().map(|c| (*c as usize) + 1).collect();
+            } else {
+                if extents.len() != loc.len() {
+                    return Err(AplError::runtime(format!(
+                        "{}: All arguments must have the same size",
+                        SYM
+                    )));
+                }
+                for (i, c) in loc.iter().enumerate() {
+                    let need = (*c as usize) + 1;
+                    if extents[i] < need {
+                        extents[i] = need;
+                    }
+                }
+            }
+            match counts.last_mut() {
+                Some((prev, n)) if *prev == *loc => *n += 1,
+                Some((prev, _)) if lex_lt(loc, prev) => {
+                    return Err(AplError::runtime(format!(
+                        "{}: All arguments must be ordered",
+                        SYM
+                    )))
+                }
+                _ => counts.push((loc.clone(), 1)),
+            }
+        }
+        let total: usize = extents.iter().product();
+        let mut out = vec![0i64; total];
+        for (loc, c) in &counts {
+            let mut idx = 0usize;
+            for (i, pos) in loc.iter().enumerate() {
+                let stride: usize = extents[i + 1..].iter().product();
+                idx += (*pos as usize) * stride;
+            }
+            out[idx] = *c;
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            extents,
+            ArrayData::Long(out),
+        )))))
     }
 
     fn iota(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
@@ -7169,6 +7451,75 @@ impl Engine {
         self.reverse_axis(left_val, right_val, None, true)
     }
 
+    /// A-path inverse for a plain function: `fn⁻¹ᴀ(value, bound)` solves
+    /// `y fn bound = value` (Kotlin `evalInverse2ArgA`). Used when inverting
+    /// through compose under commute. Returns None for non-symbol/unsupported
+    /// functions (caller falls back to generic recursion).
+    fn apply_inverse_a(
+        &self,
+        func: &Instr,
+        value: &Box<Instr>,
+        bound: &Box<Instr>,
+        env: &AplRef<Environment>,
+    ) -> Option<Result<AplRef<APLValue>, AplError>> {
+        let name = match func {
+            Instr::Symbol { name, .. } => name.as_str(),
+            _ => return None,
+        };
+        let sym = |n: &str| Instr::Symbol { name: n.to_string(), namespace: None };
+        let app = |op: &str, l: &Box<Instr>, r: &Box<Instr>| {
+            self.eval_apply(&sym(op), &Some(l.clone()), r, env)
+        };
+        Some(match name {
+            "+" => app("-", value, bound),
+            "-" => app("+", value, bound),
+            "×" => app("÷", value, bound),
+            "÷" => app("×", value, bound),
+            "⍟" | "log" => app("⍟", value, bound),
+            "√" => app("⍟", value, bound),
+            "⋆" | "*" => {
+                let one = Instr::Value(Rc::new(APLValue::Number(KapNumber::Long(1))));
+                let recip = match self.eval_apply(&sym("÷"), &Some(Box::new(one)), bound, env)
+                {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+                self.eval_apply(
+                    &sym("⋆"),
+                    &Some(value.clone()),
+                    &Box::new(Instr::Value(recip)),
+                    env,
+                )
+            }
+            "⊢" => match self.eval_instr(value, env) {
+                Ok(v) => v.force(self),
+                Err(e) => Err(e),
+            },
+            _ => return None,
+        })
+    }
+
+    /// A 2-train head that is NOT a function denotes a bound value: a variable
+    /// symbol (`(n-)˝` with `n←5`), a dynamic ref to a value. Known function
+    /// names, primitives, trains and derived functions stay on the atop path.
+    fn train_head_is_bound(&self, e: &Instr, env: &AplRef<Environment>) -> bool {
+        match e {
+            Instr::Symbol { name, .. } => {
+                if Self::is_primitive_name(name) {
+                    return false;
+                }
+                !env.function_names().iter().any(|f| f == name)
+            }
+            Instr::DynamicRef { name, .. } => {
+                if Self::is_primitive_name(name) {
+                    return false;
+                }
+                !env.function_names().iter().any(|f| f == name)
+            }
+            _ => false,
+        }
+    }
+
     /// `f˝` inverse adverb (Kotlin InverseFnOp, op.kt:298; engine.kt:500). Dispatches
     /// to each builtin's evalInverse* semantics:
     /// - ⌽˝/⊖˝: monadic = forward reverse (evalInverse1Arg == eval1Arg, :243);
@@ -7251,19 +7602,52 @@ impl Engine {
             // A 3+ member train (fork) has NO evalInverse* override in Kotlin
             // (FunctionCallChain.Chain3), so it inherits the base-class throw.
             Instr::Train { funcs, compose, reverse, .. } => {
-                // `f ∘ g` (compose) and `f ⍛ g` (reverse-compose) have NO inverse
-                // in Kotlin (ComposedFunction / ReverseComposedFunction define no
-                // evalInverse*), so `(f∘g)˝` / `(f⍛g)˝` must error. ⍛ parses with
-                // both `reverse:true` and `compose:true`; ∘ is `compose:true` only.
+                // `f ∘ g` and `f ⍛ g` DO invert dyadically (Kotlin
+                // Compose/ReverseComposeFunctionImpl evalInverse2ArgB,
+                // operator.kt:244/313). Monadic composition has no inverse
+                // (oracle: `(-∘÷)˝ 10` → `∘: Function does not have an inverse`).
                 if *compose {
                     let op_name = if *reverse { "⍛" } else { "∘" };
-                    return Err(AplError::runtime(format!(
-                        "{}: Function does not have an inverse",
-                        op_name
-                    )));
+                    if funcs.len() != 2 {
+                        return Err(AplError::runtime(format!(
+                            "{}: Function does not have an inverse",
+                            op_name
+                        )));
+                    }
+                    let bound = match left {
+                        None => {
+                            return Err(AplError::runtime(format!(
+                                "{}: Function does not have an inverse",
+                                op_name
+                            )))
+                        }
+                        Some(b) => b.clone(),
+                    };
+                    let f0 = Box::new(funcs[0].clone());
+                    let f1 = Box::new(funcs[1].clone());
+                    if !*reverse {
+                        // Compose B-path: `res = f0⁻¹(bound, value)`, then `f1⁻¹(res)`.
+                        let mid = self.adverb_inverse(&f0, &Some(bound), right, env)?;
+                        return self.adverb_inverse(
+                            &f1,
+                            &None,
+                            &Box::new(Instr::Value(mid)),
+                            env,
+                        );
+                    } else {
+                        // ReverseCompose B-path: `res = f0(bound)`, then `f1⁻¹(res, value)`.
+                        let bv =
+                            self.eval_apply(&f0, &None, &bound, env)?.force(self)?;
+                        return self.adverb_inverse(
+                            &f1,
+                            &Some(Box::new(Instr::Value(bv))),
+                            right,
+                            env,
+                        );
+                    }
                 }
                 if funcs.len() == 2 {
-                    if Self::is_value(&funcs[0]) {
+                    if Self::is_value(&funcs[0]) || self.train_head_is_bound(&funcs[0], env) {
                         // `(v f)˝` is already left-assigned; a further left arg
                         // (e.g. `7 ((1+)˝) 8`) makes it a 2-arg call, which Kotlin
                         // rejects: "f: Left assigned functions cannot be called
@@ -7316,6 +7700,23 @@ impl Engine {
                 // `f.evalInverse2ArgA(a, v)`: solve `y f v = a`.
                 return match inner.as_ref() {
                     Instr::Symbol { name, .. } => {
+                        // `⋆` under commute (Kotlin PowerAPLFunction.evalInverse2ArgA
+                        // = `a ⋆ (1÷b)`): `y ⋆ v = a` ⇒ `y = a⋆(1÷v)`
+                        // (oracle: `8⋆⍨˝6561` → 3.0).
+                        if name == "⋆" || name == "*" {
+                            let div_op =
+                                Instr::Symbol { name: "÷".to_string(), namespace: None };
+                            let one = Instr::Value(Rc::new(APLValue::Number(KapNumber::Long(1))));
+                            let recip = self.eval_apply(&div_op, &Some(Box::new(one)), &v, env)?;
+                            let star_op =
+                                Instr::Symbol { name: "⋆".to_string(), namespace: None };
+                            return self.eval_apply(
+                                &star_op,
+                                &Some(right.clone()),
+                                &Box::new(Instr::Value(recip)),
+                                env,
+                            );
+                        }
                         let new_op = match name.as_str() {
                             // `y + v = a` ⇒ y = a - v
                             "+" => Instr::Symbol { name: "-".into(), namespace: None },
@@ -7341,6 +7742,54 @@ impl Engine {
                         // `fn.evalInverse2ArgA(a, v)` ≡ solve `y` with `fn(y, v) = a`.
                         // Port's adverb_inverse models the B-path `fn(v, y) = a`, so
                         // swap args to request the A-path on the inner fn.
+                        // Compose/reverse-compose need their own A-path (Kotlin
+                        // operator.kt:250/319): `right` is the result value, `v`
+                        // the bound — e.g. `8 -∘÷⍨˝ 10` → 81/8.
+                        if let Instr::Train { funcs, compose: true, reverse, .. } =
+                            inner.as_ref()
+                        {
+                            if funcs.len() != 2 {
+                                return Err(AplError::runtime(
+                                    "˝: inverse not supported for this function".into(),
+                                ));
+                            }
+                            let f0 = Box::new(funcs[0].clone());
+                            let f1 = Box::new(funcs[1].clone());
+                            if !*reverse {
+                                // Compose A-path: `mid = f1(bound)`, then `f0⁻¹ᴀ(value, mid)`.
+                                let bv = self.eval_instr(&v, env)?.force(self)?;
+                                let mid = self
+                                    .eval_apply(&f1, &None, &Box::new(Instr::Value(bv)), env)?
+                                    .force(self)?;
+                                let mid_instr = Box::new(Instr::Value(mid));
+                                match self.apply_inverse_a(&f0, right, &mid_instr, env) {
+                                    Some(r) => return r,
+                                    None => {
+                                        return self.adverb_inverse(
+                                            &f0,
+                                            &Some(right.clone()),
+                                            &mid_instr,
+                                            env,
+                                        )
+                                    }
+                                }
+                            } else {
+                                // ReverseCompose A-path: `mid = f1⁻¹ᴀ(value, bound)`,
+                                // then `f0⁻¹(mid)`.
+                                let mid = match self.apply_inverse_a(&f1, right, &v, env) {
+                                    Some(r) => r?,
+                                    None => {
+                                        self.adverb_inverse(&f1, &Some(right.clone()), &v, env)?
+                                    }
+                                };
+                                return self.adverb_inverse(
+                                    &f0,
+                                    &None,
+                                    &Box::new(Instr::Value(mid)),
+                                    env,
+                                );
+                            }
+                        }
                         self.adverb_inverse(inner, &Some(right.clone()), &v, env)
                     }
                 }
@@ -7504,6 +7953,97 @@ impl Engine {
                     // i.e. right arg ÷ left arg). So feed `right ÷ left`.
                     self.eval_apply(&new_op, &Some(right.clone()), &l.clone(), env)
                 }
+            },
+            // `√` (Kotlin SqrtAPLFunction, math_functions.kt:1904-1914):
+            // monadic inverse squares (`√˝4` → 16); dyadic `n√˝x` solves
+            // `n√y = x` ⇒ `y = x⋆n` (oracle: `3√˝8` → 512).
+            "√" => match left {
+                None => {
+                    let two = Instr::Value(Rc::new(APLValue::Number(KapNumber::Long(2))));
+                    let star = Instr::Symbol { name: "⋆".to_string(), namespace: None };
+                    self.eval_apply(&star, &Some(right.clone()), &Box::new(two), env)
+                }
+                Some(l) => {
+                    let star = Instr::Symbol { name: "⋆".to_string(), namespace: None };
+                    self.eval_apply(&star, &Some(right.clone()), &l.clone(), env)
+                }
+            },
+            // `⋆`/`*` (Kotlin PowerAPLFunction, math_functions.kt:1204-1216):
+            // monadic inverse is ln (`*˝5` → 1.609…); dyadic `n⋆˝x` solves
+            // `n⋆y = x` ⇒ `y = n⍟x` (oracle: `3⋆˝6561` → 8.0).
+            "*" | "⋆" => match left {
+                None => {
+                    let log = Instr::Symbol { name: "⍟".to_string(), namespace: None };
+                    self.eval_apply(&log, &None, right, env)
+                }
+                Some(l) => {
+                    let log = Instr::Symbol { name: "⍟".to_string(), namespace: None };
+                    self.eval_apply(&log, &Some(l.clone()), right, env)
+                }
+            },
+            // `⍟` (Kotlin LogAPLFunction, math_functions.kt:1503-1511):
+            // monadic inverse is exp; dyadic `n⍟˝x` solves `n⍟y = x` ⇒
+            // `y = n⋆x` (oracle: `2⍟˝10` → 1024, `2⍟˝¯3` → 1/8).
+            "⍟" | "log" => match left {
+                None => {
+                    let star = Instr::Symbol { name: "⋆".to_string(), namespace: None };
+                    self.eval_apply(&star, &None, right, env)
+                }
+                Some(l) => {
+                    let star = Instr::Symbol { name: "⋆".to_string(), namespace: None };
+                    self.eval_apply(&star, &Some(l.clone()), right, env)
+                }
+            },
+            // `⊢` (Kotlin IdentityAPLFunction): monadic and left-bound inverses
+            // are the right argument (oracle: `⊢˝1234` → 1234, `9⊢˝1234` → 1234).
+            "⊢" => self.eval_apply(func, left, right, env),
+            // `⊣` (Kotlin HideAPLFunction) defines no inverse at all (oracle:
+            // `(⊣)˝5` and `9⊣˝1234` both error `⊣: Function does not have an inverse`).
+            "⊣" => Err(AplError::runtime(format!(
+                "{}: Function does not have an inverse",
+                fname
+            ))),
+            // `≬`/`toList` and `fromList` are mutual inverses (Kotlin
+            // ToList/FromListFunction); `⌷` (AccessFromIndex) inverts through
+            // `toList` (lookup.kt:15). Dyadic forms keep their forward errors.
+            "≬" | "toList" => match left {
+                None => {
+                    let rv = self.eval_instr(right, env)?.force(self)?;
+                    self.from_list(rv)
+                }
+                Some(_) => Err(AplError::runtime(
+                    "≬: Function cannot be called with two arguments".into(),
+                )),
+            },
+            "fromList" => match left {
+                None => {
+                    let rv = self.eval_instr(right, env)?.force(self)?;
+                    self.to_list(rv)
+                }
+                Some(_) => Err(AplError::runtime(
+                    "fromList: Function cannot be called with two arguments".into(),
+                )),
+            },
+            "⌷" | "reveal" => match left {
+                None => {
+                    let rv = self.eval_instr(right, env)?.force(self)?;
+                    self.to_list(rv)
+                }
+                Some(_) => Err(AplError::runtime(format!(
+                    "{}: Function does not have an inverse",
+                    fname
+                ))),
+            },
+            // `⍸` bincount inverse (Kotlin IntervalFunction.evalInverse1Arg).
+            "⍸" | "where" => match left {
+                None => {
+                    let rv = self.eval_instr(right, env)?.force(self)?;
+                    self.interval_inverse(rv)
+                }
+                Some(_) => Err(AplError::runtime(format!(
+                    "{}: Function does not have an inverse",
+                    fname
+                ))),
             },
             other => Err(AplError::runtime(format!(
                 "{}: Function does not have an inverse",
@@ -8847,6 +9387,7 @@ impl Engine {
     fn from_list(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
         let v = right_val.force(self)?;
         match v.as_ref() {
+            APLValue::List(x) => Ok(Rc::new(APLValue::Array(x.clone()))),
             APLValue::Array(a) if a.dimensions.is_empty() => {
                 let mut elems = a.elements();
                 Ok(elems.remove(0))
@@ -13474,55 +14015,132 @@ impl Engine {
         sym: &str,
     ) -> Result<AplRef<APLValue>, AplError> {
         let a = left_val.ok_or_else(|| AplError::runtime(format!("{} needs two args", sym)))?;
-        // Kap's logic functions return the operand, not 0/1:
-        //   null is TRUTHY
-        //   0 is falsy, 1 is truthy
-        //   any other number is INVALID (strict boolean)
-        //   and: return right if left is truthy, else return left
-        //   or: return left if truthy, else return right
-        match (a.as_ref(), right_val.as_ref()) {
-            (APLValue::Null, _) => {
-                if sym == "∧" || sym == "and" {
-                    Ok(right_val)
-                } else {
-                    Ok(a.clone())
-                }
-            }
-            (APLValue::Number(x), APLValue::Null) => {
-                let x_bool = self.as_strict_bool(x, sym)?;
-                if sym == "∧" || sym == "and" {
-                    if x_bool { Ok(right_val) } else { Ok(a.clone()) }
-                } else {
-                    if x_bool { Ok(a.clone()) } else { Ok(right_val) }
-                }
-            }
-            (APLValue::Number(x), APLValue::Number(y)) => {
-                let x_bool = self.as_strict_bool(x, sym)?;
-                let y_bool = self.as_strict_bool(y, sym)?;
-                if sym == "∧" || sym == "and" {
-                    if x_bool { Ok(right_val) } else { Ok(a.clone()) }
-                } else {
-                    if x_bool { Ok(a.clone()) } else { Ok(right_val) }
-                }
-            }
-            _ => return Err(AplError::runtime(format!("{} requires booleans", sym))),
+        // An empty side (`⍬`, an empty vector/string) short-circuits before any
+        // cell validation (oracle: `⍬∧5` → `⍬`, `2∧⍬` → `⍬` — the invalid
+        // scalar is never examined).
+        let is_empty_like = |v: &AplRef<APLValue>| match v.as_ref() {
+            APLValue::Null => true,
+            APLValue::Array(a) => a.element_count() == 0,
+            APLValue::Str(s) => s.chars().count() == 0,
+            _ => false,
+        };
+        if is_empty_like(&a) || is_empty_like(&right_val) {
+            return Ok(Rc::new(APLValue::Null));
         }
+        // Kotlin `And/OrFunction`: strict booleans element-wise with scalar
+        // extension. Scalars yield one cell and no shape; `⍬` (Null) is the empty
+        // vector and propagates (`⍬∧5` → `⍬`); arrays yield their elements.
+        let (la, da) = self.logic_cells(&a, sym)?;
+        let (lb, db) = self.logic_cells(&right_val, sym)?;
+        if la.len() == 1 && lb.len() == 1 {
+            let out = if f(la[0], lb[0]) { 1 } else { 0 };
+            return Ok(Rc::new(APLValue::Number(KapNumber::Long(out))));
+        }
+        if la.is_empty() || lb.is_empty() {
+            return Ok(Rc::new(APLValue::Null));
+        }
+        let n = la.len().max(lb.len());
+        if !(la.len() == n || la.len() == 1) || !(lb.len() == n || lb.len() == 1) {
+            return Err(AplError::runtime(format!(
+                "{}: Arguments must be of the same dimension, or one of the arguments must be a scalar. aDimensions=[{}], bDimensions=[{}]",
+                sym,
+                la.len(),
+                lb.len()
+            )));
+        }
+        let out: Vec<i64> = (0..n)
+            .map(|i| {
+                let x = la[if la.len() == 1 { 0 } else { i }];
+                let y = lb[if lb.len() == 1 { 0 } else { i }];
+                if f(x, y) { 1 } else { 0 }
+            })
+            .collect();
+        // Keep the operand shape: the non-scalar side's dimensions (rank-1 fallback).
+        let dims = if la.len() == n { da } else { db };
+        let dims = if !dims.is_empty() && dims.iter().product::<usize>() == n {
+            dims
+        } else {
+            vec![n]
+        };
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            dims,
+            ArrayData::Long(out),
+        )))))
+    }
+
+    /// Strict-boolean cells of one `∧`/`∨` operand: `(cells, dims)`. A non-number
+    /// cell errors `Invalid argument type. Expected number, got: {class}`; a
+    /// non-0/1 number errors `Invalid argument to logic function: argument is …`.
+    fn logic_cells(
+        &self,
+        v: &AplRef<APLValue>,
+        sym: &str,
+    ) -> Result<(Vec<bool>, Vec<usize>), AplError> {
+        let bad_type = |got: &str| {
+            AplError::runtime(format!(
+                "{}: Invalid argument type. Expected number, got: {}",
+                sym, got
+            ))
+        };
+        match v.as_ref() {
+            APLValue::Number(n) => Ok((vec![Self::strict_bool(n, sym)?], vec![])),
+            APLValue::Null => Ok((vec![], vec![0])),
+            APLValue::Array(a) => {
+                let mut out = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    match e.as_ref() {
+                        APLValue::Number(n) => out.push(Self::strict_bool(n, sym)?),
+                        other => return Err(bad_type(other.class_name())),
+                    }
+                }
+                Ok((out, v.dimensions()))
+            }
+            APLValue::Str(s) => {
+                if s.chars().next().is_some() {
+                    return Err(bad_type("char"));
+                }
+                Ok((vec![], vec![0]))
+            }
+            other => Err(bad_type(other.class_name())),
+        }
+    }
+
+    /// Exact Kap boolean (Kotlin `And/OrFunction`): only Long 0/1, Double 0.0/1.0
+    /// and BigInt 0/1 are valid — doubles truncate nowhere, rationals/complexes
+    /// always fail. Renders the offender the way Kotlin does (`APLLong(N)`,
+    /// `APLDouble(x)`, `APLBigInt(N)`, `APLRational(n/d)`, `APLNumber(reJim)`).
+    fn strict_bool(n: &KapNumber, sym: &str) -> Result<bool, AplError> {
+        let ok: Option<bool> = match n {
+            KapNumber::Long(0) => Some(false),
+            KapNumber::Long(1) => Some(true),
+            KapNumber::Double(x) if *x == 0.0 => Some(false),
+            KapNumber::Double(x) if *x == 1.0 => Some(true),
+            KapNumber::BigInt(v)
+                if *v == num_bigint::BigInt::from(0) || *v == num_bigint::BigInt::from(1) =>
+            {
+                Some(*v == num_bigint::BigInt::from(1))
+            }
+            _ => None,
+        };
+        ok.ok_or_else(|| {
+            let rendered = match n {
+                KapNumber::Long(v) => format!("APLLong({})", v),
+                KapNumber::Double(v) => format!("APLDouble({})", v),
+                KapNumber::BigInt(v) => format!("APLBigInt({})", v),
+                KapNumber::Rational(v) => format!("APLRational({}/{})", v.numer(), v.denom()),
+                KapNumber::Complex(_, _) => format!("APLNumber({})", n.format(false)),
+            };
+            AplError::runtime(format!(
+                "{}: Invalid argument to logic function: argument is {}",
+                sym, rendered
+            ))
+        })
     }
 
     /// Validate that a number is a strict Kap boolean (0 or 1). The oracle errors
     /// "Invalid argument to logic function: argument is APLLong(N)" for any other value.
     fn as_strict_bool(&self, n: &KapNumber, sym: &str) -> Result<bool, AplError> {
-        let v = n.as_long().map_err(|_| {
-            AplError::runtime(format!("{}: Invalid argument to logic function: argument is {}", sym, n.format(false)))
-        })?;
-        match v {
-            0 => Ok(false),
-            1 => Ok(true),
-            _ => Err(AplError::runtime(format!(
-                "{}: Invalid argument to logic function: argument is APLLong({})",
-                sym, v
-            ))),
-        }
+        Self::strict_bool(n, sym)
     }
 
     /// Dyadic boolean with broadcasting (Kotlin `MathCombineAPLFunction`): element-wise
@@ -14811,6 +15429,51 @@ impl Engine {
         }
         let arr = KapArray::new(dims.clone(), ArrayData::Nested(data));
         Ok(Rc::new(APLValue::Array(Rc::new(arr))))
+    }
+
+    /// Logical not `∼ x`: element-wise `1 - x` for boolean arrays (0↔1). Dyadic-free;
+    /// called with one arg only (Kotlin `NotAPLFunction` is monadic).
+    /// Monadic `~` (Kotlin `WithoutFunction` 1-arg / not): strict boolean NOT
+    /// broadcast over scalars and arrays. Non-number cells error
+    /// `Wanted a value of type number. Got: {class}`; non-0/1 numbers error
+    /// `Operation not supported for value`. Shape is preserved.
+    fn logical_not_broadcast(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        let cell = |v: &APLValue| -> Result<i64, AplError> {
+            match v {
+                APLValue::Number(n) => match Self::strict_bool(n, "~") {
+                    Ok(b) => Ok(if b { 0 } else { 1 }),
+                    Err(_) => Err(AplError::runtime("~: Operation not supported for value".into())),
+                },
+                other => Err(AplError::runtime(format!(
+                    "~: Wanted a value of type number. Got: {}",
+                    other.class_name()
+                ))),
+            }
+        };
+        match right_val.as_ref() {
+            APLValue::Null => Ok(Rc::new(APLValue::Null)),
+            APLValue::Array(_) => {
+                let dims = right_val.dimensions();
+                let mut out = Vec::new();
+                // Collect via elements() so nested cells share the scalar rules.
+                if let APLValue::Array(a) = right_val.as_ref() {
+                    for e in a.elements() {
+                        out.push(cell(e.as_ref())?);
+                    }
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    dims,
+                    ArrayData::Long(out),
+                )))))
+            }
+            APLValue::Str(s) => {
+                if s.chars().next().is_some() {
+                    return Err(AplError::runtime("~: Wanted a value of type number. Got: char".into()));
+                }
+                Ok(Rc::new(APLValue::Null))
+            }
+            other => Ok(Rc::new(APLValue::Number(KapNumber::Long(cell(other)?)))),
+        }
     }
 
     /// Logical not `∼ x`: element-wise `1 - x` for boolean arrays (0↔1). Dyadic-free;

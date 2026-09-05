@@ -372,6 +372,24 @@ fn curated_kap_parity() {
         ("int:asBigint 5", "5"),
         ("int:asRational 10", "10/1"),
         ("typeof (int:asRational 10)", "kap:rational"),
+        // Logic over arrays (strict 0/1 broadcast; ⍬ propagates)
+        ("1 1 0 0 ∧ 0 1 1 0", "(0 1 0 0)"),
+        ("1 1 0 0 ∨ 0 1 1 0", "(1 1 1 0)"),
+        ("~0 1", "(1 0)"),
+        ("⍬ ∧ 5", "⍬"),
+        // Equality across types + deep nesting
+        ("@a = @a", "1"),
+        ("1 = @a", "0"),
+        ("(1;2) = (1;2)", "1"),
+        ("(1;2) = 1 2", "(0 0)"),
+        // Inverse: sqrt/power/log, identity, where-bincount, compose-through
+        ("√˝ 4", "16"),
+        ("3⋆˝6561", "8.0"),
+        ("2 ⍟˝10", "1024"),
+        ("⊢˝ 1234", "1234"),
+        ("⍸˝ 4 5", "(0 0 0 0 1 1)"),
+        ("10 ((20+)⍛×)˝ 60", "2"),
+        ("8 -∘÷⍨˝ 10", "81/8"),
         ("⍋ 3 1 4 2", "(1 3 0 2)"), // grade-up (monadic): 0-based indices ascending
         // Bracket indexing (pick + multi-axis access) — dyadic ⍴ required
         ("(10 20 30 40)[2]", "30"),
