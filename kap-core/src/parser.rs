@@ -579,8 +579,18 @@ impl<'a> Parser<'a> {
                         self.pos = start;
                         return self.parse_expr();
                     }
-                    if Self::is_function_expr(&group) {
+                    if Self::is_function_expr(&group)
+                        && !(matches!(&group, Instr::Symbol { .. })
+                            && matches!(
+                                self.peek().map(|t| &t.token),
+                                Some(Token::LeftArrow)
+                            ))
+                    {
                         // parser.kt:984 feeds a function-valued group to processFn.
+                        // EXCEPT `(sym) ← v`: a parenthesised single symbol followed
+                        // by `←` is an assignment TARGET (Kotlin binds the whole
+                        // RHS: `(a) ← 1 2 3` → a=1 2 3), not a function call —
+                        // fall through and push it as a value left_arg.
                         // CRITICAL: when the group's own parse ended as an FnParseResult
                         // (no right arg inside the parens), processFn CONTINUES with the
                         // tokens after `)` — so `(1↑⍴) 3 4` chains (1↑) then ⍴ via

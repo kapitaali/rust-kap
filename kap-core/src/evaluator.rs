@@ -778,6 +778,16 @@ impl Engine {
                         names.len(),
                         v.dimensions().len()
                     )));
+                } else if names.len() > 1 && v.rank() != 1 {
+                    // Multi-target space-separated destructuring requires a rank-1
+                    // RHS (oracle: `(a b c d e f) ← 3 2 ⍴ …` errors "expected a
+                    // rank-1 array of 6, got dimensions: [3, 2]"). A single-name
+                    // group `(a) ← v` binds the whole RHS (any rank).
+                    return Err(AplError::runtime(format!(
+                        "In destructuring assignment, expected a rank-1 array of {}, got dimensions: {:?}",
+                        names.len(),
+                        v.dimensions()
+                    )));
                 }
                 let elems = v.elements();
                 if elems.len() != names.len() {
