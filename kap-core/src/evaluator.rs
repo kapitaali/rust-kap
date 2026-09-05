@@ -1145,18 +1145,37 @@ impl Engine {
                     // evaluating the dfn parameter `⍵`.)
                     self.eval_instr(member, env)?.force(self)?
                 } else {
-                    // Name-form: `obj.name` or `obj.ns:name`. Preserve the namespace
-                    // so qualified map keys (`default:test`) round-trip. Per the
-                    // oracle, bare symbol literals (`'foo`) have implicit namespace
-                    // `default`, so a bare-name member must look up the namespaced
-                    // symbol — matching the `map:with 'foo 1` key.
+                    // Name-form: `obj.name` or `obj.ns:name`. The parser stores
+                    // the member as `Instr::Symbol { name, namespace }` where
+                    // `namespace=None` for a bare name and `namespace=Some(_)` for
+                    // a qualified form.
+                    //
+                    // Bare-name case: per Kotlin's
+                    // `MemberDereferenceNameArgumentInstruction` (lookup.kt:78-90),
+                    // a bare-name member (no namespace part) is converted to a
+                    // String before lookup. This is what makes
+                    // `m.foo` against `map:with "foo" …` find the String-typed
+                    // key. The conversion happens HERE, not in the map arm,
+                    // because the parens-form `m.('foo)` must preserve the
+                    // Symbol value as-is so the map arm can find a
+                    // Symbol-typed key (`map:with 'foo …` stores
+                    // `Symbol{foo, default}` and the bare symbol literal
+                    // `'foo` evaluates to the same — they must compare equal).
+                    //
+                    // Qualified case: `obj.default:foo` builds a
+                    // `Symbol{foo, namespace=Some("default")}` and the map arm
+                    // does a value-equal lookup. This intentionally does NOT
+                    // match a String-typed key (matches the Kotlin
+                    // `else` arm at lookup.kt:84 which uses `aplSym.makeTypeQualifiedKey()`,
+                    // not the String form).
                     if let Instr::Symbol { name, namespace } = member.as_ref() {
-                        Rc::new(APLValue::Symbol {
-                            name: name.clone(),
-                            namespace: Some(
-                                namespace.clone().unwrap_or_else(|| "default".to_string()),
-                            ),
-                        })
+                        match namespace {
+                            None => Rc::new(APLValue::Str(name.clone())),
+                            Some(_) => Rc::new(APLValue::Symbol {
+                                name: name.clone(),
+                                namespace: namespace.clone(),
+                            }),
+                        }
                     } else {
                         // Defensive: non-Symbol member in name-form (shouldn't happen
                         // per parser). Fall through to evaluating it.
@@ -1266,7 +1285,12 @@ impl Engine {
                 .next()
                 .ok_or_else(|| AplError::runtime("Cannot disclose an empty enclosed value".into()));
         }
-        // 3. APLMap (lookup.kt:45). Use the value-equal `KapMap::lookup` directly.
+        // 3. APLMap (lookup.kt:45). The parens form `m.(expr)` passes a
+        // value-equal lookup key as-is. The name form `m.name` /
+        // `m.ns:name` is already coerced in the `Instr::MemberDeref` arm
+        // (bare name → String for map matching, qualified name → Symbol),
+        // so by the time we get here, the key is already in the correct
+        // form. We just do a value-equal lookup.
         if let APLValue::Map(m) = obj.as_ref() {
             return m.lookup(key_value.as_ref()).ok_or_else(|| {
                 AplError::runtime(format!(

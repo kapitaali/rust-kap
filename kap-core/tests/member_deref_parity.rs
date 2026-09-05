@@ -142,6 +142,29 @@ fn symbol_namespace_default_implicit() {
     assert!(r.is_err(), "string key should NOT match bare-sym key (got: {:?})", r);
 }
 
+/// T1.2-3b: bare-name member deref matches String-typed map keys.
+/// Per Kotlin `MemberDereferenceNameArgumentInstruction` (lookup.kt:78-90),
+/// a bare-name form like `m.foo` converts the name to a String before
+/// lookup, so it finds a String-typed key. The qualified form
+/// `m.default:foo` uses the Symbol form (and a Symbol key, not a
+/// String key, must be in the map for it to match).
+#[test]
+fn member_deref_bare_name_matches_string_key() {
+    // Bare name finds the String key.
+    let v = run_case("(map:with \"foo\" \"a\" \"bar\" \"hello\").foo").unwrap();
+    assert_eq!(v, "\"a\"", "bare-name m.foo should find the String-typed key \"foo\"");
+    // Parens form with a String literal also finds the String key.
+    let v = run_case("(map:with \"foo\" \"a\" \"bar\" \"hello\").(\"foo\")").unwrap();
+    assert_eq!(v, "\"a\"", "m.(\"foo\") should find the String-typed key");
+    // Qualified form with `default:foo` does NOT match a String-typed key
+    // (the Kotlin else arm at lookup.kt:84 uses the Symbol form).
+    let r = run_case("(map:with \"foo\" \"a\" \"bar\" \"hello\").default:foo");
+    assert!(r.is_err(), "m.default:foo should NOT match a String-typed key (got: {:?})", r);
+    // And the reverse: bare name does NOT match a Symbol-typed key.
+    let r = run_case("m ← map:with 'foo 42 ⋄ m.foo");
+    assert!(r.is_err(), "bare-name m.foo should NOT match a Symbol-typed key (got: {:?})", r);
+}
+
 /// Negative indices work.
 #[test]
 fn member_deref_negative_index() {
