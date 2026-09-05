@@ -131,10 +131,53 @@ impl Environment {
         }
     }
 
+    /// Mark `name` as a declared-but-unassigned function local (Kap
+    /// `declare(:local …)`). The mark lives in the CURRENT scope; assigning the
+    /// name binds it here (shadowing outer bindings) and clears the mark, while
+    /// reading it before assignment errors (`Variable not assigned: ns:name`).
+    pub fn declare_local(&self, name: &str, ns: &Option<String>) {
+        self.unassigned_locals
+            .borrow_mut()
+            .insert((name.to_string(), ns.clone()));
+    }
+
+    /// If `name` hits a declared-but-unassigned local up the scope chain (before
+    /// any real binding), return its namespace for the "Variable not assigned"
+    /// error. A real lexical binding at an inner level shadows the mark.
+    pub fn unassigned_local_ns(
+        &self,
+        name: &str,
+        ns: &Option<String>,
+    ) -> Option<Option<String>> {
+        let key = (name.to_string(), ns.clone());
+        let mut cur: Option<&Environment> = Some(self);
+        while let Some(e) = cur {
+            if e.symbols.borrow().contains_key(&key) {
+                return None;
+            }
+            if e.unassigned_locals.borrow().contains(&key) {
+                return Some(ns.clone());
+            }
+            cur = e.parent.as_deref();
+        }
+        None
+    }
+
     /// Assign to `name`, updating the *nearest existing binding* (Kap `←` semantics:
     /// like `set!`). Mirrors `define`'s routing: lexical scope first, then namespace table.
     pub fn assign(&self, name: &str, ns: &Option<String>, value: AplRef<APLValue>) {
         let key = (name.to_string(), ns.clone());
+        // 0. A declared-but-unassigned local (`declare(:local …)`) binds in the
+        // marking scope, shadowing any outer binding; the mark clears on write.
+        let mut cur: Option<&Environment> = Some(self);
+        while let Some(e) = cur {
+            if e.unassigned_locals.borrow().contains(&key) {
+                e.unassigned_locals.borrow_mut().remove(&key);
+                e.symbols.borrow_mut().insert(key.clone(), value);
+                return;
+            }
+            cur = e.parent.as_deref();
+        }
         // 1. Nearest lexical binding up the scope chain.
         let mut cur: Option<&Environment> = Some(self);
         while let Some(e) = cur {
@@ -642,6 +685,16 @@ impl Engine {
                         name: name.clone(),
                         namespace: Some("keyword".to_string()),
                     }));
+                }
+                // A declared-but-unassigned local (`declare(:local …)`) shadows
+                // everything: reading it before assignment errors (oracle:
+                // `{ declare(:local a) ◊ a } 5` → "Variable not assigned: default:a").
+                if env.unassigned_local_ns(name, namespace).is_some() {
+                    return Err(AplError::runtime(format!(
+                        "Variable not assigned: {}:{}",
+                        namespace.as_deref().unwrap_or("default"),
+                        name
+                    )));
                 }
                 let bound = env.lookup(name, namespace);
                 // P1-M4 (common.kt:173 IllegalContextForFunction): an UNBOUND primitive
@@ -10034,6 +10087,14 @@ impl Engine {
             "const" => {
                 for name in names {
                     env.ns_registry.declare_const(&cur, &name);
+                }
+            }
+            // `:local` marks function-local slots (read-before-write errors,
+            // assignment binds in the marking scope). Handled by the
+            // environment, not the namespace registry.
+            "local" => {
+                for name in names {
+                    env.declare_local(&name, &None);
                 }
             }
             // Default (and `export`) keeps the historical export behaviour.

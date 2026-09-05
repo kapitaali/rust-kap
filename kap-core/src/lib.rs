@@ -831,6 +831,11 @@ pub struct Environment {
     /// a `UserFn` but are VALUES) don't get treated as applicable functions.
     /// See PROBLEM.md (A2).
     pub function_defs: RefCell<HashSet<String>>,
+    /// Declared-but-not-yet-assigned function locals (Kap `declare(:local …)`).
+    /// A marked name SHADOWS outer bindings: reading it before assignment errors
+    /// (`Variable not assigned: ns:name`), and assigning it binds in the marking
+    /// scope and clears the mark. Key = (name, namespace), like `symbols`.
+    pub unassigned_locals: RefCell<HashSet<(String, Option<String>)>>,
     /// Parent scope for lexical lookup.
     pub parent: Option<AplRef<Environment>>,
     /// Shared namespace registry (module-level symbol table + import/export metadata).
@@ -861,6 +866,7 @@ impl Environment {
         Rc::new(Environment {
             symbols: RefCell::new(HashMap::new()),
             function_defs: parent.function_defs.clone(),
+            unassigned_locals: RefCell::new(HashSet::new()),
             parent: Some(parent.clone()),
             ns_registry: parent.ns_registry.clone(),
             home_ns: RefCell::new(None),
