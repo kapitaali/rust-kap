@@ -220,6 +220,14 @@ pub enum Instr {
         /// Space-separated LHS (`(a b c)←RHS`) accepts any array RHS.
         semicolon: bool,
     },
+    /// Destructuring *modified* assignment `(a b) op← expr` — apply `op` to the
+    /// current values, then bind back elementwise (oracle: `(bar foo) +← 3`
+    /// with bar=1,foo=8 yields `⟨4 11⟩` and updates both names).
+    DestructModifiedAssign {
+        names: Vec<(String, Option<String>)>,
+        op: Box<Instr>,
+        value: Box<Instr>,
+    },
     /// A macro *expansion*: splice `body` with `bindings` (var name → already-parsed
     /// `Instr`) defined in a child scope. Faithful port of Kotlin's
     /// `CallWithVarInstruction` (built by `processCustomSyntax`).

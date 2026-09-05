@@ -1335,22 +1335,49 @@ impl<'a> Parser<'a> {
                     left: Some(Box::new(dest.clone())),
                     right: Box::new(rhs),
                 };
-                return match dest {
-                    Instr::Index { array, selector } => {
-                        Ok(Instr::IndexAssign {
-                            array: array.clone(),
-                            selector: selector.clone(),
-                            value: Box::new(fn_call),
-                        })
+                let assign = match dest {
+                    Instr::Index { array, selector } => Instr::IndexAssign {
+                        array: array.clone(),
+                        selector: selector.clone(),
+                        value: Box::new(fn_call),
+                    },
+                    Instr::Symbol { name, namespace } => Instr::Assign {
+                        target: Box::new(Instr::Symbol { name, namespace }),
+                        value: Box::new(fn_call),
+                    },
+                    Instr::Array { elements }
+                        if !elements.is_empty()
+                            && elements.iter().all(|e| matches!(e, Instr::Symbol { .. })) =>
+                    {
+                        // `(a b) op← rhs`: destructuring modified assignment —
+                        // apply `op` to the current values, bind back elementwise
+                        // (oracle: `(bar foo) +← 3` yields `⟨4 11⟩`, updates both).
+                        let mut names = Vec::with_capacity(elements.len());
+                        for e in elements {
+                            if let Instr::Symbol { name, namespace } = e {
+                                names.push((name, namespace));
+                            }
+                        }
+                        // fn_call's left is the (useless) group value; rebuild with
+                        // just op + rhs — eval reads current values by name.
+                        let op_only = match fn_call {
+                            Instr::Apply { fn_expr, right, .. } => (fn_expr, right),
+                            _ => unreachable!(),
+                        };
+                        Instr::DestructModifiedAssign {
+                            names,
+                            op: op_only.0,
+                            value: op_only.1,
+                        }
                     }
-                    Instr::Symbol { name, namespace } => {
-                        Ok(Instr::Assign {
-                            target: Box::new(Instr::Symbol { name, namespace }),
-                            value: Box::new(fn_call),
-                        })
-                    }
-                    _ => Err(self.err("modified assignment target must be a symbol or index")),
+                    _ => return Err(self.err("modified assignment target must be a symbol or index")),
                 };
+                // The assignment is the new last left_arg — earlier left_args are
+                // kept so `bar foo +← 3` strands as `⟨bar, foo+←3⟩` = `⟨1 11⟩`
+                // (⟦…⟧ precedent: push + resume the accumulator).
+                left_args.push(assign);
+                let seeded = std::mem::take(left_args);
+                return self.parse_value_kotlin_with(seeded);
             }
         }
         self.skip_newlines();

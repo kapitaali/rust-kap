@@ -330,6 +330,10 @@ fn curated_kap_parity() {
         // Single-name paren group binds whole RHS (oracle: `(a) ← 1 2 3` → a=1 2 3)
         ("(a) ← 1 2 3 ⋄ a", "(1 2 3)"),
         ("(a b) ← 10 20 ⋄ a + b", "30"),
+        // Modified assign keeps the strand (oracle: `bar foo +← 3` → `⟨1 11⟩`)
+        ("bar←1 ⋄ foo ← 8 ⋄ bar foo +← 3", "(1 11)"),
+        // Group modified assign updates all names (oracle: `(bar foo) +← 3` → `⟨4 11⟩`)
+        ("bar←1 ⋄ foo ← 8 ⋄ (bar foo) +← 3 ⋄ bar + foo", "15"),
         ("⍋ 3 1 4 2", "(1 3 0 2)"), // grade-up (monadic): 0-based indices ascending
         // Bracket indexing (pick + multi-axis access) — dyadic ⍴ required
         ("(10 20 30 40)[2]", "30"),

@@ -803,6 +803,52 @@ impl Engine {
                 }
                 Ok(v)
             }
+            Instr::DestructModifiedAssign { names, op, value } => {
+                // `(a b) op← rhs` — apply `op` to the current values, bind back
+                // elementwise (oracle: `(bar foo) +← 3` → `⟨4 11⟩`, both updated).
+                let rhs = self.eval_instr(value, env)?;
+                let mut cur: Vec<AplRef<APLValue>> = Vec::with_capacity(names.len());
+                for (nm, ns) in names.iter() {
+                    let sym = Instr::Symbol {
+                        name: nm.clone(),
+                        namespace: ns.clone(),
+                    };
+                    cur.push(self.eval_instr(&sym, env)?);
+                }
+                let left_val = if cur.len() == 1 {
+                    cur.into_iter().next().unwrap()
+                } else {
+                    Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        vec![cur.len()],
+                        ArrayData::Nested(cur),
+                    ))))
+                };
+                let res = self.eval_apply(
+                    op,
+                    &Some(Box::new(Instr::Value(left_val))),
+                    &Box::new(Instr::Value(rhs)),
+                    env,
+                )?;
+                if names.len() == 1 {
+                    let (nm, ns) = &names[0];
+                    self.check_not_constant(nm, ns, env)?;
+                    env.assign(nm, ns, res.clone());
+                } else {
+                    let elems = res.elements();
+                    if elems.len() != names.len() {
+                        return Err(AplError::runtime(format!(
+                            "destructuring assignment expected {} values, got {}",
+                            names.len(),
+                            elems.len()
+                        )));
+                    }
+                    for (i, (nm, ns)) in names.iter().enumerate() {
+                        self.check_not_constant(nm, ns, env)?;
+                        env.assign(nm, ns, elems[i].clone());
+                    }
+                }
+                Ok(res)
+            }
             Instr::AxisApplied { func, axis } => {
                 // An axis-applied function always appears as the `fn_expr` of an `Apply`,
                 // where `eval_apply` unwraps it. Reached directly only as a stray top-level
