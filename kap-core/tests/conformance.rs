@@ -343,6 +343,9 @@ fn curated_kap_parity() {
         ("(1+10+) 4", "15"),
         ("(1+2+4+) 10", "17"),
         ("((1+2+)«×»(5+20+)) 1", "104"),
+        // Interval ⍸ compares numerically, ignoring type (oracle: `⟨0 1 …⟩`)
+        ("1r2 7r10 ⍸ 0.0 0.5 0.92 1.5", "(0 1 2 2)"),
+        ("1r2 0.9 ⍸ 0 0.5 1r2 0.8 0.9 0.91 0.92", "(0 1 1 1 2 2 2)"),
         ("⍋ 3 1 4 2", "(1 3 0 2)"), // grade-up (monadic): 0-based indices ascending
         // Bracket indexing (pick + multi-axis access) — dyadic ⍴ required
         ("(10 20 30 40)[2]", "30"),

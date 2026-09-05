@@ -14253,9 +14253,20 @@ impl Engine {
                 let mut high = boundaries.len() as i64 - 1;
                 while low <= high {
                     let mid = ((low as u64 + high as u64) / 2) as i64;
-                    let cmp = boundaries[mid as usize]
-                        .total_cmp(&*e)
-                        .unwrap_or(Ordering::Less);
+                    // Kotlin `IntervalValue.valueAtLong` compares with
+                    // `compareTotalOrdering(v, typeDiscrimination = false)` —
+                    // pure NUMERIC compare. The port's `total_cmp` discriminates
+                    // by type (Double(0.5) vs Rational(1r2 → Greater), so `0.5`
+                    // landed left of `1r2`. Use non-discriminating compare for
+                    // number pairs (oracle: `1r2 7r10 ⍸ 0.0 0.5 …` → `⟨0 1 …⟩`).
+                    let cmp = match (&boundaries[mid as usize], e.as_ref()) {
+                        (APLValue::Number(a), APLValue::Number(b)) => {
+                            a.numeric_cmp(b, false).unwrap_or(Ordering::Less)
+                        }
+                        _ => boundaries[mid as usize]
+                            .total_cmp(e)
+                            .unwrap_or(Ordering::Less),
+                    };
                     match cmp {
                         Ordering::Less => low = mid + 1,
                         Ordering::Greater => high = mid - 1,
