@@ -10,7 +10,7 @@
 use crate::array::{ArrayData, AxisLabel, DimensionLabels, KapArray};
 use crate::ast::{SyntaxMacro, Instr, BooleanOpKind};
 use crate::lexer::tokenise;
-use crate::number::{bigint_to_kap, popcount_bigint, KapNumber};
+use crate::number::{bigint_to_kap, popcount_bigint, rational_to_kap, KapNumber};
 use crate::parser;
 use crate::map::KapMap;
 use crate::token::{LiteralValue, Token};
@@ -2806,6 +2806,63 @@ impl Engine {
             // they are semantically identity (`int:ensureGeneric 5` → `5`, `int:ensureGeneric
             // 10 11 12` → `⟨10 11 12⟩`). Return the argument unchanged.
             "int:ensureGeneric" | "int:ensureLong" | "int:ensureDouble" => Ok(right_val),
+            // `int:asBigint` (Kotlin AsBigintFunction, div_functions.kt:425):
+            // Long → BigInt, BigInt → itself; anything else (doubles,
+            // rationals, complexes, chars, arrays — even `1 2 3`) errors
+            // "asBigint: Argument is not an integer: {plain}".
+            "int:asBigint" => match left_val {
+                Some(_) => Err(AplError::runtime(
+                    "asBigint: Function cannot be called with two arguments".into(),
+                )),
+                None => {
+                    let v = right_val.force(self)?;
+                    match v.as_ref() {
+                        APLValue::Number(KapNumber::Long(x)) => Ok(Rc::new(APLValue::Number(
+                            KapNumber::BigInt(num_bigint::BigInt::from(*x)),
+                        ))),
+                        APLValue::Number(KapNumber::BigInt(_)) => Ok(v),
+                        _ => Err(AplError::runtime(format!(
+                            "asBigint: Argument is not an integer: {}",
+                            v.format_plain()
+                        ))),
+                    }
+                }
+            },
+            // `int:asRational` (Kotlin AsRationalFunction, div_functions.kt:439):
+            // Long/BigInt → Rational(n,1) (kept rational: displays `10/1`),
+            // Rational → itself; anything else errors. Explicit conversion —
+            // NO whole-value collapse (unlike literals/arithmetic).
+            "int:asRational" => match left_val {
+                Some(_) => Err(AplError::runtime(
+                    "asRational: Function cannot be called with two arguments".into(),
+                )),
+                None => {
+                    let v = right_val.force(self)?;
+                    match v.as_ref() {
+                        APLValue::Number(KapNumber::Long(x)) => {
+                            Ok(Rc::new(APLValue::Number(KapNumber::Rational(
+                                num_rational::BigRational::new(
+                                    num_bigint::BigInt::from(*x),
+                                    num_bigint::BigInt::from(1),
+                                ),
+                            ))))
+                        }
+                        APLValue::Number(KapNumber::BigInt(b)) => {
+                            Ok(Rc::new(APLValue::Number(KapNumber::Rational(
+                                num_rational::BigRational::new(
+                                    b.clone(),
+                                    num_bigint::BigInt::from(1),
+                                ),
+                            ))))
+                        }
+                        APLValue::Number(KapNumber::Rational(_)) => Ok(v),
+                        _ => Err(AplError::runtime(format!(
+                            "asRational: Argument is not a rational number: {}",
+                            v.format_plain()
+                        ))),
+                    }
+                }
+            },
             // `sysparam` (div_functions.kt SystemParameterFunction + custom-renderer.kt):
             // monadic lookup, dyadic update. The parameter name is a SYMBOL VALUE
             // (`'kap:altVectorOutput`, i.e. Symbol{name, namespace:"kap"}); keyword-form
@@ -4083,6 +4140,7 @@ impl Engine {
                 | "int:libInitialised"
                 | "int:registerCmd"
                 | "int:ensureGeneric" | "int:ensureLong" | "int:ensureDouble"
+                | "int:asBigint" | "int:asRational"
                 // Namespaced `map:` natives (builtins/map.kt): admitted via is_known_fn
                 // at parse time; listed here so the eval-time late gate knows them.
                 | "map:with" | "map:get" | "map:remove" | "map:entries" | "map:size" | "map:keys"
@@ -14894,7 +14952,8 @@ impl Engine {
             for i in 2..=n {
                 f *= BigInt::from(i);
             }
-            return Some(KapNumber::Rational(num_rational::BigRational::new(f, BigInt::from(1))));
+            // Factorial is integral: collapse (whole rational → integer).
+            return Some(rational_to_kap(num_rational::BigRational::new(f, BigInt::from(1))));
         }
         let mut r: i128 = 1;
         for i in 1..=n as i128 {

@@ -218,7 +218,8 @@ pub fn parse_kap_number(buf: &str) -> Result<KapNumber, String> {
         let im = parse_real(im_s)?;
         return Ok(KapNumber::Complex(re, im));
     }
-    // rational: num r den
+    // rational: num r den. Whole rationals collapse to integers at lex time
+    // (Kotlin `makeAPLNumber` reduction: oracle `typeof 2r2` → kap:integer).
     if let Some(idx) = buf.find('r') {
         let num_s = &buf[..idx];
         let den_s = &buf[idx + 1..];
@@ -227,7 +228,7 @@ pub fn parse_kap_number(buf: &str) -> Result<KapNumber, String> {
         if den == BigInt::from(0) {
             return Err("division by zero in rational".into());
         }
-        return Ok(KapNumber::Rational(BigRational::new(num, den)));
+        return Ok(crate::number::rational_to_kap(BigRational::new(num, den)));
     }
     // float (has '.' or 'e')
     if buf.contains('.') || buf.contains('e') || buf.contains('E') {

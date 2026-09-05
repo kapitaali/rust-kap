@@ -198,6 +198,11 @@ def main():
                     continue
                 kind = 'fails' if detect_fails(body) else 'eval'
                 expected = best_effort_expected(body) if kind == 'eval' else None
+                # `{GENERIC}` is a test-harness backend marker (APLTest.kt
+                # `parseAndTestWithGeneric` runs the expr twice: with `{GENERIC}`
+                # removed, and replaced by `int:ensureGeneric`). The port has one
+                # backend, so record the plain form (marker stripped).
+                expr = expr.replace('{GENERIC}', '')
                 records.append({
                     'file': os.path.relpath(path, ARRAY_ROOT),
                     'test': name,

@@ -364,6 +364,14 @@ fn curated_kap_parity() {
         ("{⊢⍵}⍢(¯10↑) ⍳3", "(0 1 2)"),
         // :nfunction macro args ignore call arguments (ambient ⍵ shows through)
         ("defsyntax foo (:nfunction a) { ⍞a 2 } ⋄ { x←1+⍵ ◊ foo { x+⍵ } } 3", "7"),
+        // Whole rationals collapse to integers (literals + arithmetic)
+        ("typeof 2r2", "kap:integer"),
+        ("typeof 1r2+1r2", "kap:integer"),
+        ("2r2", "1"),
+        // Explicit conversions keep their type
+        ("int:asBigint 5", "5"),
+        ("int:asRational 10", "10/1"),
+        ("typeof (int:asRational 10)", "kap:rational"),
         ("⍋ 3 1 4 2", "(1 3 0 2)"), // grade-up (monadic): 0-based indices ascending
         // Bracket indexing (pick + multi-axis access) — dyadic ⍴ required
         ("(10 20 30 40)[2]", "30"),

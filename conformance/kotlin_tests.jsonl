@@ -714,40 +714,40 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PartitionedEncloseTest.kt", "test": "nestEnclosedArray", "kind": "eval", "expr": "⊆ ⊆ 1 2 3 4 5", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PartitionedEncloseTest.kt", "test": "nestMultiDimensionalArray", "kind": "eval", "expr": "⊆ 3 2 ⍴ ⍳6", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PartitionedEncloseTest.kt", "test": "nestNumber", "kind": "eval", "expr": "⊆ 1", "expected": "1"}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "simplePick", "kind": "eval", "expr": "2 ⊇ {GENERIC} 100+⍳10", "expected": "102"}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "simplePickWithAddDouble", "kind": "eval", "expr": "10.0 + 2 ⊇ {GENERIC} 100.0+⍳10", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "simplePickArrayResult", "kind": "eval", "expr": "2 3 ⊇ {GENERIC} 100+⍳10", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWith2DArray", "kind": "eval", "expr": "(2 2) (3 0) (3 1) ⊇ {GENERIC} 5 6 ⍴ ⍳100", "expected": "(14 18 19)"}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWith2DArrayAddDouble", "kind": "eval", "expr": "10.0 + (2 2) (3 0) (3 1) ⊇ {GENERIC} 5 6 ⍴ 100.0+⍳100", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWith3DArray", "kind": "eval", "expr": "(1 1 1) (1 3 0) (0 3 1) ⊇ {GENERIC} 2 5 6 ⍴ ⍳100", "expected": "(37 48 19)"}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWith2DResult", "kind": "eval", "expr": "(2 2 ⍴ 1 0 4 4) ⊇ {GENERIC} 100+⍳100", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithEnclosedInputAnd2DResult", "kind": "eval", "expr": "(2 2 ⍴ 1 0 4 4) ⊇ {GENERIC} (⊂10 100)+⍳100", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "simplePick", "kind": "eval", "expr": "2 ⊇  100+⍳10", "expected": "102"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "simplePickWithAddDouble", "kind": "eval", "expr": "10.0 + 2 ⊇  100.0+⍳10", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "simplePickArrayResult", "kind": "eval", "expr": "2 3 ⊇  100+⍳10", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWith2DArray", "kind": "eval", "expr": "(2 2) (3 0) (3 1) ⊇  5 6 ⍴ ⍳100", "expected": "(14 18 19)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWith2DArrayAddDouble", "kind": "eval", "expr": "10.0 + (2 2) (3 0) (3 1) ⊇  5 6 ⍴ 100.0+⍳100", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWith3DArray", "kind": "eval", "expr": "(1 1 1) (1 3 0) (0 3 1) ⊇  2 5 6 ⍴ ⍳100", "expected": "(37 48 19)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWith2DResult", "kind": "eval", "expr": "(2 2 ⍴ 1 0 4 4) ⊇  100+⍳100", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithEnclosedInputAnd2DResult", "kind": "eval", "expr": "(2 2 ⍴ 1 0 4 4) ⊇  (⊂10 100)+⍳100", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithInvalidSelectionDimensions0", "kind": "fails", "expr": "(2 2 ⍴ 1 0 4 4) ⊇ 2 2 ⍴ ⍳4", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithInvalidSelectionDimensions0Generic", "kind": "fails", "expr": "(2 2 ⍴ 1 0 4 4) ⊇ int:ensureGeneric 2 2 ⍴ ⍳4", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithInvalidSelectionDimensions1", "kind": "fails", "expr": "(,⊂1 2) ⊇ ⍳4", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithInvalidSelectionDimensions1Generic", "kind": "fails", "expr": "(,⊂1 2) ⊇ int:ensureGeneric ⍳4", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickEmptyResult", "kind": "eval", "expr": "⍬ ⊇ {GENERIC} 1 2 3 4 5", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickEmptyResult", "kind": "eval", "expr": "⍬ ⊇  1 2 3 4 5", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickInvalidDimensionOfIndex0", "kind": "fails", "expr": "(,⊂2 2 ⍴ 1 2 3 4) ⊇ ⍳10", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickInvalidDimensionOfIndex1", "kind": "fails", "expr": "(,⊂2 2 ⍴ 1 2 3 4) ⊇ 100 100 ⍴ 1 2 3", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithUnder0", "kind": "eval", "expr": "(1+)⍢(2⊇) {GENERIC} 10 20 30 40 50 60", "expected": "(10 20 31 40 50 60)"}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithUnder1", "kind": "eval", "expr": "(1+)⍢(2 5⊇) {GENERIC} 10 20 30 40 50 60", "expected": "(10 20 31 40 50 61)"}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithUnder2", "kind": "eval", "expr": "{9 9}⍢(2 5⊇) {GENERIC} 10 20 30 40 50 60", "expected": "(10 20 9 40 50 9)"}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithUnder3", "kind": "eval", "expr": "(0 1) (2 1) (2 2) (1 2) (0 3) -⍢⊇ {GENERIC} 3 4 ⍴ 10×⍳100", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithUnderAndNegativeAxis0", "kind": "eval", "expr": "(1+)⍢(¯1⊇) {GENERIC} 10 20 30 40 50 60", "expected": "(10 20 30 40 50 61)"}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithUnderAndNegativeAxis1", "kind": "eval", "expr": "(¯1 ¯1) (¯3 ¯2) -⍢⊇ {GENERIC} 3 4 ⍴ 10×⍳100", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithUnder0", "kind": "eval", "expr": "(1+)⍢(2⊇)  10 20 30 40 50 60", "expected": "(10 20 31 40 50 60)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithUnder1", "kind": "eval", "expr": "(1+)⍢(2 5⊇)  10 20 30 40 50 60", "expected": "(10 20 31 40 50 61)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithUnder2", "kind": "eval", "expr": "{9 9}⍢(2 5⊇)  10 20 30 40 50 60", "expected": "(10 20 9 40 50 9)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithUnder3", "kind": "eval", "expr": "(0 1) (2 1) (2 2) (1 2) (0 3) -⍢⊇  3 4 ⍴ 10×⍳100", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithUnderAndNegativeAxis0", "kind": "eval", "expr": "(1+)⍢(¯1⊇)  10 20 30 40 50 60", "expected": "(10 20 30 40 50 61)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithUnderAndNegativeAxis1", "kind": "eval", "expr": "(¯1 ¯1) (¯3 ¯2) -⍢⊇  3 4 ⍴ 10×⍳100", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickScalarEntry", "kind": "eval", "expr": "{≢⍴⍵}⍢(1⊇) 1 2 3 4 5 6 7", "expected": "(1 0 3 4 5 6 7)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickScalarEntryResultIsArray", "kind": "fails", "expr": "{,6}⍢(1⊇) 1 2 3 4 5", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithUnderInvalidDimension0", "kind": "fails", "expr": "(0 1 1) (2 1) (2 2) (1 2) (0 3) -⍢⊇ 3 4 ⍴ 10×⍳100", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithUnderInvalidDimension1", "kind": "fails", "expr": "(0 1) (2 1) (2 2) (1 2) (0 3) {1 2 3 4}⍢⊇ 3 4 ⍴ 10×⍳100", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithUnderAndScalarExt", "kind": "eval", "expr": "{9}⍢(2 5⊇) {GENERIC} 10 20 30 40 50 60", "expected": "(10 20 9 40 50 9)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithUnderAndScalarExt", "kind": "eval", "expr": "{9}⍢(2 5⊇)  10 20 30 40 50 60", "expected": "(10 20 9 40 50 9)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithEmptyArray", "kind": "eval", "expr": "⍬ ⊇ 2 3 4", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "structuralUnderPickWithEmptyArray", "kind": "eval", "expr": "⍬ {1}⍢⊇ 2 3 4", "expected": "(2 3 4)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "structuralUnderPickWithEmptyArrayAndIncompatibleResult", "kind": "fails", "expr": "⍬ {10 11}⍢⊇ 2 3 4", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithOverflowShouldThrowIntOverflowException", "kind": "fails", "expr": "0x3000000000000000 ⊇ 1 2 3", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithNegativeAxisSingleElement", "kind": "eval", "expr": "¯1 ⊇ {GENERIC} 10 20 30 40", "expected": "40"}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithNegativeAxisMultipleElements", "kind": "eval", "expr": "¯1 2 ⊇ {GENERIC} 10 20 30 40", "expected": "(40 30)"}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithNegativeAxisMultipleDimensions", "kind": "eval", "expr": "(⊂¯2 0) ⊇ {GENERIC} 4 5 ⍴ ⍳100", "expected": "10"}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickwithNegativeAxisMultipleDimensionsAndMultiResults", "kind": "eval", "expr": "(¯2 0) (¯1 ¯1) (¯4 ¯5) (1 1) (¯1 1) ⊇ {GENERIC} 4 5 ⍴ ⍳100", "expected": "(10 19 0 6 16)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithNegativeAxisSingleElement", "kind": "eval", "expr": "¯1 ⊇  10 20 30 40", "expected": "40"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithNegativeAxisMultipleElements", "kind": "eval", "expr": "¯1 2 ⊇  10 20 30 40", "expected": "(40 30)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithNegativeAxisMultipleDimensions", "kind": "eval", "expr": "(⊂¯2 0) ⊇  4 5 ⍴ ⍳100", "expected": "10"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickwithNegativeAxisMultipleDimensionsAndMultiResults", "kind": "eval", "expr": "(¯2 0) (¯1 ¯1) (¯4 ¯5) (1 1) (¯1 1) ⊇  4 5 ⍴ ⍳100", "expected": "(10 19 0 6 16)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithNegativeAxisSingleDimensionOutOfRange", "kind": "fails", "expr": "¯5 ⊇ ⍳4", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithNegativeAxisSingleDimensionOutOfRangeMultiElement", "kind": "fails", "expr": "2 ¯5 ⊇ ⍳4", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithNegativeAxisMultiDimensionOutOfRange", "kind": "fails", "expr": "(⊂¯5 ¯1) ⊇ 4 5 ⍴ ⍳100", "expected": null}

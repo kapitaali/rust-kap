@@ -375,21 +375,14 @@ impl KapNumber {
             KapNumber::Double(v) => neg(format_double(*v)),
             KapNumber::BigInt(v) => neg(v.to_string()),
             KapNumber::Rational(v) => {
-                // A whole-number rational renders as a bare integer in Kap (oracle:
-                // `1r2 + 1r2` -> `1`, `2r4` -> `1/2`, `3r3` -> `1`). The `num/den`
-                // form is used only when the denominator is not 1.
-                if *v.denom() == num_bigint::BigInt::from(1) {
-                    let s = v.numer().to_string();
-                    neg(if readable {
-                        s.replace('-', "¯")
-                    } else {
-                        s
-                    })
-                } else {
-                    let num = v.numer().to_string();
-                    let den = v.denom().to_string();
-                    neg(format!("{}/{}", num, den))
-                }
+                // A Rational VALUE always renders `num/den` — whole rationals
+                // never survive as rationals (literals and arithmetic collapse
+                // to integers via `rational_to_kap`), so a Rational here is
+                // genuinely fractional, except explicit `int:asRational` results
+                // (oracle: `int:asRational 10` → `10/1`).
+                let num = v.numer().to_string();
+                let den = v.denom().to_string();
+                neg(format!("{}/{}", num, den))
             }
             KapNumber::Complex(re, im) => {
                 // APL `J` notation: `re Jim` (Kotlin `formatComplex`).
@@ -511,9 +504,9 @@ impl KapNumber {
             (Double(a), Double(b)) => Double(a + b),
             (BigInt(a), BigInt(b)) => BigInt(a + b),
             (Long(a), BigInt(b)) | (BigInt(b), Long(a)) => BigInt(num_bigint::BigInt::from(*a) + b),
-            (Rational(a), Rational(b)) => Rational(a + b),
+            (Rational(a), Rational(b)) => rational_to_kap(a + b),
             (Long(a), Rational(b)) | (Rational(b), Long(a)) => {
-                Rational(b + BigRational::new(num_bigint::BigInt::from(*a), num_bigint::BigInt::from(1)))
+                rational_to_kap(b + BigRational::new(num_bigint::BigInt::from(*a), num_bigint::BigInt::from(1)))
             }
             (Complex(ar, ai), Complex(br, bi)) => Complex(ar + br, ai + bi),
             (Long(a), Complex(br, bi)) | (Complex(br, bi), Long(a)) => Complex(*a as f64 + br, *bi),
@@ -537,9 +530,9 @@ impl KapNumber {
             (Double(a), Double(b)) => Double(a * b),
             (BigInt(a), BigInt(b)) => BigInt(a * b),
             (Long(a), BigInt(b)) | (BigInt(b), Long(a)) => BigInt(num_bigint::BigInt::from(*a) * b),
-            (Rational(a), Rational(b)) => Rational(a * b),
+            (Rational(a), Rational(b)) => rational_to_kap(a * b),
             (Long(a), Rational(b)) | (Rational(b), Long(a)) => {
-                Rational(b * BigRational::new(num_bigint::BigInt::from(*a), num_bigint::BigInt::from(1)))
+                rational_to_kap(b * BigRational::new(num_bigint::BigInt::from(*a), num_bigint::BigInt::from(1)))
             }
             (Complex(ar, ai), Complex(br, bi)) => Complex(ar * br - ai * bi, ar * bi + ai * br),
             (Long(a), Complex(br, bi)) | (Complex(br, bi), Long(a)) => Complex(*a as f64 * br, *a as f64 * bi),
@@ -560,7 +553,7 @@ impl KapNumber {
             },
             Double(v) => Double(-v),
             BigInt(v) => BigInt(-v.clone()),
-            Rational(v) => Rational(-v),
+            Rational(v) => rational_to_kap(-v),
             Complex(r, i) => Complex(-r, -i),
         }
     }
@@ -582,11 +575,11 @@ impl KapNumber {
             (BigInt(a), BigInt(b)) => BigInt(a - b),
             (Long(a), BigInt(b)) => BigInt(num_bigint::BigInt::from(*a) - b.clone()),
             (BigInt(a), Long(b)) => BigInt(a.clone() - num_bigint::BigInt::from(*b)),
-            (Rational(a), Rational(b)) => Rational(a - b),
-            (Long(a), Rational(b)) => Rational(
+            (Rational(a), Rational(b)) => rational_to_kap(a - b),
+            (Long(a), Rational(b)) => rational_to_kap(
                 BigRational::new(num_bigint::BigInt::from(*a), num_bigint::BigInt::from(1)) - b,
             ),
-            (Rational(b), Long(a)) => Rational(
+            (Rational(b), Long(a)) => rational_to_kap(
                 b - BigRational::new(num_bigint::BigInt::from(*a), num_bigint::BigInt::from(1)),
             ),
             (Complex(ar, ai), Complex(br, bi)) => Complex(ar - br, ai - bi),
@@ -654,7 +647,7 @@ impl KapNumber {
             if *b.numer() == num_bigint::BigInt::from(0) {
                 return Long(0);
             }
-            return Rational(a / b);
+            return rational_to_kap(a / b);
         }
         // BigInt ÷ BigInt.
         let a = self.as_bigint();
@@ -748,6 +741,18 @@ pub fn bigint_to_kap(v: &BigInt) -> KapNumber {
         KapNumber::Long(l)
     } else {
         KapNumber::BigInt(v.clone())
+    }
+}
+
+/// Collapse a rational to an integer when whole (Kotlin `makeAPLNumber` reduction:
+/// oracle `typeof 2r2` → `kap:integer`, `typeof 1r2+1r2` → `kap:integer`). Applies
+/// to rational LITERALS and rational ARITHMETIC results alike — but NOT to
+/// explicit conversions (`int:asRational 10` stays rational and displays `10/1`).
+pub fn rational_to_kap(r: BigRational) -> KapNumber {
+    if *r.denom() == num_bigint::BigInt::from(1) {
+        bigint_to_kap(r.numer())
+    } else {
+        KapNumber::Rational(r)
     }
 }
 
@@ -953,7 +958,7 @@ impl KapNumber {
             (BigInt(a), Long(b)) => {
                 if let Some(e) = u32::try_from(-*b).ok() {
                     let denom = a.pow(e);
-                    return Rational(num_rational::BigRational::new(
+                    return rational_to_kap(num_rational::BigRational::new(
                         num_bigint::BigInt::from(1),
                         denom,
                     ));
@@ -962,7 +967,7 @@ impl KapNumber {
             }
             (Rational(a), Long(b)) if *b >= 0 => {
                 if let Some(e) = u32::try_from(*b).ok() {
-                    return Rational(a.pow(e as i32));
+                    return rational_to_kap(a.pow(e as i32));
                 }
                 Double(a.to_string().parse::<f64>().unwrap_or(f64::INFINITY).powf(*b as f64))
             }
