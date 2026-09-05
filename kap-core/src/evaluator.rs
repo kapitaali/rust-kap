@@ -825,6 +825,11 @@ impl Engine {
                     env: env.clone(),
                 }))
             }
+            // A standalone non-binding marker outside `MacroExpand` bindings:
+            // wrap the unevaluated body (only `MacroExpand` produces these).
+            Instr::NonBoundFn { body } => Ok(Rc::new(APLValue::NonBoundFn {
+                body: Rc::new(*body.clone()),
+            })),
             Instr::Assign { target, value } => {
                 if let Instr::Symbol { name, namespace } = target.as_ref() {
                     let v = self.eval_instr(value, env)?;
@@ -1044,7 +1049,17 @@ impl Engine {
                     body: body.clone(),
                 };
                 self.macros.borrow_mut().insert(qual, macro_def);
-                Ok(Rc::new(APLValue::Null))
+                // Kotlin `processDefsyntax` returns `LiteralSymbol(triggerSymbol)`:
+                // the statement's value is the trigger symbol itself (oracle:
+                // `defsyntax foo …` → `default:foo`).
+                let sym_ns = match namespace {
+                    Some(ns) => ns.clone(),
+                    None => env.ns_registry.current_ns(),
+                };
+                Ok(Rc::new(APLValue::Symbol {
+                    name: name.clone(),
+                    namespace: Some(sym_ns),
+                }))
             }
             Instr::DefSyntaxSub {
                 name,
@@ -1068,6 +1083,18 @@ impl Engine {
                 // then evaluate the macro body (Kotlin `CallWithVarInstruction`).
                 let child = Environment::child(&env);
                 for (var, instr) in bindings {
+                    // A non-binding `:nfunction` argument stays UNEVALUATED: it
+                    // becomes a `NonBoundFn` whose application ignores arguments
+                    // (Kotlin `DeclaredNonBoundFunction`). Evaluating it here
+                    // would run the body immediately at bind time.
+                    if let Instr::NonBoundFn { body } = instr.as_ref() {
+                        child.define(
+                            var,
+                            &None,
+                            Rc::new(APLValue::NonBoundFn { body: Rc::new((**body).clone()) }),
+                        );
+                        continue;
+                    }
                     let v = self.eval_instr(instr, env)?;
                     child.define(var, &None, v);
                 }
@@ -1402,6 +1429,7 @@ impl Engine {
             APLValue::Nil => true,
             APLValue::UserFn { .. } => true,
             APLValue::Escape { .. } => true,
+            APLValue::NonBoundFn { .. } => true,
             APLValue::UserOp { .. } => true,
             APLValue::Deferred { .. } => false,
             APLValue::Symbol { .. } => true,
@@ -2097,6 +2125,11 @@ impl Engine {
                     // bind-time target frame (`⍞S` invokes `S` dynamically).
                     APLValue::Escape { target } => {
                         return self.apply_escape(*target, left, right, env);
+                    }
+                    // A non-binding macro function ignores call arguments: the
+                    // body runs in the caller's context (`⍞a` with `:nfunction a`).
+                    APLValue::NonBoundFn { body } => {
+                        return self.apply_nonbound_fn(body, left, right, env);
                     }
                     APLValue::UserOp { .. } => {
                         return Err(AplError::runtime(format!(
@@ -8702,7 +8735,7 @@ impl Engine {
             | APLValue::Str(_)
             | APLValue::List(_) | APLValue::Map(_) | APLValue::Symbol { .. }
             | APLValue::Deferred { .. } | APLValue::UserFn { .. } | APLValue::UserOp { .. }
-            | APLValue::Escape { .. } => {
+            | APLValue::Escape { .. } | APLValue::NonBoundFn { .. } => {
                 out.push(Rc::new(value.clone()));
             }
             APLValue::Array(arr) => {
@@ -9890,6 +9923,25 @@ impl Engine {
         }
     }
 
+    /// Apply a non-binding macro function (`:nfunction` arg, `⍞a`).
+    /// Kotlin `DeclaredNonBoundFunction` "ignores its arguments": the body
+    /// evaluates in the CALLER's context with no new scope and no `⍵`/`⍺`
+    /// bindings, so ambient arguments show through. Call args still evaluate
+    /// first (applicative order) and are then discarded.
+    fn apply_nonbound_fn(
+        &self,
+        body: &Instr,
+        left: &Option<Box<Instr>>,
+        right: &Box<Instr>,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        self.eval_instr(right, env)?.force(self)?;
+        if let Some(l) = left {
+            self.eval_instr(l, env)?.force(self)?;
+        }
+        self.eval_instr(body, env)
+    }
+
     /// Apply a captured return escape (`S` from `S ⇐ →`) to call-site arguments.
     /// Raises `Return` for the frame captured at bind time — NOT the caller's
     /// frame — so the signal skips inner dfns and exits the defining function
@@ -10292,6 +10344,9 @@ impl Engine {
                 Err(AplError::runtime("cannot use a function as an array element".into()))
             }
             APLValue::Escape { .. } => {
+                Err(AplError::runtime("cannot use a function as an array element".into()))
+            }
+            APLValue::NonBoundFn { .. } => {
                 Err(AplError::runtime("cannot use a function as an array element".into()))
             }
             APLValue::UserOp { .. } => {

@@ -362,6 +362,8 @@ fn curated_kap_parity() {
         ("{10+⍵}⍢(2↑) ⍳5", "(10 11 2 3 4)"),
         // Negative over-take under: the region starts before the source
         ("{⊢⍵}⍢(¯10↑) ⍳3", "(0 1 2)"),
+        // :nfunction macro args ignore call arguments (ambient ⍵ shows through)
+        ("defsyntax foo (:nfunction a) { ⍞a 2 } ⋄ { x←1+⍵ ◊ foo { x+⍵ } } 3", "7"),
         ("⍋ 3 1 4 2", "(1 3 0 2)"), // grade-up (monadic): 0-based indices ascending
         // Bracket indexing (pick + multi-axis access) — dyadic ⍴ required
         ("(10 20 30 40)[2]", "30"),

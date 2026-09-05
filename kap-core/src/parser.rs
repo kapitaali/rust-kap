@@ -5821,7 +5821,7 @@ impl<'a> Parser<'a> {
         let mut bindings: Vec<(String, Box<Instr>)> = Vec::new();
         for rule in &m.rules {
             match rule {
-                SyntaxRule::Function { var } | SyntaxRule::NFunction { var } => {
+                SyntaxRule::Function { var } => {
                     self.skip_newlines();
                     if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenBrace)) {
                         return Err(self.err(&format!("expected '{{' for :function rule '{}'", var)));
@@ -5831,6 +5831,22 @@ impl<'a> Parser<'a> {
                     bindings.push((
                         var.clone(),
                         Box::new(Instr::Lambda { params: vec![], body: Box::new(body) }),
+                    ));
+                }
+                SyntaxRule::NFunction { var } => {
+                    // Non-binding function arg (Kotlin `DeclaredNonBoundFunction`):
+                    // invocation ignores arguments and runs the body in the
+                    // caller's context. Mark it so `MacroExpand` binds a
+                    // `NonBoundFn` value instead of a `UserFn` closure.
+                    self.skip_newlines();
+                    if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenBrace)) {
+                        return Err(self.err(&format!("expected '{{' for :nfunction rule '{}'", var)));
+                    }
+                    self.advance(); // consume the opening `{` (parse_block assumes it is gone)
+                    let body = self.parse_block()?;
+                    bindings.push((
+                        var.clone(),
+                        Box::new(Instr::NonBoundFn { body: Box::new(body) }),
                     ));
                 }
                 SyntaxRule::ExprFunction { var } | SyntaxRule::NExprFunction { var } => {
@@ -6018,7 +6034,7 @@ impl<'a> Parser<'a> {
         let mut bindings: Vec<(String, Box<Instr>)> = Vec::new();
         for rule in &sub.rules {
             match rule {
-                SyntaxRule::Function { var } | SyntaxRule::NFunction { var } => {
+                SyntaxRule::Function { var } => {
                     self.skip_newlines();
                     if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenBrace)) {
                         return Err(self.err(&format!(
@@ -6034,6 +6050,23 @@ impl<'a> Parser<'a> {
                             params: vec![],
                             body: Box::new(body),
                         }),
+                    ));
+                }
+                SyntaxRule::NFunction { var } => {
+                    // Non-binding function arg (same as `expand_macro`'s
+                    // `:nfunction` arm): mark for a `NonBoundFn` binding.
+                    self.skip_newlines();
+                    if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenBrace)) {
+                        return Err(self.err(&format!(
+                            "expected '{{' for :nfunction rule '{}'",
+                            var
+                        )));
+                    }
+                    self.advance(); // consume the opening `{` (parse_block assumes it is gone)
+                    let body = self.parse_block()?;
+                    bindings.push((
+                        var.clone(),
+                        Box::new(Instr::NonBoundFn { body: Box::new(body) }),
                     ));
                 }
                 SyntaxRule::Value { var } | SyntaxRule::ExprFunction { var } | SyntaxRule::NExprFunction { var } => {

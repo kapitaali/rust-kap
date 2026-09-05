@@ -106,6 +106,14 @@ pub enum APLValue {
     Escape {
         target: Option<usize>,
     },
+    /// A non-binding macro function (`:nfunction` arg in `defsyntax`, Kotlin
+    /// `DeclaredNonBoundFunction` — "ignores its arguments"). `body` is the
+    /// unevaluated argument source. Application evaluates `body` in the
+    /// CALLER's context with no new scope and no `⍵`/`⍺` bindings, so ambient
+    /// arguments show through (`foo { x+⍵ }` with outer `⍵=3` yields `x+3`).
+    NonBoundFn {
+        body: AplRef<ast::Instr>,
+    },
     /// A first-class **symbol** value (Kap `APLSymbol` wrapping a `Symbol`).
     /// Created by the `'foo` literal and `int:intern`; read by `int:symbolName`.
     /// `namespace` is `None` for the default namespace, `Some("keyword")` for the
@@ -158,6 +166,8 @@ impl APLValue {
             // A captured return escape reports as a function (it only ever
             // appears where a function value is expected: `S ⇐ →`, `λ→`).
             APLValue::Escape { .. } => "lambda",
+            // A non-binding macro function is still a function value.
+            APLValue::NonBoundFn { .. } => "lambda",
             APLValue::Symbol { .. } => "symbol",
             APLValue::Map(_) => "map",
         }
@@ -193,6 +203,7 @@ impl APLValue {
             APLValue::Deferred { .. } => "<deferred>".to_string(),
             APLValue::UserFn { .. } => "<function>".to_string(),
             APLValue::Escape { .. } => "<function>".to_string(),
+            APLValue::NonBoundFn { .. } => "<function>".to_string(),
             APLValue::UserOp { .. } => "<operator>".to_string(),
             APLValue::Symbol { name, namespace } => match namespace {
                 Some(ns) if ns == "keyword" => format!(":{}", name),
@@ -225,6 +236,7 @@ impl APLValue {
             APLValue::Deferred { .. } => "<deferred>".to_string(),
             APLValue::UserFn { .. } => "<function>".to_string(),
             APLValue::Escape { .. } => "<function>".to_string(),
+            APLValue::NonBoundFn { .. } => "<function>".to_string(),
             APLValue::UserOp { .. } => "<operator>".to_string(),
             APLValue::Symbol { name, namespace } => match namespace {
                 Some(ns) if ns == "keyword" => format!(":{}", name),
@@ -283,6 +295,7 @@ impl APLValue {
             APLValue::Deferred { .. } => "<deferred>".to_string(),
             APLValue::UserFn { .. } => "<function>".to_string(),
             APLValue::Escape { .. } => "<function>".to_string(),
+            APLValue::NonBoundFn { .. } => "<function>".to_string(),
             APLValue::UserOp { .. } => "<operator>".to_string(),
             APLValue::List(a) => {
                 let parts: Vec<String> = a.elements().iter().map(|e| e.format_display()).collect();
@@ -318,6 +331,7 @@ impl APLValue {
             APLValue::Deferred { .. } => "<deferred>".to_string(),
             APLValue::UserFn { .. } => "<function>".to_string(),
             APLValue::Escape { .. } => "<function>".to_string(),
+            APLValue::NonBoundFn { .. } => "<function>".to_string(),
             APLValue::UserOp { .. } => "<operator>".to_string(),
             APLValue::Symbol { name, namespace } => match namespace {
                 Some(ns) if ns == "keyword" => format!(":{}", name),

@@ -48,6 +48,13 @@ pub enum Instr {
     /// A lambda / anonymous function: `λ(params) body`. `params` are argument names;
     /// `body` is the unevaluated expression. Evaluated (Phase 4) into an `APLValue::UserFn`.
     Lambda { params: Vec<String>, body: Box<Instr> },
+    /// A non-binding macro function argument (`:nfunction` / `:nexprfunction`
+    /// in `defsyntax`). `body` is the UNEVALUATED argument source. Evaluated
+    /// (Phase 4, only via `MacroExpand` bindings) into an
+    /// `APLValue::NonBoundFn`, which ignores call arguments (Kotlin
+    /// `DeclaredNonBoundFunction`: "ignores its arguments" — the body runs in
+    /// the caller's context, so ambient `⍵`/`⍺` show through).
+    NonBoundFn { body: Box<Instr> },
     /// A *derived function* from an adverb: `func op` (e.g. `+/`, `×¨`). `func` is the
     /// function operand, `op` is the adverb (`/`, `\\`, `¨`). The evaluator resolves `op`
     /// to reduce/scan/each and applies `func` to the data arguments.
@@ -254,8 +261,9 @@ pub enum BooleanOpKind {
 pub enum SyntaxRule {
     /// A `{…}` function block → bound to `var` as a no-param `Instr::Lambda`.
     Function { var: String },
-    /// Same, but the body is evaluated in the *current* environment (no new env). For our
-    /// purposes identical to `Function` (we don't re-bind lexical scopes per rule).
+    /// Same shape, but the body becomes an `Instr::NonBoundFn` (Kotlin
+    /// `DeclaredNonBoundFunction`): invocation ignores arguments and runs the
+    /// body in the caller's context. NOT identical to `Function`.
     NFunction { var: String },
     /// An expression-function `(…)` → bound to `var` as the parsed inner `Instr`.
     ExprFunction { var: String },
