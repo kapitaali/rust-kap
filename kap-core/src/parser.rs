@@ -592,9 +592,12 @@ impl<'a> Parser<'a> {
                 }
                 Token::LeftArrow => {
                     // `x ← v` (parser.kt:997 → processAssignment): target = last leftArg.
-                    // Destructuring `(a b c) ← v`: the target is a value group of
-                    // symbols → DestructAssign (matches the legacy path's behaviour).
-                    // Indexed assignment `arr[idx] ← v`: target is an `Index` instr.
+                    // Kotlin processAssignment (parser.kt:524-527) requires leftArgs.size == 1,
+                    // else throws "Can only assign to a single variable". The port must do
+                    // the same: `foo bar←10` is an error, not a silent `bar←10`.
+                    if left_args.len() != 1 {
+                        return Err(self.err("Can only assign to a single variable"));
+                    }
                     let target = match left_args.pop() {
                         Some(t) => t,
                         None => return Err(self.err("assignment without a target")),
