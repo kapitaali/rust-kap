@@ -167,6 +167,7 @@ impl<'a> Parser<'a> {
                                     | "gcd" | "lcm" | "numerator" | "denominator"
                                     | "factor" | "divisors" | "primes" | "isPrime"
                                     | "round" | "formatRational"
+                                    | "re" | "im" | "floorc" | "ceilc"
                             ))
                         || (ns == "unicode"
                             && matches!(

@@ -2720,6 +2720,31 @@ impl Engine {
             "math:asinh" => self.scalar1(right_val, |x| KapNumber::Double(x.as_double().asinh()), "math:asinh"),
             "math:acosh" => self.scalar1(right_val, |x| KapNumber::Double(x.as_double().acosh()), "math:acosh"),
             "math:atanh" => self.scalar1(right_val, |x| KapNumber::Double(x.as_double().atanh()), "math:atanh"),
+            // `math:re` (Kotlin RealpartAPLFunction): identity per number
+            // (Complex yields its real part as a Double).
+            "math:re" => self.scalar1(
+                right_val,
+                |x| match x {
+                    KapNumber::Complex(re, _) => KapNumber::Double(*re),
+                    _ => x.clone(),
+                },
+                "math:re",
+            ),
+            // `math:im` (Kotlin ImagpartAPLFunction): 0 for non-complex
+            // (Long 0, Double 0.0), the imaginary part for Complex.
+            "math:im" => self.scalar1(
+                right_val,
+                |x| match x {
+                    KapNumber::Complex(_, im) => KapNumber::Double(*im),
+                    KapNumber::Double(_) => KapNumber::Double(0.0),
+                    _ => KapNumber::Long(0),
+                },
+                "math:im",
+            ),
+            // `math:floorc` / `math:ceilc` (Kotlin ComplexFloor/CeilFunction):
+            // like ⌊/⌈ but defined on Complex via complexFloor / complexCeiling.
+            "math:floorc" => self.scalar1(right_val, |x| Self::kap_floorc(x), "math:floorc"),
+            "math:ceilc" => self.scalar1(right_val, |x| Self::kap_ceilc(x), "math:ceilc"),
             // Dyadic only (Kotlin Atan2APLFunction/HypotAPLFunction).
             "math:atan2" => match left_val {
                 Some(_) => self.num2(left_val, right_val, |a, b|
@@ -14322,6 +14347,56 @@ impl Engine {
                 )))))
             }
             _ => Err(AplError::runtime(format!("{} requires a number", sym))),
+        }
+    }
+
+    /// Port of Kotlin `complexFloor` (math_functions.kt:1228) + `complexCeiling`.
+    /// `math:floorc` / `math:ceilc` element helpers (non-complex delegates to
+    /// `KapNumber::floor` / `ceil`).
+    fn kap_complex_floor(re: f64, im: f64) -> (f64, f64) {
+        let mut fr = re.floor();
+        let mut dr = re - fr;
+        let mut fi = im.floor();
+        let mut di = im - fi;
+        if dr > 1.0 {
+            fr += 1.0;
+            dr = 0.0;
+        }
+        if di > 1.0 {
+            fi += 1.0;
+            di = 0.0;
+        }
+        if dr + di < 1.0 {
+            (fr, fi)
+        } else if dr < di {
+            (fr, fi + 1.0)
+        } else {
+            (fr + 1.0, fi)
+        }
+    }
+
+    /// `math:floorc` element: non-complex delegates to `KapNumber::floor`,
+    /// except Double stays Double (Kotlin `ceil(x).makeAPLNumber()`).
+    fn kap_floorc(x: &KapNumber) -> KapNumber {
+        match x {
+            KapNumber::Complex(re, im) => {
+                let (fr, fi) = Self::kap_complex_floor(*re, *im);
+                KapNumber::complex_to_kap(fr, fi)
+            }
+            KapNumber::Double(d) => KapNumber::Double(d.floor()),
+            _ => x.floor(),
+        }
+    }
+
+    /// `math:ceilc` element: `complexCeiling(z) = -complexFloor(-z)`.
+    fn kap_ceilc(x: &KapNumber) -> KapNumber {
+        match x {
+            KapNumber::Complex(re, im) => {
+                let (fr, fi) = Self::kap_complex_floor(-*re, -*im);
+                KapNumber::complex_to_kap(-fr, -fi)
+            }
+            KapNumber::Double(d) => KapNumber::Double(d.ceil()),
+            _ => x.ceil(),
         }
     }
 

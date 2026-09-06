@@ -236,6 +236,16 @@ impl KapNumber {
         }
     }
 
+    /// Collapse a computed complex per Kotlin `Complex.makeAPLNumber`
+    /// (number.kt:502): zero imaginary part yields a Double. Applied to
+    /// ARITHMETIC results only — literals keep their `J` form (lexer).
+    pub fn complex_to_kap(re: f64, im: f64) -> KapNumber {
+        if im == 0.0 {
+            KapNumber::Double(re)
+        } else {
+            KapNumber::Complex(re, im)
+        }
+    }
     /// True when this number can be value-compared (Kotlin `numericCompareValid`):
     /// finite, and a complex only when its imaginary part is zero.
     fn numeric_compare_valid(&self) -> bool {
@@ -508,9 +518,9 @@ impl KapNumber {
             (Long(a), Rational(b)) | (Rational(b), Long(a)) => {
                 rational_to_kap(b + BigRational::new(num_bigint::BigInt::from(*a), num_bigint::BigInt::from(1)))
             }
-            (Complex(ar, ai), Complex(br, bi)) => Complex(ar + br, ai + bi),
-            (Long(a), Complex(br, bi)) | (Complex(br, bi), Long(a)) => Complex(*a as f64 + br, *bi),
-            (Double(a), Complex(br, bi)) | (Complex(br, bi), Double(a)) => Complex(a + br, *bi),
+            (Complex(ar, ai), Complex(br, bi)) => Self::complex_to_kap(ar + br, ai + bi),
+            (Long(a), Complex(br, bi)) | (Complex(br, bi), Long(a)) => Self::complex_to_kap(*a as f64 + br, *bi),
+            (Double(a), Complex(br, bi)) | (Complex(br, bi), Double(a)) => Self::complex_to_kap(a + br, *bi),
             // remaining mixed cases fall back to f64
             _ => Double(self.as_double() + other.as_double()),
         }
@@ -534,9 +544,9 @@ impl KapNumber {
             (Long(a), Rational(b)) | (Rational(b), Long(a)) => {
                 rational_to_kap(b * BigRational::new(num_bigint::BigInt::from(*a), num_bigint::BigInt::from(1)))
             }
-            (Complex(ar, ai), Complex(br, bi)) => Complex(ar * br - ai * bi, ar * bi + ai * br),
-            (Long(a), Complex(br, bi)) | (Complex(br, bi), Long(a)) => Complex(*a as f64 * br, *a as f64 * bi),
-            (Double(a), Complex(br, bi)) | (Complex(br, bi), Double(a)) => Complex(a * br, a * bi),
+            (Complex(ar, ai), Complex(br, bi)) => Self::complex_to_kap(ar * br - ai * bi, ar * bi + ai * br),
+            (Long(a), Complex(br, bi)) | (Complex(br, bi), Long(a)) => Self::complex_to_kap(*a as f64 * br, *a as f64 * bi),
+            (Double(a), Complex(br, bi)) | (Complex(br, bi), Double(a)) => Self::complex_to_kap(a * br, a * bi),
             // remaining mixed cases fall back to f64
             _ => Double(self.as_double() * other.as_double()),
         }
@@ -554,7 +564,7 @@ impl KapNumber {
             Double(v) => Double(-v),
             BigInt(v) => BigInt(-v.clone()),
             Rational(v) => rational_to_kap(-v),
-            Complex(r, i) => Complex(-r, -i),
+            Complex(r, i) => Self::complex_to_kap(-r, -i),
         }
     }
 
@@ -582,11 +592,11 @@ impl KapNumber {
             (Rational(b), Long(a)) => rational_to_kap(
                 b - BigRational::new(num_bigint::BigInt::from(*a), num_bigint::BigInt::from(1)),
             ),
-            (Complex(ar, ai), Complex(br, bi)) => Complex(ar - br, ai - bi),
-            (Long(a), Complex(br, bi)) => Complex(*a as f64 - *br, -*bi),
-            (Complex(br, bi), Long(a)) => Complex(*br - *a as f64, *bi),
-            (Double(a), Complex(br, bi)) => Complex(*a - *br, -*bi),
-            (Complex(br, bi), Double(a)) => Complex(*br - *a, *bi),
+            (Complex(ar, ai), Complex(br, bi)) => Self::complex_to_kap(ar - br, ai - bi),
+            (Long(a), Complex(br, bi)) => Self::complex_to_kap(*a as f64 - *br, -*bi),
+            (Complex(br, bi), Long(a)) => Self::complex_to_kap(*br - *a as f64, *bi),
+            (Double(a), Complex(br, bi)) => Self::complex_to_kap(*a - *br, -*bi),
+            (Complex(br, bi), Double(a)) => Self::complex_to_kap(*br - *a, *bi),
             _ => Double(self.as_double() - other.as_double()),
         }
     }
@@ -629,7 +639,7 @@ impl KapNumber {
             if den == 0.0 {
                 return Complex(f64::NAN, f64::NAN);
             }
-            return Complex((ar * br + ai * bi) / den, (ai * br - ar * bi) / den);
+            return Self::complex_to_kap((ar * br + ai * bi) / den, (ai * br - ar * bi) / den);
         }
         // Double operand (either side) -> double divide.
         if self.is_double() || other.is_double() {

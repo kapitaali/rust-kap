@@ -169,7 +169,7 @@ pub fn lex_number(chars: &[char], i: usize) -> Result<(KapNumber, usize), String
         return Ok((KapNumber::BigInt(v), j));
     }
 
-    // collect run
+    // collect run (dots/exponents/signs tracked per complex part: reset at `j`)
     let mut buf = String::new();
     let mut seen_dot = false;
     let mut seen_r = false;
@@ -179,12 +179,14 @@ pub fn lex_number(chars: &[char], i: usize) -> Result<(KapNumber, usize), String
         let c = chars[j];
         if c.is_ascii_digit() {
             buf.push(c);
-        } else if c == '¯' && (j == start || buf.ends_with('e') || buf.ends_with('E')) {
-            // leading negative or exponent sign
+        } else if c == '¯'
+            && (j == start || buf.ends_with('e') || buf.ends_with('E') || buf.ends_with('j'))
+        {
+            // leading negative, exponent sign, or imaginary-part sign (`3j¯5`)
             buf.push('-');
         } else if c == '-' && (buf.ends_with('e') || buf.ends_with('E')) {
             buf.push('-');
-        } else if c == '.' && !seen_dot && !seen_r && !seen_j {
+        } else if c == '.' && !seen_dot && !seen_r {
             seen_dot = true;
             buf.push('.');
         } else if (c == 'r' || c == 'R') && !seen_r && !seen_j {
@@ -192,8 +194,10 @@ pub fn lex_number(chars: &[char], i: usize) -> Result<(KapNumber, usize), String
             buf.push('r');
         } else if (c == 'j' || c == 'J') && !seen_j {
             seen_j = true;
+            seen_dot = false;
+            seen_e = false;
             buf.push('j');
-        } else if (c == 'e' || c == 'E') && !seen_j && !seen_e {
+        } else if (c == 'e' || c == 'E') && !seen_e {
             seen_e = true;
             buf.push('e');
         } else {

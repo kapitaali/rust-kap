@@ -396,6 +396,14 @@ fn curated_kap_parity() {
         // Computed function position `⍞(fn-expr)`
         ("∇ clo (x) { λ{ y←⍵ ◊ λ{ ⍵+x+y } } } ◊ ⍞(⍞(clo 10) 11) 12", "33"),
         ("{ a←⍵ ⋄ ⍞a/ 10 11 12 13 }¨ λ× λ+", "(17160 46)"),
+        // Complex `math:` (Realpart/Imagpart/ComplexFloor/Ceil, collapse rule
+        // number.kt:502: computed zero-imag complex → Double)
+        ("math:re 4j8 ¯3j5 3j¯5 ¯100j¯331", "(4.0 -3.0 3.0 -100.0)"),
+        ("math:im 5j2.5 ¯5.5j4.5 9j¯4 ¯3j¯4.5", "(2.5 4.5 -4.0 -4.5)"),
+        ("math:floorc 3.4J0.01", "3.0"),
+        ("math:ceilc 1.4", "2.0"),
+        ("(1j1+1j¯1)", "2.0"),
+        ("(1j1)×(1j¯1)", "2.0"),
         // Whole rationals collapse to integers (literals + arithmetic)
         ("typeof 2r2", "kap:integer"),
         ("typeof 1r2+1r2", "kap:integer"),
