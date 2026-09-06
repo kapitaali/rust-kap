@@ -2097,11 +2097,14 @@ impl Engine {
                     let reverse = fn_name == "∨";
                     return self.sort_array(right_v, reverse, Some(axis_as_long));
                 }
-                // T1.1: `⊂[axis]` enclose-along-axis. Monadic (the parser
-                // builds AxisApplied; left_v is unused). The left_v is unused
-                // here (Kotlin's EncloseAPLFunction is monadic); reject dyadic
-                // uses to match the oracle (`2 ⊂[0] 1 2 3` errors).
+                // `,[axis]` concatenate-along-axis. The axis is consumed by the
+                // generic `axis_val` arm at :1944 (calling `catenate_axis`); fall
+                // through to it.
                 "⊂" => {
+                    // T1.1: `⊂[axis]` enclose-along-axis. Monadic (the parser
+                    // builds AxisApplied; left_v is unused). The left_v is unused
+                    // here (Kotlin's EncloseAPLFunction is monadic); reject dyadic
+                    // uses to match the oracle (`2 ⊂[0] 1 2 3` errors).
                     match left_v {
                         None => return self.enclose_axis(right_v, axis_as_long),
                         Some(l) => {
@@ -14817,31 +14820,72 @@ impl Engine {
 
     /// Divisors of n in ascending order (prime.kt DivisorsAPLFunctionImpl).
     fn math_divisors(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
-        match right_val.as_ref() {
-            APLValue::Number(KapNumber::Long(v)) => {
-                let v = *v;
-                if v < 0 {
-                    return Err(AplError::runtime("Argument must be positive".into()));
+        // Permissive: Long + BigInt per Kotlin `MathCombineAPLFunction.combine1Arg`.
+        // Negatives error; Doubles/Rationals/Complexes raise type error.
+        // Element-wise over arrays (mirrors `scalar1`'s box penetration: nested
+        // rank-0 boxes are disclosed one level).
+        let divisors_one = |n: &KapNumber| -> Result<Vec<i64>, AplError> {
+            // Cap at i64::MAX (Kotlin divisorsBigint: `n >= Long.MAX_VALUE` errors).
+            let big = match n {
+                KapNumber::Long(v) => num_bigint::BigInt::from(*v),
+                KapNumber::BigInt(v) if *v < num_bigint::BigInt::from(i64::MAX) => v.clone(),
+                KapNumber::BigInt(_) => {
+                    return Err(AplError::runtime("Argument too large".into()));
                 }
-                let mut small = Vec::new();
-                let mut large = Vec::new();
-                let mut d = 1i64;
-                while d * d <= v {
-                    if v % d == 0 {
-                        small.push(d);
-                        if d != v / d {
-                            large.push(v / d);
+                _ => return Err(AplError::runtime("Argument is not an integer".into())),
+            };
+            if big < num_bigint::BigInt::from(0) {
+                return Err(AplError::runtime("Argument must be positive".into()));
+            }
+            let n_ = big.clone();
+            let s = big.sqrt();
+            let isqrt: i64 = s.to_string().parse().unwrap_or(i64::MAX);
+            let mut small: Vec<i64> = Vec::new();
+            let mut large: Vec<i64> = Vec::new();
+            let n_even = (&big % 2i64) == num_bigint::BigInt::from(0);
+            let step = if n_even { 1i64 } else { 2i64 };
+            let start = if n_even { 2i64 } else { 3i64 };
+            let mut d = start;
+            while d <= isqrt {
+                if (&big % d) == num_bigint::BigInt::from(0) {
+                    small.push(d);
+                    let q = (&big / d).to_string().parse::<i64>().unwrap_or(0);
+                    if d != q {
+                        large.push(q);
+                    }
+                }
+                d += step;
+            }
+            large.reverse();
+            small.extend(large);
+            small.retain(|&x| x != 1 && num_bigint::BigInt::from(x) != n_);
+            Ok(small)
+        };
+        match right_val.as_ref() {
+            APLValue::Null => Ok(Rc::new(APLValue::Null)),
+            APLValue::Number(n) => {
+                let v = divisors_one(n)?;
+                self.make_long_vector(v)
+            }
+            APLValue::Array(a) => {
+                let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    match e.force(self)?.as_ref() {
+                        APLValue::Number(n) => {
+                            let v = divisors_one(n)?;
+                            out.push(self.make_long_vector(v)?);
+                        }
+                        _ => {
+                            return Err(AplError::runtime(
+                                "math:divisors: Argument is not an integer".into(),
+                            ));
                         }
                     }
-                    d += 1;
                 }
-                large.reverse();
-                small.extend(large);
-                // Kotlin divisorsLong iterates i in start..sqrt(n) — the bound is
-                // EXCLUSIVE of n, so n itself never enters (oracle: 12 → ⟨2 3 4 6⟩).
-                // 1 is also excluded (loop starts at 2 or 3).
-                small.retain(|&x| x != 1 && x != v);
-                self.make_long_vector(small)
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    a.dimensions.clone(),
+                    ArrayData::Nested(out),
+                )))))
             }
             _ => Err(AplError::runtime("Argument is not an integer".into())),
         }
