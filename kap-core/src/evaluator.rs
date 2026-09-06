@@ -2851,6 +2851,41 @@ impl Engine {
             },
 
             "math:round" => self.scalar1(right_val, |x| {
+                // Kotlin `RoundNumFunction.combine1ArgLongToLong` (math_functions.kt):
+                // Long input → identity (no float round-trip; `as_double` loses the
+                // low bit at the i64 boundary: 9223372036854775806_f64 rounds to …807).
+                if let KapNumber::Long(v) = x {
+                    return KapNumber::Long(*v);
+                }
+                // Rational → exact round (Kotlin `x.round()` then range-check).
+                // `as_double` stringifies `num/den` ("1/2".parse::<f64> fails →
+                // INFINITY), so rationals must not go through the float path.
+                if let KapNumber::Rational(v) = x {
+                    let n = v.numer().clone();
+                    let d = v.denom().clone();
+                    // Floor-division via trunc + adjustment (denom always > 0 for
+                    // BigRational): q=floor(n/d), r=n-q*d in [0,d).
+                    let mut q = &n / &d;
+                    let mut r = &n - &q * &d;
+                    if r < num_bigint::BigInt::from(0) {
+                        q -= 1;
+                        r += &d;
+                    }
+                    let twice_r = r.clone() * 2;
+                    let use_up = if twice_r == d {
+                        // Tie: round half to even (kotlin.math.round on the exact
+                        // value; oracle 7r2→4, 5r2→2 — note Double path uses
+                        // round_ties_even for the same rule on floats).
+                        (&q % 2) != num_bigint::BigInt::from(0)
+                    } else {
+                        twice_r > d
+                    };
+                    let rq = if use_up { q + 1 } else { q };
+                    match rq.to_string().parse::<i64>() {
+                        Ok(lv) => return KapNumber::Long(lv),
+                        Err(_) => return bigint_to_kap(&rq),
+                    }
+                }
                 let d = x.as_double();
                 // kotlin.math.round: nearest integer, ties to EVEN
                 // (oracle: 2.5→2, 3.5→4, ¯2.5→¯2).
