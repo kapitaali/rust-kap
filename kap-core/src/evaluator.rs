@@ -13535,6 +13535,20 @@ impl Engine {
             return self.reshape(b_shape_val, result);
         }
 
+        // FROM-LIST family (`fromList`, Kotlin FromListFunctionImpl
+        // div_functions.kt:497): under = toList(base(fromList(a))).
+        // The wrapper converts the list arg to an array, base transforms the
+        // array, and the inverse (`toList`) converts back to a LIST — so the
+        // result is a list, not an array (oracle: `(1+)⍢fromList (10;20;30)`
+        // is `kap:list` printing `11`; `⍴` of it is `⍬`).
+        if let Instr::Symbol { name, namespace: None } = wrapper {
+            if name == "fromList" {
+                let wa = self.eval_apply(wrapper, &None, right, env)?;
+                let bwa = self.eval_apply(base, &None, &Box::new(Instr::Value(wa.clone())), env)?;
+                return self.to_list(bwa);
+            }
+        }
+
         // INVERSE family: res = wrapper⁻¹(res'). Reuse the port's generic inverse
         // machinery (the same evalInverse* dispatch the `˝` adverb uses), which
         // covers the math/⍉/⍨ wrappers that call inversibleStructuralUnder1Arg.

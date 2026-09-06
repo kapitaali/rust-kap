@@ -1035,6 +1035,12 @@ fn curated_kap_parity() {
         // called with two arguments") are verified by hand against the oracle + Kotlin
         // source; this harness cannot assert error messages (see `⊃` block note above).
         ("fromList ≬ 1 2 3", "(1 2 3)"),
+        // `⍢fromList` wraps the updated array back into a LIST (Kotlin
+        // FromListFunctionImpl.evalWithStructuralUnder1Arg, div_functions.kt:497;
+        // oracle: `(1+)⍢fromList (10;20;30)` is `kap:list`, `⍴` of it is `⍬`).
+        ("typeof (1+)⍢fromList (10 ; 20 ; 30)", "kap:list"),
+        ("⍴(1+)⍢fromList (10 ; 20 ; 30)", "⍬"),
+        ("fromList (1+)⍢fromList (10 ; 20 ; 30)", "(11 21 31)"),
         // --- Axis specifiers `f[axis]` (Kotlin AxisValAssignedFunctionDirect + MathCombineAPLFunction) ---
         // scalar+scalar IGNORES the axis (Kotlin eval2Arg short-circuits combine2Arg first).
         // vector+vector (both rank 1, axis 0) is element-wise. vector + higher-rank broadcasts
