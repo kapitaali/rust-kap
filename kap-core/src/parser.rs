@@ -71,6 +71,9 @@ pub fn parse(
         pos: 0,
         known_functions: known_functions.iter().map(|s| s.to_string()).collect(),
         known_ops: known_ops.iter().map(|s| s.to_string()).collect(),
+        // Legacy entry: no 2-arg info available; `ValueCall` still works
+        // intra-input via `parse_fn_def` regrowth (see known_ops2 seeding).
+        known_ops2: Vec::new(),
         macros: macros.clone(),
         kotlin_close_stack: Vec::new(),
         // Legacy entry: no engine attached — default namespace, fresh registry
@@ -106,6 +109,13 @@ pub struct Parser<'a> {
     /// Seeded/regrown like `known_functions` so an operator call (`X foo Y`) parses the
     /// operator name as an operator rather than a stranded value.
     pub known_ops: Vec<String>,
+    /// Names currently bound to TWO-operand user-defined operators
+    /// (`∇ (x foo y) a`, i.e. `op_right.is_some()`). Seeded/regrown like
+    /// `known_ops`; gates Kotlin's `ValueCall` (op.kt:193-207): only after a
+    /// 2-arg operator may a non-function token be a value operand (`(×foo 20)`
+    /// binds `y=20`). After a 1-arg operator the same token stays the data
+    /// argument (`(+bar 20)` applies the derived op to `20`).
+    pub known_ops2: Vec<String>,
     /// Registered `defsyntax` macros (session-global, mirrored from `Engine::macros`).
     /// When a bare symbol matches a trigger name here, the parser expands the macro inline
     /// (Kotlin `syntax.kt`'s `processCustomSyntax`). Keyed by bare trigger name.
@@ -291,11 +301,22 @@ impl<'a> Parser<'a> {
             // function" (e.g. `+`, `≢`, `+/`, or user-defined `f`). Only fire for
             // bare primitives, trains, and user-defined fns — not for derived
             // functions (adverb-bound) which are valid values.
+            // EXCEPTION: an operator-arity error already recorded on an `OpCall`
+            // (`foo: No right argument given` for operand-less 2-arg ops) is
+            // PRECISE — it must propagate, not be masked by this generic check
+            // (oracle `×foo` → `foo: No right argument given`, not the bare-fn
+            // error).
             let is_bare_fn = match &instr {
                 Instr::Symbol { name, namespace: None } => {
                     Self::is_primitive_op(name) || self.known_functions.iter().any(|f| f == name)
                 }
-                Instr::Train { .. } | Instr::OpCall { .. } | Instr::OverOp { .. } => true,
+                Instr::Train { .. } | Instr::OverOp { .. } => true,
+                // An operand-less 2-arg `OpCall` carries its own precise error
+                // (raised at eval, mirroring Kotlin `UserDefinedOperatorTwoArg`);
+                // a COMPLETE `OpCall` (FnCall/ValueCall shape) is still a bare
+                // fn value here.
+                Instr::OpCall { right_fn: None, right_value: None, .. } => false,
+                Instr::OpCall { .. } => true,
                 _ => false,
             };
             if is_bare_fn {
@@ -582,7 +603,28 @@ impl<'a> Parser<'a> {
                         self.kotlin_close_stack.pop();
                         match g {
                             Ok(g) => g,
-                            Err(_) => {
+                            Err(e) => {
+                                // Operator-arity errors are PRECISE (Kotlin
+                                // `parseFunctionForOperatorRightArg` / `UserDefinedOperatorTwoArg`):
+                                // `Expected function`, `No right argument given`,
+                                // `Operator without left function`. Propagate them —
+                                // falling back to legacy `parse_expr` would re-parse
+                                // the shape without the 2-arg info and yield a
+                                // wrong error (`foo: No right argument given`
+                                // became bare-fn `No arguments specified`, and
+                                // `Expected function` became runtime `No right
+                                // argument given`).
+                                let msg = match &e {
+                                    crate::AplError::Parse { msg, .. } => msg.as_str(),
+                                    crate::AplError::Runtime(m) => m.as_str(),
+                                    _ => "",
+                                };
+                                if msg.contains("Expected function")
+                                    || msg.contains("No right argument given")
+                                    || msg.contains("Operator without left function")
+                                {
+                                    return Err(e);
+                                }
                                 self.pos = start;
                                 return self.parse_expr();
                             }
@@ -611,7 +653,42 @@ impl<'a> Parser<'a> {
                         // Chain2, and `(≠⌸) v` derives the operator then applies to v.
                         return self.finish_fn_call(group, &mut left_args);
                     }
-                    // Value group: restore nothing (parse_primary consumed it correctly)
+                    // Value group: this is Kotlin's `FnParseResult`-vs-`Value` fork
+                    // (parser.kt:977-984). When the accumulator is parsing the
+                    // CONTENTS of a 2-arg USER OPERATOR's right-operand group —
+                    // i.e. the OUTER `(×foo …)` group whose token before its `(`
+                    // is the 2-arg op `foo`, and whose content parsed as a VALUE
+                    // (`(20)` → Literal 20) — Kotlin's `parseFunctionForOperatorRightArg`
+                    // (op.kt:59-64) raises `Expected function` at the INNER `(`.
+                    // The inner `(` is the token right after the outer group's `(`
+                    // (`save`): tokens[save+1] ... is `[inner-(, 20, outer-)]`
+                    // when the content is exactly one value group.
+                    let outer_follows_2arg_op = save >= 1
+                        && matches!(
+                            self.toks.get(save - 1).map(|t| &t.token),
+                            Some(Token::Literal(LiteralValue::Symbol { name, .. }))
+                                if self.known_ops2.iter().any(|n| n == name)
+                        );
+                    let inner_paren_at = if outer_follows_2arg_op {
+                        match self.toks.get(save + 1).map(|t| &t.token) {
+                            Some(Token::OpenParen) => Some(save + 1),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(ip) = inner_paren_at {
+                        let (line, col) = match self.toks.get(ip) {
+                            Some(t) => (t.line, t.col),
+                            None => (0, 0),
+                        };
+                        return Err(crate::AplError::Parse {
+                            line,
+                            col,
+                            msg: "Expected function".to_string(),
+                        });
+                    }
+                    // restore nothing (parse_primary consumed it correctly)
                     // unless it failed to move; guard by re-checking position.
                     if self.pos == save {
                         self.pos = start;
@@ -1172,18 +1249,65 @@ impl<'a> Parser<'a> {
             self.advance();
             self.skip_newlines();
             if is_user_op {
+                // Kotlin `parseFunctionForOperatorRightArg` (op.kt:31-72) tries a
+                // FUNCTION first (Name/`{}`/`(fn)`/`⍞` → `FnCall`); otherwise the
+                // operand is a VALUE (`ValueCall`, `mkArg = argInstr.evalWithContext`).
+                // The port probes `next_is_function_token` for the function shape;
+                // when that misses AND this is a 2-arg operator
+                // (`known_ops2`, gating keeps 1-arg `(+bar 20)` applying to `20`),
+                // the next value-expression token is the value operand (`(×foo 20)`
+                // binds `y=20`, so `typeof(y)` → `kap:integer`). A `(` group is
+                // excluded: `(×foo (20))` errors `Expected function` in Real Kap.
+                let is_2arg = self.known_ops2.iter().any(|n| n == &op_name);
                 let right_fn = if self.next_is_function_token() && !self.at_statement_boundary() {
                     Some(Box::new(self.parse_primary()?))
                 } else {
                     None
                 };
-                if right_fn.is_none() && self.at_statement_boundary() {
+                // `next_is_function_token` already probed the group contents via
+                // `try_parse_train`, so `None` here means "value group". Error at
+                // the group's `(` (peek is still the `(`, the oracle reports
+                // `Expected function` at the inner `(`).
+                if right_fn.is_none()
+                    && is_2arg
+                    && matches!(self.peek().map(|t| &t.token), Some(Token::OpenParen))
+                {
+                    return Err(self.err("Expected function"));
+                }
+                let right_value = if right_fn.is_none()
+                    && is_2arg
+                    && !self.at_statement_boundary()
+                    && !matches!(
+                        self.peek().map(|t| &t.token),
+                        Some(Token::OpenParen)
+                            | Some(Token::OpenBrace)
+                            | Some(Token::LambdaToken)
+                            | Some(Token::ApplyToken)
+                    )
+                {
+                    match self.parse_primary() {
+                        Ok(v) => Some(Box::new(v)),
+                        Err(_) => None,
+                    }
+                } else {
+                    None
+                };
+                if right_fn.is_none() && right_value.is_none() && self.at_statement_boundary() {
+                    // Kotlin `UserDefinedOperatorTwoArg` (op.kt:208-212): a 2-arg
+                    // operator with NO right operand is `foo: No right argument
+                    // given` (oracle `(×foo)` → that error), NOT the B1
+                    // "Operator without left function" (which is for 1-arg
+                    // shapes like `typeof ⌸`).
+                    if is_2arg {
+                        return Err(self.err(&format!("{}: No right argument given", op_name)));
+                    }
                     return Err(self.err(&format!("Operator without left function: {}", op_name)));
                 }
                 cur = Instr::OpCall {
                     op: Box::new(Instr::Symbol { name: op_name, namespace: ns }),
                     left_fn: Box::new(cur),
                     right_fn,
+                    right_value,
                 };
             } else {
                 // A pure adverb (¨ ⌸ ⍨ ˝ …) POSTFIX-binds to its LEFT function, so it
@@ -1696,7 +1820,19 @@ impl<'a> Parser<'a> {
             return Err(self.err("expected '(' after if"));
         }
         self.advance();
-        let cond = self.parse_expr()?;
+        // Kotlin `processIf` parses the cond with `parseValueToplevelWithPosition(CloseParen)`
+        // (parser.kt:1033) — the VALUE accumulator, not the legacy expression path.
+        // `parse_expr` mis-parses a parenthesised operand reference here (`typeof(y)` →
+        // `typeof(Train[y])`, a 1-train, because `try_parse_train` accepts any symbol as a
+        // train member) while the accumulator correctly yields `Symbol y` (unknown names
+        // strand as values). That broke the `twoArgOperatorMultiDatatype` guard
+        // (`'kap:function ≡ typeof(y)` → 0, else-branch `y + b` on a Derived → "+ requires
+        // numbers"). Push the close token so the accumulator stops at `)`, mirroring the
+        // `(...)` group arm.
+        self.kotlin_close_stack.push(Token::CloseParen);
+        let cond_res = self.parse_value_kotlin();
+        self.kotlin_close_stack.pop();
+        let cond = cond_res?;
         self.skip_newlines();
         if !matches!(self.peek(), Some(t) if matches!(t.token, Token::CloseParen)) {
             return Err(self.err("expected ')' after if condition"));
@@ -1741,7 +1877,11 @@ impl<'a> Parser<'a> {
             return Err(self.err("expected '(' after while"));
         }
         self.advance();
-        let cond = self.parse_expr()?;
+        // Same accumulator as `parse_if` (Kotlin `processWhile`, parser.kt:1050).
+        self.kotlin_close_stack.push(Token::CloseParen);
+        let cond_res = self.parse_value_kotlin();
+        self.kotlin_close_stack.pop();
+        let cond = cond_res?;
         self.skip_newlines();
         if !matches!(self.peek(), Some(t) if matches!(t.token, Token::CloseParen)) {
             return Err(self.err("expected ')' after while condition"));
@@ -1779,7 +1919,11 @@ impl<'a> Parser<'a> {
                 return Err(self.err("expected '(' to start a when clause"));
             }
             self.advance();
-            let cond = self.parse_expr()?;
+            // Same accumulator as `parse_if` (Kotlin parses clause conds as values too).
+            self.kotlin_close_stack.push(Token::CloseParen);
+            let cond_res = self.parse_value_kotlin();
+            self.kotlin_close_stack.pop();
+            let cond = cond_res?;
             self.skip_newlines();
             if !matches!(self.peek(), Some(t) if matches!(t.token, Token::CloseParen)) {
                 return Err(self.err("expected ')' after when clause condition"));
@@ -2145,6 +2289,12 @@ impl<'a> Parser<'a> {
             if !self.known_ops.iter().any(|n| n == &name) {
                 self.known_ops.push(name.clone());
             }
+            // `op_right.is_some()` = 2-arg operator: seed `known_ops2` so a value
+            // token after the operator parses as Kotlin's `ValueCall` operand
+            // (op.kt:193-207) instead of the data argument.
+            if op_right.is_some() && !self.known_ops2.iter().any(|n| n == &name) {
+                self.known_ops2.push(name.clone());
+            }
         } else if !self.known_functions.iter().any(|n| n == &name) {
             self.known_functions.push(name.clone());
         }
@@ -2330,7 +2480,7 @@ impl<'a> Parser<'a> {
                     let opcall = Instr::OpCall {
                         op: Box::new(Instr::Symbol { name: opname, namespace: None }),
                         left_fn: Box::new(fn_operand),
-                        right_fn,
+                        right_fn, right_value: None,
                     };
                     if self.at_statement_boundary() {
                         return Ok(Instr::Apply {
@@ -2359,6 +2509,13 @@ impl<'a> Parser<'a> {
                 | Instr::Lambda { .. }
                 | Instr::Derived { .. }
                 | Instr::Block { .. }
+                // A leading `⍞name` (DynamicRef) is function-shaped: Kotlin routes
+                // it through `processFn` like any function operand
+                // (`DynamicFunctionDescriptor`, instr.kt). Without this,
+                // `⍞f0 bar 10` never forms an `OpCall` and dies with
+                // `__KOTLIN_FALLBACK__` (CustomFunctionTest
+                // `operatorWithLambdaFunctionLeftArg` → 112).
+                | Instr::DynamicRef { .. }
         ) || match &first {
             Instr::Symbol { name, namespace } => {
                 let qual = match namespace {
@@ -2396,7 +2553,7 @@ impl<'a> Parser<'a> {
                     first = Instr::OpCall {
                         op: Box::new(Instr::Symbol { name: opname, namespace: None }),
                         left_fn: Box::new(first),
-                        right_fn,
+                        right_fn, right_value: None,
                     };
                 }
             }
@@ -4024,7 +4181,7 @@ impl<'a> Parser<'a> {
                                     namespace: None,
                                 }),
                                 left_fn: Box::new(e),
-                                right_fn,
+                                right_fn, right_value: None,
                             }
                         } else {
                             Instr::Derived {
@@ -5139,6 +5296,12 @@ impl<'a> Parser<'a> {
                 // P1-M7: a `{…}` block IS a function value (Kotlin OpenFnDef →
                 // processFn); required for `{2×⍵}¨ 1 2 3` to bind the each-adverb.
                 | Instr::Block { .. }
+                // A `⍞name` (DynamicRef) is function-shaped: Kotlin routes it
+                // through `processFn` like any function operand
+                // (`DynamicFunctionDescriptor`, instr.kt). Required so a user
+                // operator binds after it (`⍞f0 bar 10` → OpCall, giving 112)
+                // instead of dying with `__KOTLIN_FALLBACK__`.
+                | Instr::DynamicRef { .. }
         )
     }
 

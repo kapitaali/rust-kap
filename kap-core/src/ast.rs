@@ -136,10 +136,16 @@ pub enum Instr {
     /// `left_fn`/`right_fn` are the function operands bound to its `op_left`/`op_right`
     /// parameters. The result is itself a function, applied to the data arguments that
     /// follow (so `+foo 2` = `Apply { fn_expr: OpCall{…}, right: 2 }`).
+    /// `right_value` is Kotlin's `ValueCall` (op.kt:193-207): when the token after a
+    /// 2-arg operator is NOT a function (e.g. the `20` in `(×foo 20)`), it is a VALUE
+    /// operand, evaluated once in the caller env and bound to `op_right` directly
+    /// (so `typeof(y)` → `kap:integer`). Mutually exclusive with `right_fn`;
+    /// `None`/`None` = missing (1-arg op, or the B1 error shape).
     OpCall {
         op: Box<Instr>,
         left_fn: Box<Instr>,
         right_fn: Option<Box<Instr>>,
+        right_value: Option<Box<Instr>>,
     },
     /// Inner/outer product `f₁ ∙ f₂` (Kotlin OuterInnerJoinOp, engine.kt:489).
     /// ONE operator covers BOTH products (outer_join.kt:176): `left_fn == None`

@@ -161,13 +161,16 @@ impl APLValue {
             APLValue::Null => "null",
             APLValue::Nil => "null",
             APLValue::Deferred { .. } => "deferred",
-            APLValue::UserFn { .. } => "lambda",
+            // Kotlin `SystemClass.LAMBDA_FN = SystemClass("function")`
+            // (objects.kt:32): `typeof` of any function value is `kap:function`
+            // (oracle: `typeof(y)` on an operator operand → `kap:function`).
+            APLValue::UserFn { .. } => "function",
             APLValue::UserOp { .. } => "operator",
             // A captured return escape reports as a function (it only ever
             // appears where a function value is expected: `S ⇐ →`, `λ→`).
-            APLValue::Escape { .. } => "lambda",
+            APLValue::Escape { .. } => "function",
             // A non-binding macro function is still a function value.
-            APLValue::NonBoundFn { .. } => "lambda",
+            APLValue::NonBoundFn { .. } => "function",
             APLValue::Symbol { .. } => "symbol",
             APLValue::Map(_) => "map",
         }
@@ -847,6 +850,26 @@ impl NamespaceRegistry {
         for m in self.symbols.borrow().values() {
             for (name, val) in m.iter() {
                 if matches!(val.as_ref(), APLValue::UserOp { .. }) && !out.contains(name) {
+                    out.push(name.clone());
+                }
+            }
+        }
+    }
+    /// Collect names bound to TWO-operand `UserOp` values (`op_right.is_some()`,
+    /// i.e. `∇ (x foo y) …`). Seeds the parser's `known_ops2` so a value token
+    /// after the operator parses as Kotlin's `ValueCall` operand (op.kt:193-207)
+    /// instead of the data argument.
+    pub fn collect_operator_names_2arg(&self, out: &mut Vec<String>) {
+        for m in self.symbols.borrow().values() {
+            for (name, val) in m.iter() {
+                if matches!(
+                    val.as_ref(),
+                    APLValue::UserOp {
+                        op_right: Some(_),
+                        ..
+                    }
+                ) && !out.contains(name)
+                {
                     out.push(name.clone());
                 }
             }

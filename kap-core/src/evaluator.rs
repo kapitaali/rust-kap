@@ -244,6 +244,29 @@ impl Environment {
         self.ns_registry.collect_operator_names(&mut names);
         names
     }
+    /// Names bound to TWO-operand `UserOp` values (`op_right.is_some()`), used to
+    /// seed the parser's `known_ops2` (Kotlin `ValueCall`, op.kt:193-207).
+    pub fn operator_names_2arg(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut cur: Option<&Environment> = Some(self);
+        while let Some(env) = cur {
+            for ((name, _ns), val) in env.symbols.borrow().iter() {
+                if matches!(
+                    val.as_ref(),
+                    APLValue::UserOp {
+                        op_right: Some(_),
+                        ..
+                    }
+                ) && !names.contains(name)
+                {
+                    names.push(name.clone());
+                }
+            }
+            cur = env.parent.as_deref();
+        }
+        self.ns_registry.collect_operator_names_2arg(&mut names);
+        names
+    }
 }
 
 impl APLValue {
@@ -511,6 +534,7 @@ impl Engine {
             // body that references its own name parses as an application (recursion).
             let fn_names: Vec<String> = env.function_names();
             let op_names: Vec<String> = env.operator_names();
+            let op2_names: Vec<String> = env.operator_names_2arg();
             // Snapshot the live macro registry so a `defsyntax` defined earlier in the
             // session (e.g. inside an earlier `use()`) is visible to later statements.
             let macros = self.macros.borrow().clone();
@@ -519,6 +543,7 @@ impl Engine {
                 pos,
                 known_functions: fn_names,
                 known_ops: op_names,
+                known_ops2: op2_names,
                 macros,
                 kotlin_close_stack: Vec::new(),
                 current_ns: env.ns_registry.current_ns(),
@@ -593,12 +618,14 @@ impl Engine {
             // `env`, so this is a strict superset of the old seed.
             let fn_names: Vec<String> = anchor.function_names();
             let op_names: Vec<String> = anchor.operator_names();
+            let op2_names: Vec<String> = anchor.operator_names_2arg();
             let macros = self.macros.borrow().clone();
             let mut p = parser::Parser {
                 toks: &toks,
                 pos,
                 known_functions: fn_names,
                 known_ops: op_names,
+                known_ops2: op2_names,
                 macros,
                 kotlin_close_stack: Vec::new(),
                 current_ns: ns_now.clone(),
@@ -741,10 +768,10 @@ impl Engine {
                     .ok_or_else(|| AplError::runtime(format!("undefined symbol: {}", name)))?;
                 Ok(found)
             }
-            Instr::OpCall { op, left_fn, right_fn } => {
+            Instr::OpCall { op, left_fn, right_fn, right_value } => {
                 // An operator call only appears as a *function*; route it through
                 // `eval_apply` with no trailing data argument.
-                self.apply_user_op(op, left_fn, right_fn, &None, &Box::new(Instr::Empty), env)
+                self.apply_user_op(op, left_fn, right_fn, right_value, &None, &Box::new(Instr::Empty), env)
             }
             Instr::Array { elements } => {
                 let mut vals = Vec::with_capacity(elements.len());
@@ -2254,6 +2281,13 @@ impl Engine {
                     .ok_or_else(|| AplError::runtime(format!("undefined symbol: {}", name)))?;
                 match v.as_ref() {
                     APLValue::UserFn { params, split, body, env: fenv } => {
+                        // Anonymous application: pass NO self-name. `apply_user_fn`
+                        // self-binds `self_name` over the params in the body scope,
+                        // so `Some(name)` clobbers a same-named param — e.g. `⍞x`
+                        // with operand `foo x { x+100 }` rebound `x` to the function
+                        // itself and `x+100` died with "+ requires numbers". The name
+                        // stays visible via the caller env (as with the computed-fn
+                        // `Apply` arm, which also passes `None`).
                         return self.apply_user_fn(
                             params,
                             *split,
@@ -2262,7 +2296,7 @@ impl Engine {
                             right,
                             env,
                             fenv,
-                            Some(name),
+                            None,
                         );
                     }
                     // A captured return escape applies by raising for its
@@ -2301,8 +2335,8 @@ impl Engine {
             // user-defined operator (resolved to `APLValue::UserOp`); `left_fn`/`right_fn`
             // are the function operands bound to its `op_left`/`op_right`. The combined
             // operator is then applied to the trailing data args (`2`, `3`).
-            Instr::OpCall { op, left_fn, right_fn } => {
-                return self.apply_user_op(op, left_fn, right_fn, left, right, env);
+            Instr::OpCall { op, left_fn, right_fn, right_value } => {
+                return self.apply_user_op(op, left_fn, right_fn, right_value, left, right, env);
             }
             // Computed function position, e.g. `⍞(foo 10) 11`: the fn expr is
             // itself an application whose VALUE is the function to call (Kotlin
@@ -2596,8 +2630,8 @@ impl Engine {
         }
         // --- User-defined / native operators called with explicit data args ---
         // e.g. `10 +foo 2` parses as `Apply{fn: OpCall{op:foo, left_fn:+}, left:10, right:2}`.
-        if let Instr::OpCall { op, left_fn, right_fn } = fn_expr {
-            return self.apply_user_op(op, left_fn, right_fn, left, right, env);
+        if let Instr::OpCall { op, left_fn, right_fn, right_value } = fn_expr {
+            return self.apply_user_op(op, left_fn, right_fn, right_value, left, right, env);
         }
         let name = match fn_name {
             Some(ref n) => n.clone(),
@@ -4902,7 +4936,7 @@ impl Engine {
         // catches it here and returns `v`. If it escapes uncaught (top level), `eval_string_in_env`
         // converts it to the Real-Kap message "Call to return without a function call".
         let result = match body {
-            Instr::Derived { .. } | Instr::Train { .. } | Instr::ValueOp { .. } | Instr::Symbol { .. } => {
+            Instr::Derived { .. } | Instr::Train { .. } | Instr::ValueOp { .. } | Instr::Symbol { .. } | Instr::DynamicRef { .. } => {
                 self.eval_apply(body, left, right, &child)
             }
             _ => self.eval_instr(body, &child),
@@ -5054,6 +5088,7 @@ impl Engine {
         op: &Box<Instr>,
         left_fn: &Box<Instr>,
         right_fn: &Option<Box<Instr>>,
+        right_value: &Option<Box<Instr>>,
         left: &Option<Box<Instr>>,
         right: &Box<Instr>,
         env: &AplRef<Environment>,
@@ -5085,6 +5120,16 @@ impl Engine {
             ),
             _ => return Err(AplError::runtime(format!("{} is not an operator", op_name))),
         };
+        // Kotlin `UserDefinedOperatorTwoArg` (op.kt:193-213): a 2-arg operator
+        // REQUIRES its right operand (function → `FnCall`, value → `ValueCall`).
+        // An operand-less `OpCall` is a hard `foo: No right argument given`
+        // (oracle-verified), never a `Null`-bound `y`. This backstops every parse
+        // path that yields one — notably the legacy `parse_apply` /
+        // `try_parse_train` fallbacks, which have no `ValueCall` shape and would
+        // otherwise run the body with `y=Null` (e.g. `(×foo (20))` via fallback).
+        if op_right.is_some() && right_fn.is_none() && right_value.is_none() {
+            return Err(AplError::runtime(format!("{}: No right argument given", op_name)));
+        }
         // Build a child scope off the operator's closure env. This is the scope in which
         // the operator *body* runs, so the data args (`a`, `⍵`, …) live here.
         let child = Environment::child(&op_env);
@@ -5101,6 +5146,18 @@ impl Engine {
         // gives standard ambivalent behaviour (`x a0` monadic, `a0 x b0` dyadic), matching
         // `foo ⇐ ×-`-style delegation. The wrapper's *closure* is the operator body scope
         // (`child`) so the body params (`a`, `b`, …) resolve there.
+        //
+        // A `⍞name` (DynamicRef) operand is resolved to the underlying `UserFn` NOW, at
+        // wrap time: the ref's bound value is fetched in the CALLER env (`env`), and its
+        // body/params/split are inlined into the wrapper. Without this the wrapper's
+        // body is a bare `DynamicRef`, and each nested re-application re-evaluates the
+        // call-site argument INSTRs in a narrower env — so `⍞y a` evaluates `a` in
+        // `f0`'s defining env (where `a` is unbound) instead of the operator body
+        // scope. Mirrors Kotlin's `LambdaValue(opFn, frame)` capture (op.kt): the
+        // operand is bound as a VALUE (function + defining frame), and the data args
+        // are evaluated once in the body scope. Non-UserFn values (primitives are
+        // never bound to a name — `⍞` on a primitive needs `λ+` indirection) fall
+        // through to the generic `other` arm below.
         let wrap_fn = |instr: &Instr| -> APLValue {
             match instr {
                 Instr::Lambda { params, body } => APLValue::UserFn {
@@ -5115,6 +5172,84 @@ impl Engine {
                     body: Rc::new(Instr::Block { body: body.clone() }),
                     env: child.clone(),
                 },
+                Instr::DynamicRef { name, namespace } => match env.lookup(name, namespace) {
+                    Some(v) => match v.as_ref() {
+                        APLValue::UserFn {
+                            params,
+                            split,
+                            body,
+                            env: fenv,
+                        } => {
+                            // Follow a `λ`-alias chain one hop: `f0 ← λfoo`
+                            // stores `UserFn{body: Symbol{foo}}`, so applying the
+                            // wrapper would re-evaluate the call-site arg in
+                            // `f0`'s defining env (where the operator's data
+                            // params like `a` are unbound). Resolving to `foo`'s
+                            // own `UserFn` evaluates the arg once in the body
+                            // scope. Stops at primitives (bare `Symbol{+}` needs
+                            // no further hop — the `Symbol` body arm dispatches
+                            // it ambivalently) and at non-`Symbol` bodies.
+                            // Bounded (5 hops): `λ`-of-`λ` is rejected at parse
+                            // ("Symbol is not a valid function", oracle-backed),
+                            // so chains are short by construction.
+                            let (mut rparams, mut rsplit, mut rbody, mut rfenv) = (
+                                params.clone(),
+                                *split,
+                                (**body).clone(),
+                                fenv.clone(),
+                            );
+                            for _ in 0..5 {
+                                let (sym, sns) = match &rbody {
+                                    Instr::Symbol { name, namespace } => (name.clone(), namespace.clone()),
+                                    _ => break,
+                                };
+                                if Self::is_primitive_name(&sym) {
+                                    break;
+                                }
+                                let next = match rfenv.lookup(&sym, &sns) {
+                                    Some(n) => n,
+                                    None => break,
+                                };
+                                match next.as_ref() {
+                                    APLValue::UserFn {
+                                        params,
+                                        split,
+                                        body,
+                                        env: fenv,
+                                    } => {
+                                        rparams = params.clone();
+                                        rsplit = *split;
+                                        rbody = (**body).clone();
+                                        rfenv = fenv.clone();
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            APLValue::UserFn {
+                                params: rparams,
+                                split: rsplit,
+                                body: Rc::new(rbody),
+                                env: rfenv,
+                            }
+                        }
+                        // Anything else (a non-function value): keep the generic
+                        // delegation shape; the `DynamicRef` body arm in
+                        // `apply_user_fn` routes it through `eval_apply`, which
+                        // raises the proper "not a function" error.
+                        _ => APLValue::UserFn {
+                            params: vec![],
+                            split: 1,
+                            body: Rc::new(instr.clone()),
+                            env: child.clone(),
+                        },
+                    },
+                    None => APLValue::UserFn {
+                        params: vec![],
+                        split: 1,
+                        body: Rc::new(instr.clone()),
+                        env: child.clone(),
+                    },
+                },
                 other => APLValue::UserFn {
                     params: vec![],
                     split: 1,
@@ -5128,11 +5263,20 @@ impl Engine {
             child.define(ol, &None, fv);
         }
         if let Some(or) = &op_right {
+            // Kotlin `ValueCall.mkArg` (op.kt:257-261): a VALUE operand is
+            // evaluated ONCE in the caller env and bound to `op_right` directly
+            // (`(×foo 20)` binds `y=20`, so `typeof(y)` → `kap:integer`). A
+            // missing right operand binds `Null` (the 1-arg-op / error shape).
             let fv = match right_fn {
                 Some(rf) => Rc::new(wrap_fn(rf)),
                 None => Rc::new(APLValue::Null),
             };
-            child.define(or, &None, fv);
+            if let Some(rv) = right_value {
+                let val = self.eval_instr(rv, env)?.force(self)?;
+                child.define(or, &None, val);
+            } else {
+                child.define(or, &None, fv);
+            }
         }
         // Evaluate the data args in the calling env; bind to left/right param groups and to
         // `⍺`/`⍵` (ambivalent: `⍵` is the right arg, `⍺` the left if present).
@@ -18660,6 +18804,26 @@ mod tests {
         assert_eq!(
             eval(r#"∇ (a0;a1) (x foo y) b { 100 ⍞y a0 ⍞x a1 ⍞x b } ⋄ (10;11) -foo+ 4"#),
             "103"
+        );
+    }
+
+    /// `⍞f0` (DynamicRef) as an operator operand: Kotlin routes it through
+    /// `processFn` like any function operand (`DynamicFunctionDescriptor`,
+    /// instr.kt), so `(-bar ⍞f0)` must apply `f0`, not return it unapplied.
+    /// Oracle (kap-jvm-text, `⋄` single-statement form): 220 / 290 / 112.
+    #[test]
+    fn eval_operator_with_dynamicref_operand() {
+        assert_eq!(
+            eval(r#"∇ foo x { x+30 } ⋄ ∇ (x bar y) a { ⍞y 200 ⍞x a } ⋄ f0 ← λfoo ⋄ (-bar ⍞f0) 10"#),
+            "220"
+        );
+        assert_eq!(
+            eval(r#"∇ foo x { x+100 } ⋄ ∇ (x bar y) a { ⍞y 200 ⍞x a } ⋄ f0 ← λfoo ⋄ -bar ⍞f0 10"#),
+            "290"
+        );
+        assert_eq!(
+            eval(r#"∇ foo x { x+100 } ⋄ ∇ (x bar) y { 2 + ⍞x y } ⋄ f0 ← λfoo ⋄ ⍞f0 bar 10"#),
+            "112"
         );
     }
 

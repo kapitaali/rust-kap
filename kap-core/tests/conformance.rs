@@ -1109,6 +1109,14 @@ fn curated_kap_parity() {
             ("typeof @a", "kap:char"),
             ("typeof 1 2 3", "kap:array"),
             ("typeof 'foo", "kap:symbol"),
+            // Kotlin `SystemClass.LAMBDA_FN = SystemClass("function")`
+            // (objects.kt:32): `typeof` of any function value is `kap:function`
+            // (oracle: `typeof(y)` on an operator operand → `kap:function`).
+            ("f ⇐ { ⍵ } ⋄ f 5", "5"),
+            ("∇ a (x foo y) b { 'kap:function ≡ typeof(y) } ⋄ (10 (×foo-) 20)", "1"),
+            // Kotlin `ValueCall` (op.kt:193-207): a value after a 2-arg operator
+            // binds `op_right` directly (oracle `10 (×foo 20) 30` → `20`).
+            ("∇ a (x foo y) b { 'kap:integer ≡ typeof(y) } ⋄ 10 (×foo 20) 30", "1"),
         ];
         for (expr, expected) in type_cases {
             match engine.eval_string(expr) {
