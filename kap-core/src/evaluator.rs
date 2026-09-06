@@ -6046,6 +6046,82 @@ impl Engine {
             (APLValue::Number(x), APLValue::Number(y)) => {
                 Ok(Rc::new(APLValue::Number(f(x, y))))
             }
+            // Rank-0 boxes (enclosed values) are scalars for shape purposes
+            // (Kotlin scalar-combine penetrates boxes): disclose, compute,
+            // re-enclose. A box beside an array maps per element, each
+            // result re-enclosed (`(⊂1 2 3)+10 20` → `⟨⟨11 12 13⟩ ⟨21 22 23⟩⟩`).
+            (APLValue::Array(xa), other)
+                if xa.dimensions.is_empty() && !matches!(other, APLValue::Array(_)) =>
+            {
+                let disclosed = xa
+                    .elements()
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| Rc::new(APLValue::Null));
+                let r = self.num2_impl(
+                    Some(disclosed),
+                    Rc::new(other.clone()),
+                    f,
+                    sym,
+                )?;
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![],
+                    ArrayData::Nested(vec![r]),
+                )))))
+            }
+            (other, APLValue::Array(ya))
+                if ya.dimensions.is_empty() && !matches!(other, APLValue::Array(_)) =>
+            {
+                let disclosed = ya
+                    .elements()
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| Rc::new(APLValue::Null));
+                let r = self.num2_impl(
+                    Some(Rc::new(other.clone())),
+                    disclosed,
+                    f,
+                    sym,
+                )?;
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![],
+                    ArrayData::Nested(vec![r]),
+                )))))
+            }
+            (APLValue::Array(xa), APLValue::Array(ya))
+                if xa.dimensions.is_empty() || ya.dimensions.is_empty() =>
+            {
+                // One side a box, the other a non-box array: per-element
+                // scalar-box combine, each result re-enclosed.
+                let (box_arr, arr, box_left) = if xa.dimensions.is_empty() {
+                    (xa, ya, true)
+                } else {
+                    (ya, xa, false)
+                };
+                let disclosed = box_arr
+                    .elements()
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| Rc::new(APLValue::Null));
+                let mut out = Vec::with_capacity(arr.element_count());
+                for e in arr.elements() {
+                    let (l, r) = if box_left {
+                        (disclosed.clone(), e)
+                    } else {
+                        (e, disclosed.clone())
+                    };
+                    // Scalar-box leaf: disclose content, compute, re-enclose.
+                    let r = self.num2_impl(Some(l), r, f, sym)?;
+                    out.push(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        vec![],
+                        ArrayData::Nested(vec![r]),
+                    )))) as AplRef<APLValue>);
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    arr.dimensions.clone(),
+                    ArrayData::Nested(out),
+                )))))
+            }
             // Char arithmetic (Kap: `@A + ⍳26 → "ABC…Z"`). `char ±×÷ number`,
             // `number ±×÷ char`, and `char ±×÷ char` all operate on codepoints and
             // yield a char; scalar-extended across arrays too.
@@ -6287,29 +6363,13 @@ impl Engine {
 
     /// Monadic negation: `- x` over a number or an array of numbers (scalar extension).
     fn negate(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
-        match right_val.as_ref() {
-            // `-⍬` → `⍬` (oracle-verified).
-            APLValue::Null => Ok(Rc::new(APLValue::Null)),
-            // Monadic `-null` errors (oracle: "Function does not support
-            // arguments of type: null").
-            APLValue::Nil => Err(AplError::runtime(
-                "-: Function does not support arguments of type: null".into(),
-            )),
-            APLValue::Number(x) => Ok(Rc::new(APLValue::Number(x.neg()))),
-            APLValue::Array(a) => {
-                let mut out = Vec::with_capacity(a.element_count());
-                for e in a.elements() {
-                    if let APLValue::Number(x) = e.as_ref() {
-                        out.push(Rc::new(APLValue::Number(x.neg())));
-                    }
-                }
-                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                    a.dimensions.clone(),
-                    ArrayData::Nested(out),
-                )))))
-            }
-            _ => Err(AplError::runtime("- requires a number".into())),
-        }
+        // Delegate to scalar1_impl so rank-0 boxes are penetrated (Kotlin
+        // scalar-combine): `- ⊂ 1 2 3` → `⊂-1 -2 -3` (oracle-verified).
+        self.scalar1_impl(
+            right_val,
+            &|x| x.neg(),
+            "-",
+        )
     }
 
     fn cmp2(
@@ -14834,6 +14894,18 @@ impl Engine {
         f: impl Fn(&KapNumber) -> KapNumber,
         sym: &str,
     ) -> Result<AplRef<APLValue>, AplError> {
+        self.scalar1_impl(right_val, &f, sym)
+    }
+
+    /// `scalar1` core (takes `&dyn Fn` so box penetration can recurse).
+    /// Rank-0 boxes are penetrated: disclose, map, re-enclose (Kotlin
+    /// scalar-combine on enclosed values, e.g. `- ⊂ 1 2 3` → `⊂-1 -2 -3`).
+    fn scalar1_impl(
+        &self,
+        right_val: AplRef<APLValue>,
+        f: &dyn Fn(&KapNumber) -> KapNumber,
+        sym: &str,
+    ) -> Result<AplRef<APLValue>, AplError> {
         match right_val.as_ref() {
             // Kap: monadic math on `⍬` propagates `⍬` (verified against the
             // oracle: `+⍬` `-⍬` `×⍬` `÷⍬` `|⍬` `⌈⍬` `⌊⍬` and all `math:*`
@@ -14842,11 +14914,35 @@ impl Engine {
             // rest of the math to consider an empty rank-1 array.
             APLValue::Null => Ok(Rc::new(APLValue::Null)),
             APLValue::Number(x) => Ok(Rc::new(APLValue::Number(f(x)))),
+            APLValue::Array(a) if a.dimensions.is_empty() => {
+                let disclosed = a
+                    .elements()
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| Rc::new(APLValue::Null));
+                let r = self.scalar1_impl(disclosed, f, sym)?;
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![],
+                    ArrayData::Nested(vec![r]),
+                )))))
+            }
             APLValue::Array(a) => {
                 let mut out = Vec::with_capacity(a.element_count());
                 for e in a.elements() {
                     match e.as_ref() {
                         APLValue::Number(x) => out.push(Rc::new(APLValue::Number(f(x)))),
+                        APLValue::Array(inner) if inner.dimensions.is_empty() => {
+                            let disclosed = inner
+                                .elements()
+                                .into_iter()
+                                .next()
+                                .unwrap_or_else(|| Rc::new(APLValue::Null));
+                            let r = self.scalar1_impl(disclosed, f, sym)?;
+                            out.push(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                                vec![],
+                                ArrayData::Nested(vec![r]),
+                            )))));
+                        }
                         _ => return Err(AplError::runtime(format!("{} requires numbers", sym))),
                     }
                 }
@@ -15042,7 +15138,13 @@ impl Engine {
                 }
             }
         }
-        if let Some(APLValue::Char(_)) = left_ref {
+        if let Some(APLValue::Char(lc)) = left_ref {
+            // Char×char compares by codepoint (Kotlin min/max `fnChar`):
+            // `@a⌈@b` → `@b`, `@a⌊@b` → `@a`. Any other right type errors.
+            if let APLValue::Char(rc) = right_val.as_ref() {
+                let win = if ceil { (*lc).max(*rc) } else { (*lc).min(*rc) };
+                return Ok(Rc::new(APLValue::Char(win)));
+            }
             let rt = match right_val.as_ref() {
                 APLValue::Number(KapNumber::Long(_)) => "integer",
                 APLValue::Number(KapNumber::Double(_)) => "double",
