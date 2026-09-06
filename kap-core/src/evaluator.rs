@@ -6986,7 +6986,7 @@ impl Engine {
                 r %= strides[k];
             }
             cells.push(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                vec![rank],
+                if rank <= 1 { vec![0] } else { vec![rank] },
                 ArrayData::Long(idx),
             )))));
         }
