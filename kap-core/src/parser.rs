@@ -5026,10 +5026,16 @@ impl<'a> Parser<'a> {
                     Some(t) if matches!(t.token, Token::OpenParen) => {
                         // The parenthesised content is parsed exactly like a paren GROUP
                         // (so `λ(0-)` is a left-bind projection and `λ(+×)` a train), via
-                        // the same balanced accumulator used for `(0-)`.
+                        // the same balanced accumulator used for `(0-)`. Wrap as a
+                        // parameterless lambda VALUE (Kotlin processLambda yields a
+                        // function, never an application): bare `λ(+/)` is `<function>`.
                         self.advance();
                         match self.parse_paren_value_leading() {
-                            Some(holder) => Ok(holder),
+                            Some(h @ Instr::Lambda { .. }) => Ok(h),
+                            Some(holder) => Ok(Instr::Lambda {
+                                params: vec![],
+                                body: Box::new(holder),
+                            }),
                             None => Err(self.err("λ: empty group is not a function")),
                         }
                     }
@@ -5583,10 +5589,16 @@ impl<'a> Parser<'a> {
                     Some(t) if matches!(t.token, Token::OpenParen) => {
                         // The parenthesised content is parsed exactly like a paren GROUP
                         // (so `λ(0-)` is a left-bind projection and `λ(+×)` a train), via
-                        // the same balanced accumulator used for `(0-)`.
+                        // the same balanced accumulator used for `(0-)`. Wrap as a
+                        // parameterless lambda VALUE (Kotlin processLambda yields a
+                        // function, never an application): bare `λ(+/)` is `<function>`.
                         self.advance();
                         match self.parse_paren_value_leading() {
-                            Some(holder) => Ok(holder),
+                            Some(h @ Instr::Lambda { .. }) => Ok(h),
+                            Some(holder) => Ok(Instr::Lambda {
+                                params: vec![],
+                                body: Box::new(holder),
+                            }),
                             None => Err(self.err("λ: empty group is not a function")),
                         }
                     }

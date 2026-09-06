@@ -404,6 +404,8 @@ fn curated_kap_parity() {
         ("math:ceilc 1.4", "2.0"),
         ("(1j1+1j¯1)", "2.0"),
         ("(1j1)×(1j¯1)", "2.0"),
+        // `λ(fn-expr)` is a function VALUE, never auto-applied
+        ("q ← λ(+[0])", "<function>"),
         // Whole rationals collapse to integers (literals + arithmetic)
         ("typeof 2r2", "kap:integer"),
         ("typeof 1r2+1r2", "kap:integer"),

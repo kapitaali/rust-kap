@@ -10794,12 +10794,67 @@ impl Engine {
     ///   - a vector of indices -> that many elements along the axis
     /// Result shape = the concatenation of the per-section lengths. Chained bracket-index
     /// `x[i][j]` is just nested `index_select`: the outer `Index` re-indexes the inner result.
+    /// Map key lookup (Kotlin `mapLookupFromAPLValue`). Scalar key discloses
+    /// to the value (missing → nil); array keys map cell-wise to the same shape.
+    fn map_index(
+        &self,
+        m: &KapMap,
+        selector: &APLValue,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let sel = selector.force(self)?;
+        // The parser wraps `m[k]` selectors single-section style (`Array{[k]}`,
+        // mirroring multi-axis `m[k;l]`); a rank-0 map takes exactly one section.
+        let key: AplRef<APLValue> = match sel.as_ref() {
+            APLValue::Array(a) if a.dimensions.len() == 1 && a.element_count() == 1 => {
+                a.elements().into_iter().next().unwrap_or_else(|| Rc::new(APLValue::Null))
+            }
+            _ => sel,
+        };
+        let lookup_one = |k: &AplRef<APLValue>| -> AplRef<APLValue> {
+            let kf = k.clone();
+            // Disclose rank-0 arrays to their content (Kotlin `disclose()`).
+            let key = match kf.as_ref() {
+                APLValue::Array(a) if a.dimensions.is_empty() => {
+                    a.elements().into_iter().next().unwrap_or_else(|| Rc::new(APLValue::Null))
+                }
+                _ => kf,
+            };
+            m.lookup(key.as_ref())
+                .unwrap_or_else(|| Rc::new(APLValue::Nil))
+        };
+        match key.as_ref() {
+            APLValue::Array(a) => {
+                let out: Vec<AplRef<APLValue>> =
+                    a.elements().into_iter().map(|e| lookup_one(&e)).collect();
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    a.dimensions.clone(),
+                    ArrayData::Nested(out),
+                )))))
+            }
+            APLValue::List(a) => {
+                let out: Vec<AplRef<APLValue>> =
+                    a.elements().into_iter().map(|e| lookup_one(&e)).collect();
+                Ok(Rc::new(APLValue::List(Rc::new(KapArray::new(
+                    a.dimensions.clone(),
+                    ArrayData::Nested(out),
+                )))))
+            }
+            _ => Ok(lookup_one(&key)),
+        }
+    }
+
     fn index_select(
         &self,
         arr: &APLValue,
         selector: &APLValue,
     ) -> Result<AplRef<APLValue>, AplError> {
         let arr = arr.force(self)?;
+        // Map lookup `m[keys]` (Kotlin `mapLookupFromAPLValue`, map.kt:52):
+        // scalar key → the value (missing → nil); array key → same-shape
+        // array of lookups (missing cells → nil).
+        if let APLValue::Map(m) = arr.as_ref() {
+            return self.map_index(m, selector);
+        }
         let dims = arr.dimensions();
         let rank = dims.len();
 
@@ -13833,7 +13888,7 @@ impl Engine {
     /// its element count (matches Kap's `;`/`⍵`-destructuring semantics).
     fn element_count(&self, v: &APLValue) -> usize {
         match v {
-            APLValue::Array(a) => a.element_count(),
+            APLValue::Array(a) | APLValue::List(a) => a.element_count(),
             _ => 1,
         }
     }
