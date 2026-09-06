@@ -6966,9 +6966,31 @@ impl Engine {
         if total > 100_000_000 {
             return Err(AplError::runtime("⍳: result too large".into()));
         }
-        // For each flat position, compute its row-major multi-index. Result
-        // shape = the same `dims`; each cell is a length-`rank` index
-        // vector. Then `assemble` re-packs the cells into the right shape.
+        // Kotlin `IotaArrayImpls` (reshape.kt) + `IotaAPLFunctionImpl`
+        // (array_functions.kt:30-43):
+        //   scalar N     → `IotaArrayLong(N)`: flat Long vector 0..N-1
+        //   rank-1 [d0..]→ `IotaArray(indexes)`: `dimensions = Dimensions(indexes)`,
+        //     `valueAt(p) = APLArrayLong([rank], positionFromIndex(p))` — each cell
+        //     is a rank-1 vector of length = rank (the row-major multi-index),
+        //     i.e. `⍳4 5` is a 4×5 matrix whose cell (i,j) is the 2-vector (i j).
+        //   rank-0 empty (`⍳⍬`) → Null (`⍬`).
+        // `require(indexes.isNotEmpty())`: empty index list is rejected upstream
+        // (an array arg with 0 elements yields `dims.is_empty()` → Null here).
+        if dims.is_empty() {
+            return Ok(Rc::new(APLValue::Null));
+        }
+        if dims.len() == 1 {
+            // Flat Long vector 0..N-1 (IotaArrayLong).
+            let flat: Vec<i64> = (0..total as i64).collect();
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                dims,
+                ArrayData::Long(flat),
+            )))));
+        }
+        // Multi-dim: nested cells, each a rank-1 `vec![rank]` coordinate vector.
+        // `⍳,9` (rank-1 arg [9]) takes the flat path above — its cells are plain
+        // numbers, NOT 1-vectors (oracle `⍳,9 → ⟨0..8⟩`, `+/⍳,9 → 36`). Only a
+        // rank-2+ dims list nests (`⍳,9` never reaches here since dims.len()==1).
         let rank = dims.len();
         let strides: Vec<usize> = {
             let mut s = vec![1usize; rank];
@@ -6986,7 +7008,7 @@ impl Engine {
                 r %= strides[k];
             }
             cells.push(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                if rank <= 1 { vec![0] } else { vec![rank] },
+                vec![rank],
                 ArrayData::Long(idx),
             )))));
         }
