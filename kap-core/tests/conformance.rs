@@ -114,12 +114,17 @@ fn classify(engine: &Engine, c: &Case) -> Outcome {
 fn classify_with_timeout(c: &Case) -> Outcome {
     let c = c.clone();
     let (tx, rx) = std::sync::mpsc::channel();
-    let _handle = std::thread::spawn(move || {
-        let engine = Engine::new();
-        let o = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| classify(&engine, &c)))
-            .unwrap_or(Outcome::Unsupported);
-        let _ = tx.send(o);
-    });
+    // 64MB worker stack: legit deep recursion (Y-combinator, fib) needs room,
+    // especially in debug builds with large frames. Timeouts still bound hangs.
+    let _handle = std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            let engine = Engine::new();
+            let o =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| classify(&engine, &c)))
+                    .unwrap_or(Outcome::Unsupported);
+            let _ = tx.send(o);
+        });
     match rx.recv_timeout(std::time::Duration::from_secs(10)) {
         Ok(o) => o,
         Err(_) => Outcome::Unsupported,
@@ -371,6 +376,26 @@ fn curated_kap_parity() {
         ("⍴⊃[2] 2 3 2 ⍴ (0 1) (2 3) (4 5) (6 7) (8 9)", "(2 3 2 2)"),
         ("⍴⊃[0] (0 1) (2 3)", "(2 2)"),
         ("⍴⊃[1] (0 1) (2 3) (4 5) (6 7) (8 9)", "(5 2)"),
+        // Monadic `</>` rank adjust (Kotlin LessThan/GreaterThan eval1Arg)
+        ("⍴< 3 3 ⍴ ⍳9", "(1 3 3)"),
+        ("⍴> 3 3 3 ⍴ ⍳27", "(9 3)"),
+        ("⍴> 0 3 3 ⍴ ⍳27", "(0 3)"),
+        ("> 1", "1"),
+        // `⍰` null-fallthrough (Kotlin NullFallthroughOp)
+        ("⍮⍰ 1 2", "((1 2))"),
+        ("⍮⍰ null", "null"),
+        ("100 200 ÷[0]⍰ 1000×2 2 ⍴ ⍳4", "(0 1/10 1/10 1/15)"),
+        // `∥` parallel = sequential on the single-threaded port
+        ("{1+⍵}¨∥ 10", "11"),
+        // Dyadic `%` case/select (Kotlin CaseFunction, lookup.kt)
+        ("0 1 0 % \"abc\" \"FOO\"", "\"aOc\""),
+        ("0 1 1 % 9 (5 6 7)", "(9 6 7)"),
+        // `λ{...}` dfn-form lambda binds ⍺/⍵ at call time
+        ("a ← λ { 1 + ⍵ } ◊ (⍞a 1) + ⍞a 5", "8"),
+        ("lam2 ← λ{⍺+⍵+1} ◊ 10 ⍞lam2 3000", "3011"),
+        // Computed function position `⍞(fn-expr)`
+        ("∇ clo (x) { λ{ y←⍵ ◊ λ{ ⍵+x+y } } } ◊ ⍞(⍞(clo 10) 11) 12", "33"),
+        ("{ a←⍵ ⋄ ⍞a/ 10 11 12 13 }¨ λ× λ+", "(17160 46)"),
         // Whole rationals collapse to integers (literals + arithmetic)
         ("typeof 2r2", "kap:integer"),
         ("typeof 1r2+1r2", "kap:integer"),

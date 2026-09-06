@@ -3334,7 +3334,7 @@ impl<'a> Parser<'a> {
                 | "+" | "-" | "*" | "×" | "÷" | "/" | "⌿" | "\\" | "⍀" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⍪" | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "⍸" | "⍒" | "⍲" | "⍱" | "∼"
                 | "⊢" | "⊣" | "≡" | "⍓" | "∪" | "∩" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair"
-                | "⊆" | "⊇" | "→" | "≬" | "toList" | "fromList" | "⫇" | "group"
+                | "⊆" | "⊇" | "→" | "≬" | "toList" | "fromList" | "⫇" | "group" | "%"
                 | "⍕" | "format" | "⍎" | "execute" | "typeof"
                 | "~" | "∊" | "⍋" | "⊤" | "⊥"
                 | "namespace" | "import" | "declare" | "use" | "isLocallyBound"
@@ -3377,13 +3377,13 @@ impl<'a> Parser<'a> {
     /// Higher-order operators (adverbs) that take a *function* as one operand:
     /// `/` reduce, `\\` scan, `¨` each.
     fn is_adverb(name: &str) -> bool {
-        matches!(name, "/" | "reduce" | "\\" | "scan" | "⌿" | "⍀" | "¨" | "each" | "⍨" | "commute" | "∵" | "bitwise" | "⌸" | "key" | "⌻" | "˝" | "inverse")
+        matches!(name, "/" | "reduce" | "\\" | "scan" | "⌿" | "⍀" | "¨" | "each" | "⍨" | "commute" | "∵" | "bitwise" | "⌸" | "key" | "⌻" | "˝" | "inverse" | "⍰" | "∥")
     }
 
     /// Pure adverbs that ALWAYS need a left function — invalid as a bare RHS
     /// value (e.g. `f ⇐ ⌸` errors, but `f ⇐ /` is valid).
     fn is_pure_adverb(name: &str) -> bool {
-        matches!(name, "¨" | "each" | "⍨" | "commute" | "∵" | "bitwise" | "⌸" | "key" | "⌻" | "˝" | "inverse")
+        matches!(name, "¨" | "each" | "⍨" | "commute" | "∵" | "bitwise" | "⌸" | "key" | "⌻" | "˝" | "inverse" | "⍰" | "∥")
     }
 
     /// Fold the *value-right-arg* operators `⍢` (structural-under) and `⍣` (power)
@@ -5032,7 +5032,19 @@ impl<'a> Parser<'a> {
                             None => Err(self.err("λ: empty group is not a function")),
                         }
                     }
-                    Some(t) if matches!(t.token, Token::OpenBrace) => self.parse_function_atom(),
+                    // `λ { body }` (dfn-form, no param list): wrap the block as a
+                    // parameterless lambda body so it becomes a closure (⍺/⍵ bound
+                    // at call time), not an eagerly-evaluated value. Mirrors the
+                    // `⇐` Block arm in the evaluator.
+                    Some(t) if matches!(t.token, Token::OpenBrace) => {
+                        match self.parse_function_atom()? {
+                            Instr::Block { body } => Ok(Instr::Lambda {
+                                params: vec![],
+                                body: Box::new(Instr::Block { body }),
+                            }),
+                            other => Ok(other),
+                        }
+                    }
                     Some(t) => {
                         let tk = format!("{:?} @{}:{}", t.token, t.line, t.col);
                         Err(self.err(&format!("λ: expected a function after λ (got {})", tk)))
@@ -5577,7 +5589,19 @@ impl<'a> Parser<'a> {
                             None => Err(self.err("λ: empty group is not a function")),
                         }
                     }
-                    Some(t) if matches!(t.token, Token::OpenBrace) => self.parse_function_atom(),
+                    // `λ { body }` (dfn-form, no param list): wrap the block as a
+                    // parameterless lambda body so it becomes a closure (⍺/⍵ bound
+                    // at call time), not an eagerly-evaluated value. Mirrors the
+                    // `⇐` Block arm in the evaluator.
+                    Some(t) if matches!(t.token, Token::OpenBrace) => {
+                        match self.parse_function_atom()? {
+                            Instr::Block { body } => Ok(Instr::Lambda {
+                                params: vec![],
+                                body: Box::new(Instr::Block { body }),
+                            }),
+                            other => Ok(other),
+                        }
+                    }
                     Some(t) => {
                         let tk = format!("{:?} @{}:{}", t.token, t.line, t.col);
                         Err(self.err(&format!("λ: expected a function after λ (got {})", tk)))

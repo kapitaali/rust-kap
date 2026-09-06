@@ -2248,6 +2248,36 @@ impl Engine {
             Instr::OpCall { op, left_fn, right_fn } => {
                 return self.apply_user_op(op, left_fn, right_fn, left, right, env);
             }
+            // Computed function position, e.g. `⍞(foo 10) 11`: the fn expr is
+            // itself an application whose VALUE is the function to call (Kotlin
+            // evaluates the function operand first). Restricted to `Apply` —
+            // a blanket eval of any fn shape re-enters stdlib definitions at
+            // load time and overflows the stack. Non-function results fall
+            // through to the existing error below.
+            Instr::Apply { .. } => {
+                let fv = self.eval_instr(fn_expr, env)?.force(self)?;
+                match fv.as_ref() {
+                    APLValue::UserFn { params, split, body, env: fenv } => {
+                        return self.apply_user_fn(
+                            params,
+                            *split,
+                            body.as_ref(),
+                            left,
+                            right,
+                            env,
+                            fenv,
+                            None,
+                        );
+                    }
+                    APLValue::Escape { target } => {
+                        return self.apply_escape(*target, left, right, env);
+                    }
+                    APLValue::NonBoundFn { body } => {
+                        return self.apply_nonbound_fn(body, left, right, env);
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         };
         if let Some((params, split, body)) = lambda {
@@ -2335,6 +2365,37 @@ impl Engine {
                 // ⍉˝ monadic = self; dyadic non-diagonal = INVERSE permutation.
                 "˝" | "inverse" => return self.adverb_inverse(func, left, right, env),
                 "¨" | "each" => self.adverb_each(func, left, right, env),
+                // `∥` parallel (Kotlin `ParallelOp`, parallel.kt + engine.kt:498):
+                // single-threaded port evaluates the wrapped function directly.
+                "∥" => self.eval_apply(func, left, right, env),
+                // `⍰` null-fallthrough (Kotlin `NullFallthroughOp`,
+                // conditional-functions.kt + engine.kt:502): monadic → nil if
+                // the arg is nil else f(arg); dyadic → nil if the RIGHT arg is
+                // nil else f(a,b). The inner `func` may carry an explicit axis
+                // (`⊂[0]⍰`, `÷[0]⍰`) — re-enter `eval_apply` with it intact.
+                "⍰" => {
+                    let b = self.eval_instr(right, env)?.force(self)?;
+                    if matches!(b.as_ref(), APLValue::Nil) {
+                        return Ok(b);
+                    }
+                    match left {
+                        None => self.eval_apply(
+                            func,
+                            &None,
+                            &Box::new(Instr::Value(b)),
+                            env,
+                        ),
+                        Some(l) => {
+                            let a = self.eval_instr(l, env)?.force(self)?;
+                            self.eval_apply(
+                                func,
+                                &Some(Box::new(Instr::Value(a))),
+                                &Box::new(Instr::Value(b)),
+                                env,
+                            )
+                        }
+                    }
+                }
                 // `⌻` outer product (Kotlin outer_join.kt OuterJoinOp): `A f⌻ B`
                 // builds the rank-(⍴⍴A + ⍴⍴B) table of f(a,b) over every cell pair.
                 "⌻" => return self.outer_product(func, left, right, env),
@@ -3490,8 +3551,26 @@ impl Engine {
                 }
                 Some(_) => self.cmp2_elements(left_val, right_val, |o| o != Ordering::Equal, "≠"),
             },
-            "<" => self.cmp2_elements(left_val, right_val, |o| o == Ordering::Less, "<"),
-            ">" => self.cmp2_elements(left_val, right_val, |o| o == Ordering::Greater, ">"),
+            "<" => match left_val {
+                // Monadic `<` = rank up (Kotlin `LessThanAPLFunction.eval1Arg`):
+                // prepend a length-1 axis, content unchanged.
+                None => {
+                    let r = right_val.force(self)?;
+                    self.rank_up(&r)
+                }
+                Some(_) => self.cmp2_elements(left_val, right_val, |o| o == Ordering::Less, "<"),
+            },
+            ">" => match left_val {
+                // Monadic `>` = rank down (Kotlin `GreaterThanAPLFunction.eval1Arg`):
+                // rank<=1 identity, else merge the first two axes.
+                None => {
+                    let r = right_val.force(self)?;
+                    self.rank_down(&r)
+                }
+                Some(_) => {
+                    self.cmp2_elements(left_val, right_val, |o| o == Ordering::Greater, ">")
+                }
+            },
             "≤" => self.cmp2_elements(left_val, right_val, |o| o != Ordering::Greater, "≤"),
             "≥" => self.cmp2_elements(left_val, right_val, |o| o != Ordering::Less, "≥"),
             "cmp" => self.cmp_values(left_val, right_val, "cmp"),
@@ -3531,6 +3610,11 @@ impl Engine {
             },
             "⊆" => self.partitioned_enclose(left_val, right_val),
             "⊇" => self.pick_apl(left_val, right_val),
+            "%" => {
+                let a = left_val
+                    .ok_or_else(|| AplError::runtime("% needs two args".into()))?;
+                self.case_select(&a, &right_val)
+            }
             "→" | "branch" => self.return_arrow(left_val, right_val, env),
             "⍮" | "pair" => self.pair(left_val, right_val),
             "⌷" | "reveal" => self.access_from_index(left_val, right_val),
@@ -3717,6 +3801,153 @@ impl Engine {
             "≡" => self.match_or_depth(left_val, right_val),
             _ => Err(AplError::runtime(format!("unknown function: {}", name))),
         }
+    }
+
+    /// Monadic `<` = rank up (Kotlin `LessThanAPLFunction.eval1Arg`): prepend
+    /// a length-1 axis, content unchanged. Scalars become length-1 vectors.
+    fn rank_up(&self, v: &AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        match v.as_ref() {
+            APLValue::Array(a) => {
+                let mut dims = Vec::with_capacity(a.dimensions.len() + 1);
+                dims.push(1);
+                dims.extend(a.dimensions.iter().copied());
+                let mut n = KapArray::new(dims, a.data.clone());
+                n.labels = a.labels.clone();
+                Ok(Rc::new(APLValue::Array(Rc::new(n))))
+            }
+            APLValue::List(a) => {
+                let mut dims = Vec::with_capacity(a.dimensions.len() + 1);
+                dims.push(1);
+                dims.extend(a.dimensions.iter().copied());
+                let mut n = KapArray::new(dims, a.data.clone());
+                n.labels = a.labels.clone();
+                Ok(Rc::new(APLValue::List(Rc::new(n))))
+            }
+            _ => Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![1],
+                ArrayData::Nested(vec![v.clone()]),
+            ))))),
+        }
+    }
+
+    /// Monadic `>` = rank down (Kotlin `GreaterThanAPLFunction.eval1Arg`):
+    /// rank<=1 is the identity, else merge the first two axes.
+    fn rank_down(&self, v: &AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        match v.as_ref() {
+            APLValue::Array(a) if a.dimensions.len() > 1 => {
+                let mut dims = Vec::with_capacity(a.dimensions.len() - 1);
+                dims.push(a.dimensions[0] * a.dimensions[1]);
+                dims.extend(a.dimensions[2..].iter().copied());
+                let mut n = KapArray::new(dims, a.data.clone());
+                n.labels = a.labels.clone();
+                Ok(Rc::new(APLValue::Array(Rc::new(n))))
+            }
+            APLValue::List(a) if a.dimensions.len() > 1 => {
+                let mut dims = Vec::with_capacity(a.dimensions.len() - 1);
+                dims.push(a.dimensions[0] * a.dimensions[1]);
+                dims.extend(a.dimensions[2..].iter().copied());
+                let mut n = KapArray::new(dims, a.data.clone());
+                n.labels = a.labels.clone();
+                Ok(Rc::new(APLValue::List(Rc::new(n))))
+            }
+            _ => Ok(v.clone()),
+        }
+    }
+
+    /// Dyadic `%` = case/select (Kotlin `CaseFunction`, lookup.kt:415).
+    /// `sel % opts`: B must be rank-1; each option must be scalar or match
+    /// the selection dims. Result has the selection dims; cell p reads
+    /// `opts[sel[p]]` (scalar options disclose, else the p-th cell).
+    fn case_select(
+        &self,
+        left_val: &AplRef<APLValue>,
+        right_val: &AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let a = left_val.force(self)?;
+        let b = right_val.force(self)?;
+        // Selection: dims + flat index elements.
+        let (a_dims, sel): (Vec<usize>, Vec<AplRef<APLValue>>) = match a.as_ref() {
+            APLValue::Array(arr) => (arr.dimensions.clone(), arr.elements()),
+            APLValue::Str(s) => {
+                let chars: Vec<AplRef<APLValue>> =
+                    s.chars().map(|c| Rc::new(APLValue::Char(c))).collect();
+                (vec![chars.len()], chars)
+            }
+            _ => (vec![], vec![a.clone()]),
+        };
+        // Options: B must be a 1-dimensional array.
+        let opts: Vec<AplRef<APLValue>> = match b.as_ref() {
+            APLValue::Array(arr) if arr.dimensions.len() == 1 => arr.elements(),
+            _ => {
+                return Err(AplError::runtime(
+                    "Right argument must be a 1-dimensional array".into(),
+                ))
+            }
+        };
+        // Each option: scalar or dims == selection dims.
+        struct Opt {
+            dims: Vec<usize>,
+            elems: Vec<AplRef<APLValue>>,
+        }
+        let mut values: Vec<Opt> = Vec::with_capacity(opts.len());
+        for o in &opts {
+            let (d, e) = match o.as_ref() {
+                APLValue::Array(arr) => (arr.dimensions.clone(), arr.elements()),
+                APLValue::Str(s) => {
+                    let chars: Vec<AplRef<APLValue>> =
+                        s.chars().map(|c| Rc::new(APLValue::Char(c))).collect();
+                    (vec![chars.len()], chars)
+                }
+                _ => (vec![], vec![o.clone()]),
+            };
+            if !d.is_empty() && d != a_dims {
+                return Err(AplError::runtime(
+                    "Unmatched dimensions in selection list".into(),
+                ));
+            }
+            values.push(Opt { dims: d, elems: e });
+        }
+        let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(sel.len());
+        for (p, s) in sel.iter().enumerate() {
+            let idx = match s.as_ref() {
+                APLValue::Number(n) => n.as_long().map_err(|e| AplError::runtime(e))?,
+                _ => {
+                    return Err(AplError::runtime(
+                        "Selection index must be an integer".into(),
+                    ))
+                }
+            };
+            if idx < 0 || (idx as usize) >= values.len() {
+                return Err(AplError::runtime(format!(
+                    "Attempt to read index {} from array (size={})",
+                    idx,
+                    values.len()
+                )));
+            }
+            let v = &values[idx as usize];
+            if v.dims.is_empty() {
+                // Scalar option: disclose.
+                let e = v.elems.get(0).cloned().unwrap_or_else(|| Rc::new(APLValue::Null));
+                out.push(match e.as_ref() {
+                    APLValue::Array(arr) if arr.dimensions.is_empty() => {
+                        arr.elements().into_iter().next().unwrap_or_else(|| Rc::new(APLValue::Null))
+                    }
+                    _ => e,
+                });
+            } else if let Some(e) = v.elems.get(p) {
+                out.push(e.clone());
+            } else {
+                return Err(AplError::runtime(format!(
+                    "Attempt to read index {} from array (size={})",
+                    p,
+                    v.elems.len()
+                )));
+            }
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            a_dims,
+            ArrayData::Nested(out),
+        )))))
     }
 
     /// Axis-disclose `⊃[axis] R` (Kotlin `DiscloseAPLFunction.processAxis`).
@@ -4417,7 +4648,7 @@ impl Engine {
             "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"
                 | "↑" | "↓" | "⊂" | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥"
-                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair" | "⊆" | "⊇" | "→" | "≬" | "toList" | "fromList" | "⫇" | "group" | "use" | "isLocallyBound"
+                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair" | "⊆" | "⊇" | "→" | "≬" | "toList" | "fromList" | "⫇" | "group" | "use" | "isLocallyBound" | "%"
                 // Namespaced natives (P2): the parser's is_known_fn admits them, but
                 // this eval-time late-gate must also know them (two-gate rule).
                 | "sysparam"
@@ -11286,6 +11517,19 @@ impl Engine {
         }
     }
 
+    /// Convert an evaluated value back into an `Instr`, preserving function
+    /// values as opaque `Instr::Value` (they apply via the `lambda` match in
+    /// `eval_apply`). This is what lets function-valued array elements
+    /// (`λ× λ+` strand) flow through adverbs (`¨`) that re-dispatch per cell.
+    fn value_to_instr(&self, v: &AplRef<APLValue>) -> Result<Instr, AplError> {
+        match v.as_ref() {
+            APLValue::UserFn { .. } | APLValue::Escape { .. } | APLValue::NonBoundFn { .. } => {
+                Ok(Instr::Value(v.clone()))
+            }
+            _ => self.apl_to_instr(v.as_ref()),
+        }
+    }
+
     /// Apply the function described by `fn_instr` to `left`/`right` values, by building
     /// an `Instr::Apply` and recursing into `eval_apply`. `left` is optional (monadic).
     fn apply_fn_instr(
@@ -11296,10 +11540,10 @@ impl Engine {
         env: &AplRef<Environment>,
     ) -> Result<AplRef<APLValue>, AplError> {
         let left_instr = match left {
-            Some(v) => Some(Box::new(self.apl_to_instr(v)?)),
+            Some(v) => Some(Box::new(self.value_to_instr(v)?)),
             None => None,
         };
-        let right_instr = Box::new(self.apl_to_instr(right)?);
+        let right_instr = Box::new(self.value_to_instr(right)?);
         self.eval_apply(fn_instr, &left_instr, &right_instr, env)
     }
 
