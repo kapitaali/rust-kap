@@ -1827,6 +1827,17 @@ impl Engine {
                     let right_v = self.eval_instr(right, env)?.force(self)?;
                     return self.reveal_axis(&right_v, &axis_spec);
                 }
+                // `⌷[axes]` (axis-select, Kotlin `AccessFromIndexAPLFunction` axis
+                // branch, lookup.kt:59+): left values map onto the listed target
+                // axes; unlisted axes stay whole.
+                if name.as_str() == "⌷" {
+                    let left_v = left
+                        .as_ref()
+                        .ok_or_else(|| AplError::runtime("⌷ needs two arguments".into()))?;
+                    let left_v = self.eval_instr(left_v, env)?.force(self)?;
+                    let right_v = self.eval_instr(right, env)?.force(self)?;
+                    return self.squad_axis(&left_v, &axis_val, &right_v);
+                }
             }
             let axis_as_long = match axis_val.as_ref() {
                 APLValue::Number(n) => n.as_long().map_err(|e| AplError::runtime(e))? as usize,
@@ -10636,6 +10647,112 @@ impl Engine {
         }
     }
 
+    /// `⌷[axes]` axis-select (Kotlin `AccessFromIndexAPLFunction` axis branch):
+    /// `axes` (scalar or rank-1 ints) names the target axes of `B`; the i-th
+    /// element of the (rank-1) left argument specs the i-th listed axis
+    /// (scalar fixes+drops, array expands, nil keeps whole); unlisted axes
+    /// stay whole. Reuses `squad` by building an aligned spec vector.
+    fn squad_axis(
+        &self,
+        left_val: &AplRef<APLValue>,
+        axis_val: &AplRef<APLValue>,
+        right_val: &AplRef<APLValue>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let b = right_val.force(self)?;
+        let rank = match b.as_ref() {
+            APLValue::Array(a) => a.dimensions.len(),
+            APLValue::Str(s) => {
+                if s.chars().count() == 0 {
+                    0
+                } else {
+                    1
+                }
+            }
+            _ => 0,
+        };
+        // Left must be rank-1 (arrayify a scalar to a 1-vector).
+        let specs: Vec<AplRef<APLValue>> = match left_val.as_ref() {
+            APLValue::Array(a) => {
+                if a.dimensions.len() != 1 {
+                    return Err(AplError::runtime(
+                        "Position argument is not rank 1".into(),
+                    ));
+                }
+                a.elements()
+            }
+            other => vec![Rc::new(other.clone())],
+        };
+        // Axes: scalar or rank-1 int vector.
+        let axes: Vec<usize> = match axis_val.as_ref() {
+            APLValue::Number(n) => vec![n
+                .as_long()
+                .map_err(|e| AplError::runtime(e))? as usize],
+            APLValue::Array(a) => {
+                if a.dimensions.len() > 1 {
+                    return Err(AplError::runtime(
+                        "Axis argument must be a scalar number or a 1-dimensional array of numbers"
+                            .into(),
+                    ));
+                }
+                let mut v = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    match e.force(self)?.as_ref() {
+                        APLValue::Number(x) => v.push(
+                            x.as_long().map_err(|e| AplError::runtime(e))?
+                                as usize,
+                        ),
+                        _ => {
+                            return Err(AplError::runtime(
+                                "Axis argument must be a scalar number or a 1-dimensional array of numbers"
+                                    .into(),
+                            ))
+                        }
+                    }
+                }
+                v
+            }
+            _ => {
+                return Err(AplError::runtime(
+                    "Axis argument must be a scalar number or a 1-dimensional array of numbers"
+                        .into(),
+                ))
+            }
+        };
+        if axes.iter().any(|&a| a >= rank) {
+            return Err(AplError::runtime(
+                "Invalid axis in axis specification".into(),
+            ));
+        }
+        {
+            let mut seen = axes.clone();
+            seen.sort_unstable();
+            seen.dedup();
+            if seen.len() != axes.len() {
+                return Err(AplError::runtime(
+                    "Duplicated axis in axis specification".into(),
+                ));
+            }
+        }
+        if specs.len() != axes.len() {
+            return Err(AplError::runtime(
+                "Number of values in position argument must match the number of axes in axis specification"
+                    .into(),
+            ));
+        }
+        let mut aligned: Vec<AplRef<APLValue>> = Vec::with_capacity(rank);
+        for _ in 0..rank {
+            aligned.push(Rc::new(APLValue::Null));
+        }
+        for (j, &ax) in axes.iter().enumerate() {
+            aligned[ax] = specs[j].clone();
+        }
+        let spec_arr = Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![rank],
+            ArrayData::Nested(aligned),
+        ))));
+        self.squad(&b, &spec_arr)
+    }
+
     /// Dyadic `⌷` (squad / index selection, oracle-native semantics):
     /// each element of the left argument indexes the corresponding axis of `B`;
     /// axes without a specifier are kept WHOLE (`1 ⌷ 3 3⍴⍳9` → row `⟨3 4 5⟩`).
@@ -10665,9 +10782,18 @@ impl Engine {
                 stride[k] = stride[k + 1] * bdims[k + 1];
             }
         }
-        // Per-axis selections: Some(index) fixes the axis, None keeps it whole.
-        // Null specs also mean "keep whole" (Kotlin makeAllIndexList).
-        let mut fixed: Vec<Option<usize>> = vec![None; r];
+        // Per-axis selections: Fixed(i) drops the axis; Kept(idxs) keeps it with
+        // the given positions. Null AND Nil specs mean "keep whole" (Kotlin
+        // makeAllIndexList; `null` is Kap's nil). An array-valued spec expands
+        // to a position list for that axis (`(⊂ 5 10) ⌷ v` → both rows).
+        enum Sel {
+            Fixed(usize),
+            Kept(Vec<usize>),
+        }
+        let mut fixed: Vec<Sel> = Vec::with_capacity(r);
+        for k in 0..r {
+            fixed.push(Sel::Kept((0..bdims[k]).collect()));
+        }
         let sel_elems: Vec<AplRef<APLValue>> = match sel_val.as_ref() {
             APLValue::Array(arr) => arr.elements(),
             other => vec![Rc::new(other.clone())],
@@ -10681,33 +10807,60 @@ impl Engine {
         }
         for (k, sp) in sel_elems.iter().enumerate() {
             let sp = sp.force(self)?;
-            if matches!(sp.as_ref(), APLValue::Null) {
+            if matches!(sp.as_ref(), APLValue::Null | APLValue::Nil) {
                 continue; // keep whole
+            }
+            if let APLValue::Array(a) = sp.as_ref() {
+                let mut v = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    let i = self.index_to_i64(e.force(self)?.as_ref())?;
+                    v.push(check_and_adjust_selected_index(i, bdims[k])?);
+                }
+                fixed[k] = Sel::Kept(v);
+                continue;
             }
             let i = self.index_to_i64(sp.as_ref())?;
             let adj = check_and_adjust_selected_index(i, bdims[k])?;
-            fixed[k] = Some(adj);
+            fixed[k] = Sel::Fixed(adj);
         }
-        // Kept axes (whole) in order; their dims form the result shape.
-        let out_dims: Vec<usize> = (0..r).filter(|&k| fixed[k].is_none()).map(|k| bdims[k]).collect();
+        // Kept axes (whole or expanded) in order; their lengths form the result shape.
+        let out_dims: Vec<usize> = fixed
+            .iter()
+            .filter_map(|s| match s {
+                Sel::Fixed(_) => None,
+                Sel::Kept(v) => Some(v.len()),
+            })
+            .collect();
+        // Base offset from fixed axes.
         let base: usize = fixed
             .iter()
             .enumerate()
-            .filter_map(|(k, f)| f.map(|v| v * stride[k]))
+            .filter_map(|(k, f)| match f {
+                Sel::Fixed(v) => Some(v * stride[k]),
+                Sel::Kept(_) => None,
+            })
             .sum();
         if out_dims.is_empty() {
             // Full coordinate: single element.
             return Ok(Rc::new(belems[base].as_ref().clone()));
         }
-        // Iterate the kept axes row-major, gathering elements.
-        let kept_axes: Vec<usize> = (0..r).filter(|&k| fixed[k].is_none()).collect();
+        // Iterate the kept axes row-major, gathering elements. A kept axis may
+        // carry an explicit position list (array-valued spec).
+        let kept: Vec<(usize, &[usize])> = fixed
+            .iter()
+            .enumerate()
+            .filter_map(|(k, s)| match s {
+                Sel::Fixed(_) => None,
+                Sel::Kept(v) => Some((k, v.as_slice())),
+            })
+            .collect();
         let total: usize = out_dims.iter().product();
         let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(total);
-        let mut counters = vec![0usize; kept_axes.len()];
+        let mut counters = vec![0usize; kept.len()];
         for _ in 0..total {
             let mut flat = base;
-            for (j, &k) in kept_axes.iter().enumerate() {
-                flat += counters[j] * stride[k];
+            for (j, &(k, pos)) in kept.iter().enumerate() {
+                flat += pos[counters[j]] * stride[k];
             }
             out.push(Rc::new(belems[flat].as_ref().clone()));
             // odometer increment (last kept axis fastest)
@@ -10831,13 +10984,11 @@ impl Engine {
                     ArrayData::Nested(out),
                 )))))
             }
-            APLValue::List(a) => {
-                let out: Vec<AplRef<APLValue>> =
-                    a.elements().into_iter().map(|e| lookup_one(&e)).collect();
-                Ok(Rc::new(APLValue::List(Rc::new(KapArray::new(
-                    a.dimensions.clone(),
-                    ArrayData::Nested(out),
-                )))))
+            APLValue::List(_) => {
+                // A `;`-list selector is ONE composite key (Kotlin `APLList` is
+                // `APLSingleValue`, rank 0 → `isScalar()` true): `m[(:a;:b;:c)]`
+                // looks up the list itself, not each element.
+                Ok(lookup_one(&key))
             }
             _ => Ok(lookup_one(&key)),
         }
@@ -10875,9 +11026,9 @@ impl Engine {
         for k in 0..sections.len() {
             let sec = sections[k].force(self)?;
             let axis_size = dims[k];
-            // Empty / `⍬` section => whole axis.
+            // Empty / `⍬` / `null` section => whole axis.
             let idx_list: Vec<AplRef<APLValue>> = match sec.as_ref() {
-                APLValue::Null => vec![],
+                APLValue::Null | APLValue::Nil => vec![],
                 APLValue::Array(a) if a.element_count() == 0 => vec![],
                 APLValue::Array(a) => a.elements(),
                 _ => vec![Rc::new(sec.as_ref().clone())],
@@ -11208,6 +11359,15 @@ impl Engine {
                 // Truncate toward zero (matches Kap's asInt for rationals).
                 let q = r.numer() / r.denom();
                 Ok(i64::try_from(q).unwrap_or(0))
+            }
+            APLValue::Number(KapNumber::BigInt(v)) => {
+                Ok(i64::try_from(v).map(|x| x).unwrap_or_else(|_| {
+                    if *v < num_bigint::BigInt::from(0) {
+                        i64::MIN
+                    } else {
+                        i64::MAX
+                    }
+                }))
             }
             _ => Err(AplError::runtime("array index must be an integer".into())),
         }

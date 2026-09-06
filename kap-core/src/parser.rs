@@ -1134,7 +1134,8 @@ impl<'a> Parser<'a> {
                             //   `/` reduce   — reduce.kt:279 (reduce adverb path: adv_explicit_axis)
                             //   `\\` expand  — expand.kt:23 (ExpandFunctionImpl.eval2Arg)
                             //   `⌿` reduce-first — same path as `/` (adverb-level)
-                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖" | "↑" | "↓" | "labels" | "hasLabels" | "⊂" | "⊃" | "∊" | "/" | "\\" | "⌿" | "∧" | "∨")
+                            //   `⌷` squad — lookup.kt:59 (AccessFromIndex axis branch)
+                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖" | "↑" | "↓" | "labels" | "hasLabels" | "⊂" | "⊃" | "⌷" | "∊" | "/" | "\\" | "⌿" | "∧" | "∨")
                     );
                     if axis_ok {
                         self.advance();
@@ -5032,6 +5033,23 @@ impl<'a> Parser<'a> {
                         self.advance();
                         match self.parse_paren_value_leading() {
                             Some(h @ Instr::Lambda { .. }) => Ok(h),
+                            // Bare `(name)`: same `lookupFunction` gate as `λfoo`
+                            // (Kotlin `λ(foo)` with undefined `foo` is a parse
+                            // failure); a defined fn wraps like any fn expr.
+                            Some(h @ Instr::Symbol { .. }) => {
+                                if let Instr::Symbol { name, namespace } = &h {
+                                    if !Self::is_primitive_op(name)
+                                        && !self.is_known_fn(name, namespace)
+                                    {
+                                        return Err(self
+                                            .err("Symbol is not a valid function"));
+                                    }
+                                }
+                                Ok(Instr::Lambda {
+                                    params: vec![],
+                                    body: Box::new(h),
+                                })
+                            }
                             Some(holder) => Ok(Instr::Lambda {
                                 params: vec![],
                                 body: Box::new(holder),
@@ -5595,6 +5613,23 @@ impl<'a> Parser<'a> {
                         self.advance();
                         match self.parse_paren_value_leading() {
                             Some(h @ Instr::Lambda { .. }) => Ok(h),
+                            // Bare `(name)`: same `lookupFunction` gate as `λfoo`
+                            // (Kotlin `λ(foo)` with undefined `foo` is a parse
+                            // failure); a defined fn wraps like any fn expr.
+                            Some(h @ Instr::Symbol { .. }) => {
+                                if let Instr::Symbol { name, namespace } = &h {
+                                    if !Self::is_primitive_op(name)
+                                        && !self.is_known_fn(name, namespace)
+                                    {
+                                        return Err(self
+                                            .err("Symbol is not a valid function"));
+                                    }
+                                }
+                                Ok(Instr::Lambda {
+                                    params: vec![],
+                                    body: Box::new(h),
+                                })
+                            }
                             Some(holder) => Ok(Instr::Lambda {
                                 params: vec![],
                                 body: Box::new(holder),
