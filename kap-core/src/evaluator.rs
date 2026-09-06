@@ -1827,6 +1827,38 @@ impl Engine {
                     let right_v = self.eval_instr(right, env)?.force(self)?;
                     return self.reveal_axis(&right_v, &axis_spec);
                 }
+                // `⊂[axes]` multi-axis enclose (Kotlin `EncloseAPLFunctionImpl`,
+                // disclose.kt:147): a rank-1 axis vector with != 1 elements
+                // routes here (scalar/singleton keeps the `enclose_axis` path
+                // below). Handled BEFORE scalar-axis extraction like `⊃`/`⌷`.
+                if name.as_str() == "⊂" || name.as_str() == "enclose" {
+                    let is_multi = matches!(axis_val.as_ref(), APLValue::Array(a) if a.dimensions.len() <= 1 && a.element_count() != 1);
+                    if is_multi {
+                        if left.is_some() {
+                            return Err(AplError::runtime(
+                                "⊂: function does not accept a left argument".into(),
+                            ));
+                        }
+                        let mut avec: Vec<usize> = Vec::new();
+                        if let APLValue::Array(a) = axis_val.as_ref() {
+                            for e in a.elements() {
+                                match e.force(self)?.as_ref() {
+                                    APLValue::Number(x) => avec.push(
+                                        x.as_long().map_err(|e| AplError::runtime(e))?
+                                            as usize,
+                                    ),
+                                    _ => {
+                                        return Err(AplError::runtime(
+                                            "⊂: axis must be integers".into(),
+                                        ))
+                                    }
+                                }
+                            }
+                        }
+                        let right_v = self.eval_instr(right, env)?.force(self)?;
+                        return self.enclose_axes(right_v, &avec);
+                    }
+                }
                 // `⌷[axes]` (axis-select, Kotlin `AccessFromIndexAPLFunction` axis
                 // branch, lookup.kt:59+): left values map onto the listed target
                 // axes; unlisted axes stay whole.
@@ -2070,12 +2102,22 @@ impl Engine {
                 // here (Kotlin's EncloseAPLFunction is monadic); reject dyadic
                 // uses to match the oracle (`2 ⊂[0] 1 2 3` errors).
                 "⊂" => {
-                    if left_v.is_some() {
-                        return Err(AplError::runtime(
-                            "⊂: function does not accept a left argument".into(),
-                        ));
+                    match left_v {
+                        None => return self.enclose_axis(right_v, axis_as_long),
+                        Some(l) => {
+                            return self.partitioned_enclose_subset(l, right_v, Some(axis_as_long))
+                        }
                     }
-                    return self.enclose_axis(right_v, axis_as_long);
+                }
+                // `⊆[axis]` partition-along-axis (Kotlin `PartitionedEnclose`
+                // `computeAxis`): same as dyadic `⊂[axis]`.
+                "⊆" => {
+                    match left_v {
+                        None => return self.enclose_axis(right_v, axis_as_long),
+                        Some(l) => {
+                            return self.partitioned_enclose_subset(l, right_v, Some(axis_as_long))
+                        }
+                    }
                 }
                 // T1.1: `a /[axis] b` direct-verb select-elements-last-axis
                 // (Kotlin `SelectElementsLastAxisFunctionImpl.eval2Arg`,
@@ -3642,7 +3684,7 @@ impl Engine {
             "↓" => self.drop(left_val, right_val),
             "⊂" => match left_val {
                 None => self.enclose(right_val),
-                Some(l) => self.partitioned_enclose_subset(l, right_val),
+                Some(l) => self.partitioned_enclose_subset(l, right_val, None),
             },
             "⊆" => self.partitioned_enclose(left_val, right_val),
             "⊇" => self.pick_apl(left_val, right_val),
@@ -7240,6 +7282,12 @@ impl Engine {
         let data = right_val.force(self)?;
         let src_elements: Vec<AplRef<APLValue>> = match data.as_ref() {
             APLValue::Array(a) => a.elements(),
+            // A string reshapes by CHARACTERS (oracle `7 3⍴"abcdefghijk"`
+            // cycles chars, not the whole string).
+            APLValue::Str(s) => s
+                .chars()
+                .map(|c| Rc::new(APLValue::Char(c)) as AplRef<APLValue>)
+                .collect(),
             other => vec![Rc::new(other.clone())],
         };
         // Kotlin `b.size`: an array contributes its element count; `⍬` (Null, Kap's
@@ -7250,6 +7298,7 @@ impl Engine {
         // `⍬` (Kotlin's `APLEmptyArray` is a valid rank-1 size-0 array).
         let b_size = match data.as_ref() {
             APLValue::Array(a) => a.element_count() as i64,
+            APLValue::Str(s) => s.chars().count() as i64,
             APLValue::Null => 0,
             _ => 1,
         };
@@ -7336,6 +7385,12 @@ impl Engine {
                 vec![]
             }
             APLValue::Array(a) => a.elements(),
+            // A string reshapes by CHARACTERS (oracle `7 3⍴"abcdefghijk"`
+            // cycles chars, not the whole string).
+            APLValue::Str(s) => s
+                .chars()
+                .map(|c| Rc::new(APLValue::Char(c)) as AplRef<APLValue>)
+                .collect(),
             other => vec![Rc::new(other.clone())],
         };
         if src.is_empty() {
@@ -9617,6 +9672,116 @@ impl Engine {
     /// `k`, produces a (rank-1)-D array whose elements are the `dims[k]`-long
     /// slices of `x` along axis `k` (each slice is itself a rank-1 vector
     /// wrapped in a box).
+    /// `⊂[axes]` multi-axis enclose (Kotlin `EncloseAPLFunctionImpl.eval1Arg`,
+    /// disclose.kt:147+): the listed axes become the cell axes. Ordered
+    /// (`axis[i] == i + rank - n`) encloses the trailing axes directly;
+    /// otherwise the selected axes transpose last (in listed order) first.
+    fn enclose_axes(
+        &self,
+        right_val: AplRef<APLValue>,
+        axes: &[usize],
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let v = right_val.force(self)?;
+        let arr = match v.as_ref() {
+            APLValue::Array(a) => a.clone(),
+            _ => {
+                return Err(AplError::runtime(format!(
+                    "⊂[axis]: argument must be an array, got {:?}",
+                    v
+                )));
+            }
+        };
+        let rank = arr.dimensions.len();
+        let n = axes.len();
+        if n == 0 {
+            return Err(AplError::runtime("Empty array in axis argument".into()));
+        }
+        if n > rank {
+            return Err(AplError::runtime("Illegal dimensions of axis argument".into()));
+        }
+        for &a in axes {
+            if a >= rank {
+                return Err(AplError::runtime(format!(
+                    "⊂: Axis {} is not valid. Expected: {}",
+                    a, rank
+                )));
+            }
+        }
+        {
+            let mut seen = axes.to_vec();
+            seen.sort_unstable();
+            seen.dedup();
+            if seen.len() != n {
+                return Err(AplError::runtime("Invalid axis argument".into()));
+            }
+        }
+        // Permute: unlisted axes (in order) first, listed axes (in listed
+        // order) last. Ordered case yields the identity perm.
+        let mut perm: Vec<usize> = (0..rank).filter(|i| !axes.contains(i)).collect();
+        perm.extend_from_slice(axes);
+        let dims: Vec<usize> = perm.iter().map(|&i| arr.dimensions[i]).collect();
+        let elems = arr.elements();
+        let mut src_strides = vec![1usize; rank];
+        if rank > 1 {
+            for k in (0..rank - 1).rev() {
+                src_strides[k] = src_strides[k + 1] * arr.dimensions[k + 1];
+            }
+        }
+        let mut dst_strides = vec![1usize; rank];
+        if rank > 1 {
+            for k in (0..rank - 1).rev() {
+                dst_strides[k] = dst_strides[k + 1] * dims[k + 1];
+            }
+        }
+        let total: usize = dims.iter().product();
+        // transposed[dst_flat] = src element; invert: for each src element
+        // compute its dst position.
+        let mut transposed: Vec<AplRef<APLValue>> = vec![Rc::new(APLValue::Null); total];
+        let src_total: usize = arr.dimensions.iter().product();
+        for s in 0..src_total {
+            // Source coords in ORIGINAL axis order first…
+            let mut scoord = vec![0usize; rank];
+            let mut rem = s;
+            for k in 0..rank {
+                scoord[k] = (rem / src_strides[k]) % arr.dimensions[k];
+                rem %= src_strides[k];
+            }
+            // …then remap through the permutation.
+            let mut dst = 0usize;
+            for (d, &pd) in perm.iter().enumerate() {
+                dst += scoord[pd] * dst_strides[d];
+            }
+            transposed[dst] = elems[s].clone();
+        }
+        // Split: leading (rank-n) dims stay; trailing n dims form each cell.
+        let out_dims: Vec<usize> = dims[..rank - n].to_vec();
+        let cell_dims: Vec<usize> = dims[rank - n..].to_vec();
+        let cell_total: usize = if cell_dims.is_empty() {
+            1
+        } else {
+            cell_dims.iter().product()
+        };
+        let out_total: usize = if out_dims.is_empty() {
+            1
+        } else {
+            out_dims.iter().product()
+        };
+        let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(out_total);
+        for o in 0..out_total {
+            let base = o * cell_total;
+            let cell_elems: Vec<AplRef<APLValue>> =
+                transposed[base..base + cell_total].to_vec();
+            out.push(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                cell_dims.clone(),
+                ArrayData::Nested(cell_elems),
+            )))));
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            out_dims,
+            ArrayData::Nested(out),
+        )))))
+    }
+
     fn enclose_axis(
         &self,
         right_val: AplRef<APLValue>,
@@ -10171,6 +10336,16 @@ impl Engine {
             }
             Some(l) => {
                 let a = l.force(self)?;
+                // Kotlin `eval2Arg`: `b.arrayify()` — a scalar right becomes
+                // a 1-vector (same fix as dyadic `⊂`).
+                let b: AplRef<APLValue> = match b.as_ref() {
+                    APLValue::Array(_) => b,
+                    APLValue::Str(s) if s.chars().count() != 1 => b,
+                    other => Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        vec![1],
+                        ArrayData::Nested(vec![Rc::new(other.clone())]),
+                    )))),
+                };
                 let b_dims = b.dimensions();
                 if b_dims.is_empty() {
                     return Err(AplError::runtime("⊆: right argument must not be a scalar".into()));
@@ -10266,14 +10441,32 @@ impl Engine {
         &self,
         left_val: AplRef<APLValue>,
         right_val: AplRef<APLValue>,
+        axis_opt: Option<usize>,
     ) -> Result<AplRef<APLValue>, AplError> {
         let b = right_val.force(self)?;
         let a = left_val.force(self)?;
+        // Kotlin `eval2Arg`: `b.arrayify()` — a scalar right becomes a
+        // 1-vector (oracle `1 ⊂ @a` → `⟨"a"⟩`), not an error.
+        let b: AplRef<APLValue> = match b.as_ref() {
+            APLValue::Array(_) => b,
+            APLValue::Str(s) if s.chars().count() != 1 => b,
+            other => Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![1],
+                ArrayData::Nested(vec![Rc::new(other.clone())]),
+            )))),
+        };
         let b_dims = b.dimensions();
         if b_dims.is_empty() {
             return Err(AplError::runtime("⊂: right argument must not be a scalar".into()));
         }
-        let axis = b_dims.len() - 1;
+        let axis = axis_opt.unwrap_or(b_dims.len() - 1);
+        if axis >= b_dims.len() {
+            return Err(AplError::runtime(format!(
+                "⊂: Axis {} is not valid. Expected: {}",
+                axis,
+                b_dims.len()
+            )));
+        }
         let inds: Vec<i64> = match a.as_ref() {
             APLValue::Number(KapNumber::Long(v)) => vec![*v],
             APLValue::Array(_) => a
@@ -10312,12 +10505,14 @@ impl Engine {
             partitions.push((prev_index as usize, inds.len()));
         }
         let b_elems = b.elements();
-        let frame = b_dims[..axis].iter().product::<usize>().max(1);
+        // Cells slice along `axis`; axes before/after form the frame.
         let row_len = b_dims[axis];
+        let after: usize = b_dims[axis + 1..].iter().product::<usize>().max(1);
+        let before: usize = b_dims[..axis].iter().product::<usize>().max(1);
         let mut cells: Vec<AplRef<APLValue>> = Vec::new();
-        for f in 0..frame {
+        for f in 0..before {
             for &(start, end) in &partitions {
-                if start + 1 == end {
+                if start + 1 == end && after == 1 {
                     // Single element: box it in a 0-D array
                     let flat = f * row_len + start;
                     cells.push(Rc::new(APLValue::Array(Rc::new(KapArray::new(
@@ -10327,21 +10522,28 @@ impl Engine {
                 } else {
                     let mut cell: Vec<AplRef<APLValue>> = Vec::new();
                     for j in start..end {
-                        let flat = f * row_len + j;
-                        cell.push(b_elems[flat].clone());
+                        for t in 0..after {
+                            let flat = f * row_len * after + j * after + t;
+                            cell.push(b_elems[flat].clone());
+                        }
+                    }
+                    let mut cd = vec![cell.len() / after.max(1)];
+                    if after > 1 {
+                        cd.push(after);
                     }
                     cells.push(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                        vec![cell.len()],
+                        cd,
                         ArrayData::Nested(cell),
                     )))));
                 }
             }
         }
-        let outer_dims = if frame == 1 {
+        let outer_dims = if before == 1 && axis == b_dims.len() - 1 {
             vec![partitions.len()]
         } else {
             let mut d = b_dims[..axis].to_vec();
             d.push(partitions.len());
+            d.extend_from_slice(&b_dims[axis + 1..]);
             d
         };
         Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(

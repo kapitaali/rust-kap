@@ -1135,7 +1135,8 @@ impl<'a> Parser<'a> {
                             //   `\\` expand  — expand.kt:23 (ExpandFunctionImpl.eval2Arg)
                             //   `⌿` reduce-first — same path as `/` (adverb-level)
                             //   `⌷` squad — lookup.kt:59 (AccessFromIndex axis branch)
-                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖" | "↑" | "↓" | "labels" | "hasLabels" | "⊂" | "⊃" | "⌷" | "∊" | "/" | "\\" | "⌿" | "∧" | "∨")
+                            //   `⊆` partition — disclose.kt (PartitionedEnclose computeAxis)
+                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖" | "↑" | "↓" | "labels" | "hasLabels" | "⊂" | "⊃" | "⌷" | "⊆" | "∊" | "/" | "\\" | "⌿" | "∧" | "∨")
                     );
                     if axis_ok {
                         self.advance();
