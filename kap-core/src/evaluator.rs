@@ -1787,6 +1787,47 @@ impl Engine {
         // scalar arithmetic builtins to an axis-aware broadcast path.
         if let Instr::AxisApplied { func, axis } = fn_expr {
             let axis_val = self.eval_instr(axis, env)?.force(self)?;
+            // `⊃[axis]` (axis-disclose, Kotlin `DiscloseAPLFunction.processAxis`):
+            // handled BEFORE the scalar-axis extraction below: the axis may be
+            // a rank-1 vector (`⊃[1 2] x`), and its length pads against the
+            // disclosed-new-axis count (Kotlin `makeAxisIntArray`), not 1.
+            if let Instr::Symbol { ref name, .. } = **func {
+                if name.as_str() == "⊃" || name.as_str() == "first" {
+                    if left.is_some() {
+                        return Err(AplError::runtime(
+                            "⊃: axis specifier is only supported on monadic disclose".into(),
+                        ));
+                    }
+                    let axis_spec: Vec<i64> = match axis_val.as_ref() {
+                        APLValue::Number(n) => {
+                            vec![n.as_long().map_err(|e| AplError::runtime(e))?]
+                        }
+                        APLValue::Array(a) if a.dimensions.len() <= 1 => {
+                            let mut v = Vec::with_capacity(a.element_count());
+                            for e in a.elements() {
+                                match e.as_ref() {
+                                    APLValue::Number(x) => v.push(
+                                        x.as_long().map_err(|e| AplError::runtime(e))?,
+                                    ),
+                                    _ => {
+                                        return Err(AplError::runtime(
+                                            "⊃: axis must be integers".into(),
+                                        ))
+                                    }
+                                }
+                            }
+                            v
+                        }
+                        _ => {
+                            return Err(AplError::runtime(
+                                "⊃: Axis specifier must be a scalar or a rank-1 array".into(),
+                            ))
+                        }
+                    };
+                    let right_v = self.eval_instr(right, env)?.force(self)?;
+                    return self.reveal_axis(&right_v, &axis_spec);
+                }
+            }
             let axis_as_long = match axis_val.as_ref() {
                 APLValue::Number(n) => n.as_long().map_err(|e| AplError::runtime(e))? as usize,
                 APLValue::Array(a) if a.dimensions.len() == 1 && a.element_count() == 1 => {
@@ -1860,6 +1901,7 @@ impl Engine {
             if fn_name == "," || fn_name == "⍪" {
                 return self.catenate_axis(left_v, right_v, &axis_number);
             }
+            // (`⊃[axes]` vector-axis disclose is handled by the early arm above.)
             // Kotlin `MathCombineAPLFunction.eval1Arg` silently drops the axis
             // (oracle-verified): `+[0] 3`, `-[1] 5`, `×[2] 7`, `÷[3] 8`, `*[0] 2` all
             // return the monadic form (`+ x` identity, `- x` negate, `× x` signum,
@@ -3675,6 +3717,222 @@ impl Engine {
             "≡" => self.match_or_depth(left_val, right_val),
             _ => Err(AplError::runtime(format!("unknown function: {}", name))),
         }
+    }
+
+    /// Axis-disclose `⊃[axis] R` (Kotlin `DiscloseAPLFunction.processAxis`).
+    /// Discloses the input by collapsing one level of nesting (Kotlin
+    /// `DisclosedArrayValue`), then transposes so the disclosed axes land at
+    /// the positions given by `axis` (the original axes fill the remaining
+    /// slots in their original order). The axis list may be shorter than the
+    /// disclosed rank — the trailing values default to `last + i` (mirrors
+    /// `makeAxisIntArray` in Kotlin). Scalar input: rank 0; only `axis == 0`
+    /// is valid; result is the scalar itself (no new rank).
+    fn reveal_axis(
+        &self,
+        right_val: &AplRef<APLValue>,
+        axis_spec: &[i64],
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let v = right_val.force(self)?;
+        // Scalar path: only axis 0 is valid; the disclosed scalar is itself.
+        // (Kotlin `processScalarValue` calls `makeAxisIntArray(axis, 1)`.)
+        if !matches!(v.as_ref(), APLValue::Array(_) | APLValue::List(_)) {
+            if axis_spec.len() > 1 {
+                return Err(AplError::runtime(format!(
+                    "⊃: Too many axis specifiers. Max allowed: 1. Got {}.",
+                    axis_spec.len()
+                )));
+            }
+            if axis_spec.first().copied().unwrap_or(0) != 0 {
+                return Err(AplError::runtime(
+                    "⊃: Only axis 0 is allowed for scalars".into(),
+                ));
+            }
+            return Ok(v);
+        }
+        // Array/List path.
+        let (orig_dims, elements_flat) = match v.as_ref() {
+            APLValue::Array(a) => (a.dimensions.clone(), a.elements()),
+            APLValue::List(a) => (a.dimensions.clone(), a.elements()),
+            _ => unreachable!(),
+        };
+        let r = orig_dims.len();
+        // Compute `max_inner_shape` (Kotlin `maxShapeOf`): the max shape of
+        // the inner cells.
+        let mut max_inner: Vec<usize> = Vec::new();
+        for e in &elements_flat {
+            let inner_dims = match e.as_ref() {
+                APLValue::Array(a) => a.dimensions.clone(),
+                _ => vec![],
+            };
+            if inner_dims.len() > max_inner.len() {
+                let mut new = vec![1usize; inner_dims.len() - max_inner.len()];
+                new.extend(max_inner.iter().copied());
+                max_inner = new;
+            }
+            if max_inner.len() < inner_dims.len() {
+                max_inner.extend(vec![1usize; inner_dims.len() - max_inner.len()]);
+            }
+            for (i, &d) in inner_dims.iter().enumerate() {
+                if d > max_inner[i] {
+                    max_inner[i] = d;
+                }
+            }
+        }
+        let c = max_inner.len();
+        // Disclosed dimensions = `orig_dims ++ max_inner`.
+        let mut disclosed_dims: Vec<usize> = orig_dims.clone();
+        disclosed_dims.extend(max_inner.iter().copied());
+        let disclosed_rank = r + c;
+        // Kotlin `processAxis`: `maxAxis = z1Dimensions.size - a.dimensions.size`
+        // (= c, the disclosed-NEW-axis count); `makeAxisIntArray(axis, maxAxis)`
+        // pads a short spec with `last + i` up to maxAxis.
+        let max_axis = c as i64;
+        if axis_spec.len() as i64 > max_axis {
+            return Err(AplError::runtime(format!(
+                "⊃: Too many axis specifiers. Max allowed: {}. Got {}.",
+                max_axis,
+                axis_spec.len()
+            )));
+        }
+        if axis_spec.is_empty() && max_axis > 0 {
+            return Err(AplError::runtime(
+                "⊃: Axis specifier must be a scalar or a rank-1 array".into(),
+            ));
+        }
+        let mut axis_int: Vec<i64> = axis_spec.to_vec();
+        while (axis_int.len() as i64) < max_axis {
+            let last = *axis_int.last().unwrap_or(&0);
+            axis_int.push(last + 1);
+        }
+        // Validate each against the disclosed rank (Kotlin `ensureValidAxis`).
+        let disclosed_len = disclosed_rank as i64;
+        for &a in &axis_int {
+            if a < 0 || a >= disclosed_len {
+                return Err(AplError::runtime(format!(
+                    "⊃: Axis {} is not valid. Expected: {}",
+                    a, disclosed_len
+                )));
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        for &a in &axis_int {
+            if !seen.insert(a) {
+                return Err(AplError::runtime(
+                    "⊃: Duplicated values in axis".into(),
+                ));
+            }
+        }
+        // Build `newAxisList`: axes NOT in axis_int keep their slot (in
+        // order), then axis_int axes go at the end (in axis_int order).
+        let axis_set: std::collections::HashSet<i64> = axis_int.iter().copied().collect();
+        let mut new_axis: Vec<i64> = (0..disclosed_len).filter(|i| !axis_set.contains(i)).collect();
+        new_axis.extend(axis_int.iter().copied());
+        // Transpose: result axis k = source axis new_axis[k].
+        // Kotlin `TransposedAPLValue.make` with `invert=false`:
+        //   newDimensions[index] = d[inverse[new_axis][index]]
+        // where `inverse[new_axis[i]] = i`.
+        let mut inv_axis = vec![0i64; disclosed_rank];
+        for (k, &a) in new_axis.iter().enumerate() {
+            inv_axis[a as usize] = k as i64;
+        }
+        let new_dims: Vec<usize> = inv_axis
+            .iter()
+            .map(|&a| disclosed_dims[a as usize])
+            .collect();
+        // Strides for the disclosed source.
+        let src_stride = strides(&disclosed_dims);
+        let new_stride = strides(&new_dims);
+        let orig_stride = strides(&orig_dims);
+        let total: usize = new_dims.iter().product();
+        if total == 0 {
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                new_dims,
+                ArrayData::Nested(vec![]),
+            )))));
+        }
+        if total > 100_000_000 {
+            return Err(AplError::runtime("⊃: result too large".into()));
+        }
+        // For each output position, compute the source disclosed flat index,
+        // then map back to the original (outer, inner) coordinates to fetch
+        // the cell.
+        let mut out_elems: Vec<AplRef<APLValue>> = Vec::with_capacity(total);
+        for pos in 0..total {
+            // Decode `pos` into new_coords (column-major over new_dims).
+            let mut rem = pos;
+            let mut new_coords = vec![0usize; disclosed_rank];
+            for k in 0..disclosed_rank {
+                new_coords[k] = rem / new_stride[k];
+                rem %= new_stride[k];
+            }
+            // Source coord (Kotlin `TransposedAPLValue.translateIndex`):
+            // `src[i] = new_coords[new_axis[i]]`.
+            let mut src_coords = vec![0usize; disclosed_rank];
+            for i in 0..disclosed_rank {
+                src_coords[i] = new_coords[new_axis[i] as usize];
+            }
+            // Split into outer (original) and inner (within cell) parts.
+            let outer_coords = &src_coords[..r];
+            let inner_coords = &src_coords[r..];
+            // Outer flat index (using orig_stride).
+            let mut outer_flat = 0usize;
+            for k in 0..r {
+                outer_flat += outer_coords[k] * orig_stride[k];
+            }
+            // Get the cell.
+            let cell = &elements_flat[outer_flat];
+            // If inner is rank 0, disclose the cell (return it as-is).
+            if c == 0 {
+                out_elems.push(cell.clone());
+                continue;
+            }
+            // Otherwise, index into the cell using inner_coords.
+            let cell_dims = match cell.as_ref() {
+                APLValue::Array(a) => a.dimensions.clone(),
+                _ => vec![],
+            };
+            if cell_dims.is_empty() {
+                out_elems.push(cell.clone());
+                continue;
+            }
+            // Compute inner flat index (column-major over cell_dims).
+            // Ragged cell (smaller than max): Kotlin yields the default (0).
+            let inner_stride = strides(&cell_dims);
+            let mut inner_flat = 0usize;
+            let mut ragged = false;
+            for k in 0..c {
+                let coord = if k < inner_coords.len() {
+                    inner_coords[k]
+                } else {
+                    0
+                };
+                if k >= cell_dims.len() || cell_dims[k] == 0 || coord >= cell_dims[k] {
+                    ragged = true;
+                    break;
+                }
+                inner_flat += coord * inner_stride[k];
+            }
+            if ragged {
+                out_elems.push(Rc::new(APLValue::Number(KapNumber::Long(0))));
+                continue;
+            }
+            // Fetch the inner element.
+            match cell.as_ref() {
+                APLValue::Array(a) => {
+                    let inner_elems = a.elements();
+                    if inner_flat < inner_elems.len() {
+                        out_elems.push(inner_elems[inner_flat].clone());
+                    } else {
+                        out_elems.push(Rc::new(APLValue::Null));
+                    }
+                }
+                _ => out_elems.push(cell.clone()),
+            }
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            new_dims,
+            ArrayData::Nested(out_elems),
+        )))))
     }
 
     /// Apply a *train* `(f g h ...)` as a derived function.

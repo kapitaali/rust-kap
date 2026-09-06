@@ -364,6 +364,13 @@ fn curated_kap_parity() {
         ("{⊢⍵}⍢(¯10↑) ⍳3", "(0 1 2)"),
         // :nfunction macro args ignore call arguments (ambient ⍵ shows through)
         ("defsyntax foo (:nfunction a) { ⍞a 2 } ⋄ { x←1+⍵ ◊ foo { x+⍵ } } 3", "7"),
+        // Axis-disclose `⊃[k]` (Kotlin `DiscloseAPLFunction.processAxis`):
+        // oracle `⍴⊃[0]…→⟨2 2 3 2⟩`, `⍴⊃[1]…→⟨2 2 3 2⟩`, `⍴⊃[2]…→⟨2 3 2 2⟩`
+        ("⍴⊃[0] 2 3 2 ⍴ (0 1) (2 3) (4 5) (6 7) (8 9)", "(2 2 3 2)"),
+        ("⍴⊃[1] 2 3 2 ⍴ (0 1) (2 3) (4 5) (6 7) (8 9)", "(2 2 3 2)"),
+        ("⍴⊃[2] 2 3 2 ⍴ (0 1) (2 3) (4 5) (6 7) (8 9)", "(2 3 2 2)"),
+        ("⍴⊃[0] (0 1) (2 3)", "(2 2)"),
+        ("⍴⊃[1] (0 1) (2 3) (4 5) (6 7) (8 9)", "(5 2)"),
         // Whole rationals collapse to integers (literals + arithmetic)
         ("typeof 2r2", "kap:integer"),
         ("typeof 1r2+1r2", "kap:integer"),
