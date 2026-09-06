@@ -5402,48 +5402,50 @@ impl Engine {
 
     // --- `unicode:*` builtins (Real Kap UnicodeModule) ---
 
-    /// `unicode:toCodepoints` — element-wise char → codepoint number.
+    /// `unicode:toCodepoints` — char → codepoint number (Kotlin `MakeCodepoints`,
+    /// a scalar combine: non-char singles pass through unchanged, strings and
+    /// arrays map recursively, preserving structure).
     fn unicode_to_codepoints(
         &self,
         right_val: AplRef<APLValue>,
     ) -> Result<AplRef<APLValue>, AplError> {
-        match right_val.as_ref() {
-            APLValue::Char(c) => {
-                Ok(Rc::new(APLValue::Number(KapNumber::Long(*c as i64))))
-            }
-            APLValue::Str(s) => {
-                let v: Vec<i64> = s.chars().map(|c| c as i64).collect();
-                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                    vec![v.len()],
-                    ArrayData::Long(v),
-                )))))
-            }
-            APLValue::Array(a) => {
-                let mut out = Vec::with_capacity(a.element_count());
-                for e in a.elements() {
-                    match e.as_ref() {
-                        APLValue::Char(c) => {
-                            out.push(Rc::new(APLValue::Number(KapNumber::Long(*c as i64))))
-                        }
-                        other => return Err(AplError::runtime(format!(
-                            "unicode:toCodepoints: not a char: {}",
-                            other.format_value()
-                        ))),
-                    }
+        fn tcp(v: &APLValue) -> Result<AplRef<APLValue>, AplError> {
+            match v {
+                APLValue::Char(c) => {
+                    Ok(Rc::new(APLValue::Number(KapNumber::Long(*c as i64))))
                 }
-                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                    vec![out.len()],
-                    ArrayData::Nested(out),
-                )))))
+                // Non-char singles (numbers etc.) pass through unchanged.
+                APLValue::Number(_) | APLValue::Nil | APLValue::Null => {
+                    Ok(Rc::new(v.clone()))
+                }
+                APLValue::Str(s) => {
+                    let v: Vec<i64> = s.chars().map(|c| c as i64).collect();
+                    Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        vec![v.len()],
+                        ArrayData::Long(v),
+                    )))))
+                }
+                APLValue::Array(a) => {
+                    let out: Vec<AplRef<APLValue>> =
+                        a.elements().iter().map(|e| tcp(e.as_ref())).collect::<Result<_, _>>()?;
+                    Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        a.dimensions.clone(),
+                        ArrayData::Nested(out),
+                    )))))
+                }
+                other => Err(AplError::runtime(format!(
+                    "unicode:toCodepoints: unsupported argument: {}",
+                    other.format_value()
+                ))),
             }
-            other => Err(AplError::runtime(format!(
-                "unicode:toCodepoints: unsupported argument: {}",
-                other.format_value()
-            ))),
         }
+        tcp(right_val.as_ref())
     }
 
-    /// `unicode:fromCodepoints` — element-wise codepoint number → char.
+    /// `unicode:fromCodepoints` — codepoint number → char (Kotlin
+    /// `MakeCharsFromCodepoints`, a scalar combine). A number array maps to a
+    /// string; mixed/nested arrays map per element (sub-arrays → strings),
+    /// preserving structure (oracle `99 100 101 (102 103)` → `⟨@c @d @e "fg"⟩`).
     fn unicode_from_codepoints(
         &self,
         right_val: AplRef<APLValue>,
@@ -5468,28 +5470,40 @@ impl Engine {
                 AplError::runtime(format!("unicode:fromCodepoints: invalid codepoint: {}", cp))
             })
         };
-        match right_val.as_ref() {
-            APLValue::Number(n) => Ok(Rc::new(APLValue::Char(to_char(n)?))),
-            APLValue::Array(a) => {
-                let mut s = String::new();
-                for e in a.elements() {
-                    match e.as_ref() {
-                        APLValue::Number(n) => s.push(to_char(n)?),
-                        other => {
-                            return Err(AplError::runtime(format!(
-                                "unicode:fromCodepoints: not a number: {}",
-                                other.format_value()
-                            )))
+        fn fcp(
+            v: &APLValue,
+            to_char: &impl Fn(&KapNumber) -> Result<char, AplError>,
+        ) -> Result<AplRef<APLValue>, AplError> {
+            match v {
+                APLValue::Number(n) => Ok(Rc::new(APLValue::Char(to_char(n)?))),
+                APLValue::Array(a) => {
+                    let elems = a.elements();
+                    if elems.iter().all(|e| matches!(e.as_ref(), APLValue::Number(_))) {
+                        let mut s = String::new();
+                        for e in &elems {
+                            if let APLValue::Number(n) = e.as_ref() {
+                                s.push(to_char(n)?);
+                            }
                         }
+                        Ok(Rc::new(APLValue::Str(s)))
+                    } else {
+                        let out: Vec<AplRef<APLValue>> = elems
+                            .iter()
+                            .map(|e| fcp(e.as_ref(), to_char))
+                            .collect::<Result<_, _>>()?;
+                        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                            a.dimensions.clone(),
+                            ArrayData::Nested(out),
+                        )))))
                     }
                 }
-                Ok(Rc::new(APLValue::Str(s)))
+                other => Err(AplError::runtime(format!(
+                    "unicode:fromCodepoints: unsupported argument: {}",
+                    other.format_value()
+                ))),
             }
-            other => Err(AplError::runtime(format!(
-                "unicode:fromCodepoints: unsupported argument: {}",
-                other.format_value()
-            ))),
         }
+        fcp(right_val.as_ref(), &to_char)
     }
 
     /// `unicode:toGraphemes` — split a string into its grapheme clusters, each as a
@@ -5538,19 +5552,42 @@ impl Engine {
         &self,
         right_val: AplRef<APLValue>,
     ) -> Result<AplRef<APLValue>, AplError> {
-        let c = match right_val.as_ref() {
-            APLValue::Char(c) => *c,
-            other => {
-                return Err(AplError::runtime(format!(
+        fn tn(v: &APLValue) -> Result<AplRef<APLValue>, AplError> {
+            match v {
+                APLValue::Char(c) => match unicode_char_name(*c) {
+                    Some(name) => Ok(Rc::new(APLValue::Str(name))),
+                    None => Ok(Rc::new(APLValue::Null)),
+                },
+                // Strings map per character (oracle `toNames "ab"` → a
+                // 2-vector of names); arrays recurse, preserving structure.
+                APLValue::Str(s) => {
+                    let out: Vec<AplRef<APLValue>> = s
+                        .chars()
+                        .map(|c| tn(&APLValue::Char(c)))
+                        .collect::<Result<_, _>>()?;
+                    Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        vec![out.len()],
+                        ArrayData::Nested(out),
+                    )))))
+                }
+                APLValue::Array(a) => {
+                    let out: Vec<AplRef<APLValue>> = a
+                        .elements()
+                        .iter()
+                        .map(|e| tn(e.as_ref()))
+                        .collect::<Result<_, _>>()?;
+                    Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        a.dimensions.clone(),
+                        ArrayData::Nested(out),
+                    )))))
+                }
+                other => Err(AplError::runtime(format!(
                     "unicode:toNames: expected a char, got: {}",
                     other.format_value()
-                )))
+                ))),
             }
-        };
-        match unicode_char_name(c) {
-            Some(name) => Ok(Rc::new(APLValue::Str(name))),
-            None => Ok(Rc::new(APLValue::Null)),
         }
+        tn(right_val.as_ref())
     }
 
     /// `unicode:enc` — encode a string into a vector of byte values in the given
@@ -5562,6 +5599,31 @@ impl Engine {
     ) -> Result<AplRef<APLValue>, AplError> {
         let s = match right_val.as_ref() {
             APLValue::Str(s) => s.clone(),
+            // A char vector (e.g. from `comp {…} "abcå"`) encodes as its
+            // concatenated string; empty encodes to empty bytes.
+            APLValue::Array(a) if a.element_count() == 0 => String::new(),
+            APLValue::Array(a) => {
+                let mut s = String::new();
+                for e in a.elements() {
+                    match e.as_ref() {
+                        APLValue::Char(c) => s.push(*c),
+                        APLValue::Str(t) => s.push_str(t),
+                        APLValue::Number(n) => {
+                            let v = n.as_long().map_err(|e| AplError::runtime(e))?;
+                            s.push(char::from_u32(v as u32).ok_or_else(|| {
+                                AplError::runtime(format!("unicode:enc: invalid char: {}", v))
+                            })?);
+                        }
+                        other => {
+                            return Err(AplError::runtime(format!(
+                                "unicode:enc: expected a string, got: {}",
+                                other.format_value()
+                            )))
+                        }
+                    }
+                }
+                s
+            }
             other => {
                 return Err(AplError::runtime(format!(
                     "unicode:enc: expected a string, got: {}",
@@ -5588,6 +5650,8 @@ impl Engine {
         right_val: AplRef<APLValue>,
     ) -> Result<AplRef<APLValue>, AplError> {
         let bytes: Vec<u8> = match right_val.as_ref() {
+            // An empty string decodes to empty (oracle `:UTF8 unicode:dec ""`).
+            APLValue::Str(s) if s.is_empty() => Vec::new(),
             APLValue::Array(a) => {
                 let mut out = Vec::with_capacity(a.element_count());
                 for e in a.elements() {
