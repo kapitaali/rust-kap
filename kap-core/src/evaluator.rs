@@ -6922,12 +6922,13 @@ impl Engine {
     }
 
     fn iota(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
-        // Kotlin `IotaAPLFunctionImpl.eval1Arg` (builtins/interval.kt, etc.):
-        // accepts Long, BigInt, and a rank-1+ array of integer dimensions.
-        // Multi-dim shapes: `⍳ 4 5` → 4×5 matrix of row-major indices; `⍳ 2 3 2` →
-        // 2×3×2 cube; `⍳,9` → length-9 vector of 1-vectors (rank-1 of `⍳`);
-        // `⍳⍬` → `⍬` (a 0-D shape gives a 0-size result). Element indices are
-        // row-major (Kotlin `APLArrayImpl.make(dims) { i -> i.makeAPLNumber() }`).
+        // Kotlin `IotaAPLFunctionImpl.eval1Arg`: accepts Long, BigInt, or a
+        // rank-1 array of integer dimensions. Right arg must be rank 0/1.
+        // Result is a NESTED array — `⍳ 4 5 6` is a 4×5×6 cube whose every
+        // cell is the 3-vector `(axis0, axis1, axis2)`. We build it by
+        // recursion: `iota(dims) = makeResizedArray(dims, (0..N).iota())`
+        // (row-major) and `iota(0..n) = flat vec`. Concretely, construct
+        // the per-cell coordinate vectors and pack them at the right rank.
         let dims: Vec<usize> = match right_val.as_ref() {
             APLValue::Null => return Ok(Rc::new(APLValue::Null)),
             APLValue::Number(KapNumber::Long(v)) if *v >= 0 => vec![*v as usize],
@@ -6941,6 +6942,9 @@ impl Engine {
                 vec![v.to_string().parse::<usize>().unwrap_or(0)]
             }
             APLValue::Array(a) => {
+                if a.dimensions.len() > 1 {
+                    return Err(AplError::runtime("⍳: Right argument must be rank 0 or 1".into()));
+                }
                 let mut d = Vec::with_capacity(a.element_count());
                 for e in a.elements() {
                     match e.force(self)?.as_ref() {
@@ -6962,39 +6966,57 @@ impl Engine {
         if total > 100_000_000 {
             return Err(AplError::runtime("⍳: result too large".into()));
         }
-        // Row-major flat → nested Array.
-        if dims.is_empty() {
-            // 0-D shape (`⍳⍬`): return `⍬`.
-            return Ok(Rc::new(APLValue::Null));
-        }
-        if dims.len() == 1 {
-            let flat: Vec<i64> = (0..total as i64).collect();
-            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                dims,
-                ArrayData::Long(flat),
-            )))));
-        }
-        // Build nested: each cell along the first axis is an array of the
-        // remaining dims whose flat indices are the corresponding slice.
-        let stride: usize = dims[1..].iter().product();
-        let n0 = dims[0];
-        let inner_dims = dims[1..].to_vec();
-        let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(n0);
-        for i in 0..n0 {
-            let base = i * stride;
-            let mut sub: Vec<i64> = Vec::with_capacity(stride);
-            for k in 0..stride {
-                sub.push((base + k) as i64);
+        // For each flat position, compute its row-major multi-index. Result
+        // shape = the same `dims`; each cell is a length-`rank` index
+        // vector. Then `assemble` re-packs the cells into the right shape.
+        let rank = dims.len();
+        let strides: Vec<usize> = {
+            let mut s = vec![1usize; rank];
+            for k in (0..rank.saturating_sub(1)).rev() {
+                s[k] = s[k + 1] * dims[k + 1];
             }
-            out.push(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                inner_dims.clone(),
-                ArrayData::Long(sub),
+            s
+        };
+        let mut cells: Vec<AplRef<APLValue>> = Vec::with_capacity(total);
+        for i in 0..total {
+            let mut idx: Vec<i64> = vec![0; rank];
+            let mut r = i;
+            for k in 0..rank {
+                idx[k] = (r / strides[k]) as i64;
+                r %= strides[k];
+            }
+            cells.push(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![rank],
+                ArrayData::Long(idx),
             )))));
         }
-        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-            vec![n0],
-            ArrayData::Nested(out),
-        )))))
+        // Recursively pack the flat cells into the `dims`-shaped array.
+        fn assemble(
+            dims: &[usize],
+            cells: &[AplRef<APLValue>],
+            strides: &[usize],
+        ) -> AplRef<APLValue> {
+            if dims.is_empty() {
+                return cells[0].clone();
+            }
+            let stride = strides[0];
+            let n = dims[0];
+            let mut out = Vec::with_capacity(n);
+            for i in 0..n {
+                let base = i * stride;
+                let end = base + stride;
+                if dims.len() == 1 {
+                    out.push(cells[base].clone());
+                } else {
+                    out.push(assemble(&dims[1..], &cells[base..end], &strides[1..]));
+                }
+            }
+            Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                dims.to_vec(),
+                ArrayData::Nested(out),
+            ))))
+        }
+        Ok(assemble(&dims, &cells, &strides))
     }
 
     /// Dyadic `⍳` (index-of), mirroring Kotlin `FindIndexArray1DLeftArg`.
