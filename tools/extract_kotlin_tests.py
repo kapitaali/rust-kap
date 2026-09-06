@@ -78,7 +78,10 @@ def find_string_literal(s: str, start: int):
         while result_lines and result_lines[-1] == '':
             result_lines.pop()
         return '\n'.join(result_lines), end_idx
-    # Single-quoted string
+    # Single-quoted string, with `+`-concatenated continuation support: Kotlin
+    # tests often build `src` as `"part1 " + "part2 " + ...` across lines. When
+    # the closing quote is followed (after whitespace) by `+`, consume it and
+    # append the next literal. Returns the FULL concatenated source.
     i = start + 1
     buf = []
     while i < len(s):
@@ -90,7 +93,25 @@ def find_string_literal(s: str, start: int):
             i += 2
             continue
         if c == '"':
-            return ''.join(buf), i + 1
+            i += 1
+            # Concatenated continuation? (`"..." + "..."`): consume every
+            # `+ "..."` part, then RETURN. Never fall back into char-scanning
+            # here — the chars after the final closing quote are Kotlin code,
+            # not string content (over-consumption ate later test bodies).
+            while True:
+                j = i
+                while j < len(s) and s[j] in ' \t\n':
+                    j += 1
+                if j < len(s) and s[j] == '+':
+                    k = j + 1
+                    while k < len(s) and s[k] in ' \t\n':
+                        k += 1
+                    if k < len(s) and s[k] == '"':
+                        cont, i = find_string_literal(s, k)
+                        buf.append(cont)
+                        continue
+                break
+            return ''.join(buf), i
         buf.append(c)
         i += 1
     return ''.join(buf), i
@@ -184,6 +205,13 @@ def best_effort_expected(body: str):
     # value — emit null so the harness counts these as "parse+eval OK" rather than
     # a misleading MISMATCH against a partial expected.
     if 'result.valueAt' in body or 'result.lookupValue' in body or 'map:get' in body:
+        return None
+    # Per-cell list assertions (assertSimpleNumber(N, result.listElement(i)))
+    # describe ONE element, not the whole value — emit null so the harness
+    # counts these as parse+eval OK (value ignored) rather than a MISMATCH
+    # against a partial expected (e.g. ListTest.testUnderFromList asserts
+    # 11/21/31 per cell; the whole value is the list (10;20;30)->(11;21;31)).
+    if 'result.listElement' in body:
         return None
     m = re.search(r'assertSimpleNumber\(\s*([+-]?\d+)\s*,\s*result\b', body)
     if m:
