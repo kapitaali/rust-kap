@@ -3705,6 +3705,12 @@ impl Engine {
                 None => self.from_list(right_val),
                 Some(_) => Err(AplError::runtime("fromList: Function cannot be called with two arguments".into())),
             },
+            // `toBoolean` (Kotlin `ToBooleanFunction`, div_functions.kt:547),
+            // monadic-only scalar truth.
+            "toBoolean" => match left_val {
+                None => self.to_boolean(right_val),
+                Some(_) => Err(AplError::runtime("toBoolean: Function cannot be called with two arguments".into())),
+            },
             // `comp` / `collapse` — Kotlin CompFunction (div_functions.kt:76), monadic-only.
             // `eval1Arg` returns `a.collapse()` (types.kt CollapsedArrayImpl). Semantics
             // (oracle-verified): preserve the OUTER dimensions, recursively collapse each
@@ -4726,7 +4732,7 @@ impl Engine {
             "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"
                 | "↑" | "↓" | "⊂" | "+" | "-" | "*" | "×" | "÷" | "/" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "~" | "∊" | "⍋" | "⊤" | "⊥"
-                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair" | "⊆" | "⊇" | "→" | "≬" | "toList" | "fromList" | "⫇" | "group" | "use" | "isLocallyBound" | "%"
+                | "⊢" | "⊣" | "≡" | "⍓" | "⍕" | "format" | "⍎" | "execute" | "typeof" | "∪" | "∩" | "⍸" | "⍒" | "⍲" | "⍱" | "∼" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair" | "⊆" | "⊇" | "→" | "≬" | "toList" | "fromList" | "toBoolean" | "⫇" | "group" | "use" | "isLocallyBound" | "%"
                 // Namespaced natives (P2): the parser's is_known_fn admits them, but
                 // this eval-time late-gate must also know them (two-gate rule).
                 | "sysparam"
@@ -8638,6 +8644,15 @@ impl Engine {
                     "fromList: Function cannot be called with two arguments".into(),
                 )),
             },
+            "toBoolean" => match left {
+                None => {
+                    let rv = self.eval_instr(right, env)?.force(self)?;
+                    self.to_boolean(rv)
+                }
+                Some(_) => Err(AplError::runtime(
+                    "toBoolean: Function cannot be called with two arguments".into(),
+                )),
+            },
             "⌷" | "reveal" => match left {
                 None => {
                     let rv = self.eval_instr(right, env)?.force(self)?;
@@ -10119,6 +10134,19 @@ impl Engine {
                 ArrayData::Nested(vec![v.clone()]),
             ))))),
         }
+    }
+
+    /// Kap's `toBoolean` (Kotlin `ToBooleanFunction`, div_functions.kt:547):
+    /// STRICTLY scalar — numbers are nonzero-tested (`asBoolean`), every
+    /// other value (arrays incl. empty/zero-filled, chars, nil) is true.
+    /// Array mapping is `¨`'s job, not this function's.
+    fn to_boolean(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        let v = right_val.force(self)?;
+        let b = match v.as_ref() {
+            APLValue::Number(n) => n.as_boolean(),
+            _ => true,
+        };
+        Ok(Rc::new(APLValue::Number(KapNumber::Long(if b { 1 } else { 0 }))))
     }
 
     /// Kap's `fromList` (Kotlin `FromListFunction`, div_functions.kt): a list
