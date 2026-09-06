@@ -197,23 +197,36 @@ def detect_fails(body: str):
 
 
 def best_effort_expected(body: str):
-    """Pull a single-line assertSimpleNumber(N, ...) / assert1DArray(arrayOf(...), ...) expectation."""
+    """Pull a single-line assertSimpleNumber(N, ...) / assert1DArray(arrayOf(...), ...) expectation.
+
+    Expected is paired with the FIRST parse call's result only: scan only the
+    body up to the second parse call (if any). Without this, the extractor
+    pairs expr #1 with an assertion on expr #3 (e.g. TransposeTest reverse*
+    asserted the shape/content of `⌽4 5 4⍴⍳1000` but got expected='1' from
+    the trailing `⌽1` scalar check).
+    """
     # Only extract when the assertion is on `result` directly. If the Kotlin test
     # drills into a cell (`assert1DArray(..., result.valueAt(0))`), a lookup
     # (`assertSimpleNumber(N, result.lookupValue(...))`), or a map:get, the body
     # makes per-cell assertions and a single `N` no longer describes the whole
     # value — emit null so the harness counts these as "parse+eval OK" rather than
     # a misleading MISMATCH against a partial expected.
-    if 'result.valueAt' in body or 'result.lookupValue' in body or 'map:get' in body:
+    # traps it. Scope the assertion scan to the FIRST parse call's block.
+    import re as _re2
+    _idxs = sorted(
+        m.start() for _call in PARSE_CALLS
+        for m in _re2.finditer(_re2.escape(_call) + r'\(', body))
+    scan = body[:_idxs[1]] if len(_idxs) > 1 else body
+    if 'result.valueAt' in scan or 'result.lookupValue' in scan or 'map:get' in scan:
         return None
     # Per-cell list assertions (assertSimpleNumber(N, result.listElement(i)))
     # describe ONE element, not the whole value — emit null so the harness
     # counts these as parse+eval OK (value ignored) rather than a MISMATCH
     # against a partial expected (e.g. ListTest.testUnderFromList asserts
     # 11/21/31 per cell; the whole value is the list (10;20;30)->(11;21;31)).
-    if 'result.listElement' in body:
+    if 'result.listElement' in scan:
         return None
-    m = re.search(r'assertSimpleNumber\(\s*([+-]?\d+)\s*,\s*result\b', body)
+    m = re.search(r'assertSimpleNumber\(\s*([+-]?\d+)\s*,\s*result\b', scan)
     if m:
         return m.group(1)
     # Kap prints vectors with PARENTHESES (e.g. `(1 2)`), never brackets —
