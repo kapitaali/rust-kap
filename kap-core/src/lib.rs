@@ -922,6 +922,12 @@ pub struct Environment {
     /// `AplError::Return` propagates up until it finds a scope with this flag set,
     /// then the value is returned from that scope instead of propagating further.
     pub is_return_target: std::cell::Cell<bool>,
+    /// Dynamic depth of deferred function/operator-body execution (`apply_user_fn` /
+    /// `apply_user_op` body eval). PLAN §2.8b: Kotlin checks const ONLY at
+    /// instruction-BUILD time (`deriveLvalueReader`); runtime `setVar` is unchecked.
+    /// While > 0, `check_not_constant` is a no-op and def-time hooks stay silent, so
+    /// `updateableConstValue` (declare-after-def + call → `2`) keeps working.
+    pub fn_body_depth: std::cell::Cell<usize>,
 }
 
 /// Process-wide counter issuing unique [`Environment`] ids. Ids tag
@@ -948,6 +954,7 @@ impl Environment {
             home_ns: RefCell::new(None),
             acts_as_root: std::cell::Cell::new(false),
             is_return_target: std::cell::Cell::new(false),
+            fn_body_depth: std::cell::Cell::new(0),
         })
     }
 

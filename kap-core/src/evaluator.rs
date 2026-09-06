@@ -18,6 +18,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use std::cmp::Ordering;
 use libm::lgamma;
 use crate::{APLValue, AplError, AplRef, Engine, Environment};
+use std::collections::HashSet;
 use std::rc::Rc;
 
 /// Adjust a (possibly negative) index into a valid 0-based position within `axis_size`,
@@ -481,6 +482,13 @@ impl Engine {
         ns: &Option<String>,
         env: &Rc<Environment>,
     ) -> Result<(), AplError> {
+        // Deferred body execution (`apply_user_fn` / `apply_user_op`): Kotlin
+        // checks const ONLY at instruction-BUILD time (`deriveLvalueReader`);
+        // runtime `setVar` is unchecked. Skip so `updateableConstValue`
+        // (declare-after-def + call → `2`) keeps working.
+        if env.fn_body_depth.get() > 0 {
+            return Ok(());
+        }
         let reg = &env.ns_registry;
         let mut candidates: Vec<String> = Vec::new();
         if let Some(n) = ns {
@@ -497,6 +505,322 @@ impl Engine {
             }
         }
         Ok(())
+    }
+
+    /// Check a would-be function body against the currently-declared constants
+    /// BEFORE the definition commits (Kotlin `AssignmentToConstantException` is a
+    /// `ParseException`, common.kt:188 — raised while the assignment inside the
+    /// body is *built*, at definition time, never called).
+    ///
+    /// Semantics mirror Kotlin's parse-time environment walk:
+    /// - Ordered statement simulation: `declare(:local x)` / `declare(:const x)`
+    ///   take effect in order; a local shadows outer consts (oracle: arrow-body
+    ///   `declare(:local a) ⋄ a ← 2` with const `a` → `2`).
+    /// - Def-site params shadow: `⍺`/`⍵` and named dfn params are locals, so they
+    ///   never trip (oracle: `∇ foo (a) {a ← 2}` with const `a` → OK).
+    /// - `declare(:local …)` / `:const` marks ONLY bind inside the def-site scope
+    ///   when the CURRENT scope is one — `declare(:local a)` at statement level
+    ///   would bind at the root and shadow everything, so it is ignored (oracle:
+    ///   sibling `:local` + statement-level `declare(:const b)` later do not
+    ///   touch the check).
+    /// - CLOSED over `∇` tradfn / operator bodies: Kotlin parses those in a
+    ///   `closed=true` env (parser.kt:757/771/783), so enclosing `⇐` bodies are
+    ///   NOT checked again there and the tradfn never trips at all (oracle:
+    ///   `foo ⇐ {∇ bar (x) {a ← 2} ⋄ 0}` → `0`; `∇ foo (x) {a ← 2}` → `0`).
+    ///   `λ{…}` and plain `{…}` bodies DO check (oracle: `foo ⇐ λ{a ← 2}` errors;
+    ///   bare `{a ← 2}` / `λ{a ← 2}` statements error).
+    /// - `←`-value RHS nesting counts: `foo2 ← (a ← 2)` trips (oracle AC), and
+    ///   destructure forms `(a b) ← …` / `(a;b) ← …` trip per-name (oracle Z5-Z7).
+    /// - Index-assign `a[i] ← …` does NOT trip (Kotlin: `deriveLvalueReader` on an
+    ///   index is a reader, not the const binding — oracle AA3/AA4 → `0`).
+    /// - Modified assign `a +← 2` inside a `⇐` body trips via its `Assign` desugar
+    ///   (oracle B6/Y4 → error); a TOP-LEVEL `a +← 2` is a pre-existing parse gap
+    ///   (`unexpected token in primary`), untouched here.
+    /// `at_def_site` is true while simulating inside a `⇐`-bound function body
+    /// (false at the bare statement level and inside closed `∇`/op bodies).
+    fn check_body_const_assign(
+        &self,
+        body: &Instr,
+        own_params: &[String],
+        env: &Rc<Environment>,
+    ) -> Result<(), AplError> {
+        struct Sim<'a> {
+            engine: &'a Engine,
+            env: &'a Rc<Environment>,
+            locals: HashSet<(String, Option<String>)>,
+            consts: HashSet<(String, Option<String>)>,
+            params: Vec<String>,
+            at_def_site: bool,
+        }
+        impl<'a> Sim<'a> {
+            fn is_shadowed(&self, name: &str, ns: &Option<String>) -> bool {
+                self.params.iter().any(|p| p == name)
+                    || self.locals.contains(&(name.to_string(), ns.clone()))
+            }
+            fn check(&self, name: &str, ns: &Option<String>) -> Result<(), AplError> {
+                if self.is_shadowed(name, ns) {
+                    return Ok(());
+                }
+                // A body-local `declare(:const …)` seen earlier in this same
+                // simulation trips with Kotlin's text (oracle T2 → 1:56
+                // `default:b`): at build time the name already resolves to the
+                // const storage, so `deriveLvalueReader` throws.
+                if self.consts.contains(&(name.to_string(), ns.clone())) {
+                    let label = ns.clone().unwrap_or_else(|| self.env.ns_registry.current_ns());
+                    return Err(AplError::runtime(format!(
+                        "Assignment to constant variable: {}:{}",
+                        label, name
+                    )));
+                }
+                self.engine.check_not_constant(name, ns, self.env)
+            }
+            // `declare(:local …)` / `declare(:const …)` targets in simulation
+            // order. Returns `(locals, consts)`: locals shield later checks
+            // (Kotlin binds them fresh in the dfn env); consts trip later
+            // checks (the dfn-env binding is const from here on).
+            fn declare_names(
+                &self,
+                node: &Instr,
+            ) -> (Vec<(String, Option<String>)>, Vec<(String, Option<String>)>) {
+                // The port evaluates `declare(...)` as `Apply{Symbol{declare}, right}`.
+                let (fn_is_declare, right) = match node {
+                    Instr::Apply { fn_expr, right, .. } => match fn_expr.as_ref() {
+                        Instr::Symbol { name, namespace } => {
+                            (name == "declare" && namespace.is_none(), right.as_ref())
+                        }
+                        _ => (false, right.as_ref()),
+                    },
+                    _ => (false, node),
+                };
+                if !fn_is_declare {
+                    return (vec![], vec![]);
+                }
+                let elems: &[Instr] = match right {
+                    Instr::Array { elements } => elements,
+                    _ => return (vec![], vec![]),
+                };
+                if elems.len() < 2 {
+                    return (vec![], vec![]);
+                }
+                let kw = match &elems[0] {
+                    Instr::Symbol { name, .. } => name.as_str(),
+                    _ => return (vec![], vec![]),
+                };
+                // The keyword carries the `keyword` namespace in the port's
+                // `parse_declare_special` (`namespace: Some("keyword")`), so
+                // `:const`/`:local`/`:export` all read as bare names here.
+                if kw != "local" && kw != "const" {
+                    return (vec![], vec![]);
+                }
+                let mut locals = vec![];
+                let mut consts = vec![];
+                let out = if kw == "local" { &mut locals } else { &mut consts };
+                match &elems[1] {
+                    Instr::Symbol { name, namespace } => {
+                        out.push((name.clone(), namespace.clone()));
+                    }
+                    Instr::Array { elements: inner } => {
+                        for e in inner {
+                            if let Instr::Symbol { name, namespace } = e {
+                                out.push((name.clone(), namespace.clone()));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                (locals, consts)
+            }
+            // A definition's locals shadow the check for everything this `Sim`
+            // still simulates (oracle: outer `∇ (a)…` param still shadows a
+            // nested bare `{a ← 2}` — the nested block is NOT a def site).
+            fn sim(&mut self, node: &Instr) -> Result<(), AplError> {
+                match node {
+                    Instr::Block { body } => {
+                        for s in body {
+                            self.sim(s)?;
+                        }
+                        Ok(())
+                    }
+                    Instr::Assign { target, value } => {
+                        self.sim(value)?;
+                        if let Instr::Symbol { name, namespace } = target.as_ref() {
+                            if self.at_def_site {
+                                self.check(name, namespace)?;
+                            }
+                        }
+                        Ok(())
+                    }
+                    Instr::DestructAssign { names, value, .. }
+                    | Instr::DestructModifiedAssign { names, value, .. } => {
+                        self.sim(value)?;
+                        if self.at_def_site {
+                            for (name, ns) in names {
+                                self.check(name, ns)?;
+                            }
+                        }
+                        Ok(())
+                    }
+                    Instr::Lambda { body, .. } => {
+                        // `λ{…}` bodies check (oracle R4/R5/Y3); the `λ` marker
+                        // adds no new locals beyond the simulated param set.
+                        self.sim(body)
+                    }
+                    Instr::FnAssign { value, .. } => {
+                        // A nested `⇐` is a fresh def site: simulation state resets
+                        // (names are re-resolved through the nested binding in
+                        // Kotlin), then restores. CLEAN nested bodies do NOT
+                        // poison the outer stream (oracle Y1 → `0`).
+                        let saved_locals = std::mem::take(&mut self.locals);
+                        let saved_consts = std::mem::take(&mut self.consts);
+                        let saved_params = std::mem::take(&mut self.params);
+                        let saved_site = self.at_def_site;
+                        self.at_def_site = true;
+                        let r = self.sim(value);
+                        self.locals = saved_locals;
+                        self.consts = saved_consts;
+                        self.params = saved_params;
+                        self.at_def_site = saved_site;
+                        r
+                    }
+                    // Closed over `∇`/operator bodies: never checked, never walked
+                    // (oracle R3/V-tradfn-exempt → `0`). Staying out entirely also
+                    // keeps their `:local` marks from leaking into the outer stream.
+                    Instr::UserFnDef { .. } | Instr::UserOpDef { .. } => Ok(()),
+                    Instr::If { cond, then_block, else_block } => {
+                        self.sim(cond)?;
+                        self.sim(then_block)?;
+                        if let Some(alt) = else_block {
+                            self.sim(alt)?;
+                        }
+                        Ok(())
+                    }
+                    Instr::While { cond, body } => {
+                        self.sim(cond)?;
+                        self.sim(body)
+                    }
+                    Instr::When { clauses } => {
+                        for (c, b) in clauses {
+                            self.sim(c)?;
+                            self.sim(b)?;
+                        }
+                        Ok(())
+                    }
+                    Instr::Apply { fn_expr, left, right } => {
+                        // `declare(:local …)` / `declare(:const …)` act in order,
+                        // but ONLY at a def site (see doc comment). A bare
+                        // `{declare(:local a) ⋄ a ← 2}` trips on the const (oracle
+                        // C3 → `2` only INSIDE a `⇐` body). Locals shield later
+                        // checks; `:export` and any other directive are plain
+                        // no-ops (oracle AA1/AA2: `⇐`-RHS validation happens in
+                        // Kotlin's `processShortFormFn`, not the const pass).
+                        // Consts trip later checks (restored at nested-`⇐`
+                        // boundaries, so a body-local declare never leaks out).
+                        // `:export` returns ([], []) from `declare_names`, so it
+                        // falls through to the normal sim below (harmless: two
+                        // bare symbols with no assignment targets).
+                        let (new_locals, new_consts) = self.declare_names(node);
+                        if (!new_locals.is_empty() || !new_consts.is_empty()) && self.at_def_site {
+                            for (n, ns) in &new_locals {
+                                self.locals.insert((n.clone(), ns.clone()));
+                            }
+                            for (n, ns) in &new_consts {
+                                self.consts.insert((n.clone(), ns.clone()));
+                            }
+                            return Ok(());
+                        }
+                        self.sim(fn_expr)?;
+                        if let Some(l) = left {
+                            self.sim(l)?;
+                        }
+                        self.sim(right)
+                    }
+                    Instr::Array { elements } | Instr::List { elements } => {
+                        for e in elements {
+                            self.sim(e)?;
+                        }
+                        Ok(())
+                    }
+                    Instr::Train { funcs, .. } => {
+                        for f in funcs {
+                            self.sim(f)?;
+                        }
+                        Ok(())
+                    }
+                    Instr::Derived { func, op } => {
+                        self.sim(func)?;
+                        self.sim(op)
+                    }
+                    Instr::OverOp { left_fn, right_fn } => {
+                        self.sim(left_fn)?;
+                        self.sim(right_fn)
+                    }
+                    Instr::InnerProduct { left_fn, right_fn } => {
+                        if let Some(l) = left_fn {
+                            self.sim(l)?;
+                        }
+                        self.sim(right_fn)
+                    }
+                    Instr::AxisApplied { func, axis } => {
+                        self.sim(func)?;
+                        self.sim(axis)
+                    }
+                    Instr::ValueOp { func, operand, .. } => {
+                        self.sim(func)?;
+                        self.sim(operand)
+                    }
+                    Instr::OpCall { left_fn, right_fn, right_value, .. } => {
+                        self.sim(left_fn)?;
+                        if let Some(r) = right_fn {
+                            self.sim(r)?;
+                        }
+                        if let Some(r) = right_value {
+                            self.sim(r)?;
+                        }
+                        Ok(())
+                    }
+                    Instr::Index { array, selector } => {
+                        self.sim(array)?;
+                        self.sim(selector)
+                    }
+                    // Index-assign to a const does NOT trip Kotlin (oracle AA3/AA4).
+                    Instr::IndexAssign { .. } => Ok(()),
+                    Instr::MemberDeref { object, member, .. } => {
+                        self.sim(object)?;
+                        self.sim(member)
+                    }
+                    Instr::BooleanOp { left, right, .. } => {
+                        self.sim(left)?;
+                        self.sim(right)
+                    }
+                    Instr::Guard { cond, truthy, falsy } => {
+                        self.sim(cond)?;
+                        self.sim(truthy)?;
+                        self.sim(falsy)
+                    }
+                    Instr::MacroExpand { body, bindings } => {
+                        self.sim(body)?;
+                        for (_, b) in bindings {
+                            self.sim(b)?;
+                        }
+                        Ok(())
+                    }
+                    _ => Ok(()),
+                }
+            }
+        }
+        let mut sim = Sim {
+            engine: self,
+            env,
+            locals: HashSet::new(),
+            consts: HashSet::new(),
+            params: own_params.to_vec(),
+            // Entry IS a def site: this fn is only called from `⇐` and `λ`
+            // bind-time hooks. (Nested `⇐` re-arms it; closed `∇`/op bodies
+            // stay out entirely.) Statement-level `declare(:local …)` never
+            // reaches here, so it cannot poison the root.
+            at_def_site: true,
+        };
+        sim.sim(body)
     }
 
     /// Stateless "single expression" mode (Mode 1): evaluate `src` in a *fresh*
@@ -846,6 +1170,15 @@ impl Engine {
                         }
                     }
                 }
+                // PLAN §2.8b: a `λ{…}` literal builds its assignment instructions
+                // at EVAL time (Kotlin `parseFnDefinitionNewEnvironment` runs at
+                // parse time, same const order as `⇐`). Check the body against
+                // the CURRENT const set — SKIP while executing a deferred body
+                // (v3 gate): a `λ` built at CALL time sees call-time consts,
+                // which Kotlin never checks (oracle Y3 call-time → no trip).
+                if env.fn_body_depth.get() == 0 {
+                    self.check_body_const_assign(body, params, env)?;
+                }
                 Ok(Rc::new(APLValue::UserFn {
                     params: params.clone(),
                     // The last param is the right argument (⍵); any preceding params are
@@ -1170,6 +1503,10 @@ impl Engine {
                 let mut params = left_params.clone();
                 params.extend(right_params.iter().cloned());
                 let split = left_params.len();
+                // PLAN §2.8b: `∇` tradfn bodies are CLOSED (Kotlin parses them in
+                // a `closed=true` env, parser.kt:757/771/783) and never trip —
+                // oracle `∇ foo (x) {a ← 2}` with const `a` → `0`, and calling it
+                // assigns freely (runtime `setVar` is unchecked). No check here.
                 let v = Rc::new(APLValue::UserFn {
                     params,
                     split,
@@ -1309,6 +1646,14 @@ impl Engine {
                 // treats later uses as applicable. ←-bound lambdas do NOT add
                 // here — they are values. See PROBLEM.md (A2).
                 env.function_defs.borrow_mut().insert(name.clone());
+                // PLAN §2.8b: `foo ⇐ {a ← 2}` with const `a` errors HERE (oracle
+                // 1:37), never called. `⇐` bodies have no named params (⍺/⍵
+                // only). SKIP while executing a deferred body (v3 gate): a
+                // nested `⇐` built at CALL time sees call-time consts, which
+                // Kotlin never checks (oracle Y1 nested-clean → `0`).
+                if env.fn_body_depth.get() == 0 {
+                    self.check_body_const_assign(value, &[], env)?;
+                }
                 // Kap's `name ⇐ fn-expr` is a STATEMENT-LIKE expression that
                 // returns `⍬` (Kotlin UpdateLocalFunctionInstruction.evalWithContext
                 // returns APLNullValue, parser.kt:595/598). Catenating onto the
@@ -1328,6 +1673,9 @@ impl Engine {
                 // Compile to `APLValue::UserOp`: a function that, when applied with
                 // function-operands (via `OpCall`), binds `op_left`/`op_right` to those
                 // operands and runs `body` with the ordinary data args.
+                // PLAN §2.8b: `∇` operator bodies are CLOSED like tradfn bodies
+                // (parser.kt:771/783) and never trip — oracle `∇ (x foo y) b …`
+                // with const `a` → `0`. No check here.
                 let v = Rc::new(APLValue::UserOp {
                     op_left: op_left.clone(),
                     op_right: op_right.clone(),
@@ -1363,8 +1711,10 @@ impl Engine {
                 // P1-M9: assign the result back to the variable (mirrors Kotlin's
                 // processAssignment with an ArrayIndex dest — the lvalue reader updates
                 // the variable in the environment).
+                // PLAN §2.8b: NO const check here — Kotlin's `deriveLvalueReader`
+                // on an index dest is a reader, not the const binding (oracle:
+                // `a ← 1 2 3 ⋄ declare(:const a) ⋄ a[0] ← 9` → `⟨9 2 3⟩`).
                 if let Instr::Symbol { name, namespace } = array.as_ref() {
-                    self.check_not_constant(name, namespace, env)?;
                     env.assign(name, namespace, result.clone());
                 }
                 Ok(result)
@@ -4937,9 +5287,17 @@ impl Engine {
         // converts it to the Real-Kap message "Call to return without a function call".
         let result = match body {
             Instr::Derived { .. } | Instr::Train { .. } | Instr::ValueOp { .. } | Instr::Symbol { .. } | Instr::DynamicRef { .. } => {
-                self.eval_apply(body, left, right, &child)
+                child.fn_body_depth.set(child.fn_body_depth.get() + 1);
+                let r = self.eval_apply(body, left, right, &child);
+                child.fn_body_depth.set(child.fn_body_depth.get() - 1);
+                r
             }
-            _ => self.eval_instr(body, &child),
+            _ => {
+                child.fn_body_depth.set(child.fn_body_depth.get() + 1);
+                let r = self.eval_instr(body, &child);
+                child.fn_body_depth.set(child.fn_body_depth.get() - 1);
+                r
+            }
         };
         // Only Block bodies (`{}` dfns) create a return-target frame. All bodies
         // must propagate `Return` to the enclosing frame (nested `◊` / inner dfn).
@@ -5305,7 +5663,12 @@ impl Engine {
         if let Some(lv) = &left_val {
             child.define("⍺", &None, lv.clone());
         }
-        self.eval_instr(&body, &child)
+        // Deferred operator-body execution: Kotlin checks const ONLY at
+        // instruction-BUILD time; runtime `setVar` is unchecked (v3 gate).
+        child.fn_body_depth.set(child.fn_body_depth.get() + 1);
+        let r = self.eval_instr(&body, &child);
+        child.fn_body_depth.set(child.fn_body_depth.get() - 1);
+        r
     }
 
     /// (`(A;B;C)`), the argument must be a vector and each name gets one element
