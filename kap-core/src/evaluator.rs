@@ -6922,18 +6922,79 @@ impl Engine {
     }
 
     fn iota(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
-        let n = match right_val.as_ref() {
-            APLValue::Number(KapNumber::Long(v)) => *v,
-            _ => {
-                return Err(AplError::runtime("⍳ needs an integer count".into()))
+        // Kotlin `IotaAPLFunctionImpl.eval1Arg` (builtins/interval.kt, etc.):
+        // accepts Long, BigInt, and a rank-1+ array of integer dimensions.
+        // Multi-dim shapes: `⍳ 4 5` → 4×5 matrix of row-major indices; `⍳ 2 3 2` →
+        // 2×3×2 cube; `⍳,9` → length-9 vector of 1-vectors (rank-1 of `⍳`);
+        // `⍳⍬` → `⍬` (a 0-D shape gives a 0-size result). Element indices are
+        // row-major (Kotlin `APLArrayImpl.make(dims) { i -> i.makeAPLNumber() }`).
+        let dims: Vec<usize> = match right_val.as_ref() {
+            APLValue::Null => return Ok(Rc::new(APLValue::Null)),
+            APLValue::Number(KapNumber::Long(v)) if *v >= 0 => vec![*v as usize],
+            APLValue::Number(KapNumber::Long(_)) => {
+                return Err(AplError::runtime("⍳ count must be non-negative".into()));
             }
+            APLValue::Number(KapNumber::BigInt(v)) => {
+                if v.sign() == num_bigint::Sign::Minus || v > &num_bigint::BigInt::from(i64::MAX) {
+                    return Err(AplError::runtime("⍳ count is out of range".into()));
+                }
+                vec![v.to_string().parse::<usize>().unwrap_or(0)]
+            }
+            APLValue::Array(a) => {
+                let mut d = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    match e.force(self)?.as_ref() {
+                        APLValue::Number(KapNumber::Long(v)) if *v >= 0 => d.push(*v as usize),
+                        APLValue::Number(KapNumber::BigInt(v)) => {
+                            if v > &num_bigint::BigInt::from(i64::MAX) {
+                                return Err(AplError::runtime("⍳ count is out of range".into()));
+                            }
+                            d.push(v.to_string().parse::<usize>().unwrap_or(0));
+                        }
+                        _ => return Err(AplError::runtime("⍳ needs an integer count".into())),
+                    }
+                }
+                d
+            }
+            _ => return Err(AplError::runtime("⍳ needs an integer count".into())),
         };
-        if n < 0 {
-            return Err(AplError::runtime("⍳ count must be non-negative".into()));
+        let total: usize = dims.iter().product();
+        if total > 100_000_000 {
+            return Err(AplError::runtime("⍳: result too large".into()));
         }
-        let nums: Vec<KapNumber> = (0..n).map(KapNumber::Long).collect();
-        let arr = KapArray::from_numbers(nums);
-        Ok(Rc::new(APLValue::Array(Rc::new(arr))))
+        // Row-major flat → nested Array.
+        if dims.is_empty() {
+            // 0-D shape (`⍳⍬`): return `⍬`.
+            return Ok(Rc::new(APLValue::Null));
+        }
+        if dims.len() == 1 {
+            let flat: Vec<i64> = (0..total as i64).collect();
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                dims,
+                ArrayData::Long(flat),
+            )))));
+        }
+        // Build nested: each cell along the first axis is an array of the
+        // remaining dims whose flat indices are the corresponding slice.
+        let stride: usize = dims[1..].iter().product();
+        let n0 = dims[0];
+        let inner_dims = dims[1..].to_vec();
+        let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(n0);
+        for i in 0..n0 {
+            let base = i * stride;
+            let mut sub: Vec<i64> = Vec::with_capacity(stride);
+            for k in 0..stride {
+                sub.push((base + k) as i64);
+            }
+            out.push(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                inner_dims.clone(),
+                ArrayData::Long(sub),
+            )))));
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![n0],
+            ArrayData::Nested(out),
+        )))))
     }
 
     /// Dyadic `⍳` (index-of), mirroring Kotlin `FindIndexArray1DLeftArg`.
