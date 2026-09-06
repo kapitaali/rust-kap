@@ -15025,64 +15025,79 @@ impl Engine {
     ) -> Result<AplRef<APLValue>, AplError> {
         let l = left_val.force(self)?;
         let r = right_val.force(self)?;
-        match (l.as_ref(), r.as_ref()) {
-            (APLValue::Array(la), APLValue::Array(ra)) => {
-                // Kotlin WithoutFunction: all axes except the first must match.
-                let a_dims = la.dimensions.clone();
-                let b_dims = ra.dimensions.clone();
-                if a_dims.len() != b_dims.len() {
-                    return Err(AplError::runtime(format!(
-                        "~: All but the first axis needs to have the same dimensions. Ranks: A={:?}, B={:?}",
-                        a_dims, b_dims
-                    )));
-                }
-                for k in 1..a_dims.len() {
-                    if a_dims[k] != b_dims[k] {
+        // Null/rank≤1-empty right: A unchanged (arrayified). Kotlin
+        // `b.dimensions.isNullDimensions() → a.arrayify()`. Higher-rank
+        // empties (e.g. `0 2⍴⍬`) flow through the cell path below.
+        let r_is_empty = r.is_null()
+            || matches!(r.as_ref(), APLValue::Array(a) if a.dimensions.len() <= 1 && a.element_count() == 0);
+        if r_is_empty {
+            return Ok(match l.as_ref() {
+                APLValue::Array(_) => l,
+                other => Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![1],
+                    ArrayData::Nested(vec![Rc::new(other.clone())]),
+                )))),
+            });
+        }
+        let dims_err = |ad: &[usize], bd: &[usize]| {
+            AplError::runtime(format!(
+                "~: All but the first axis needs to have the same dimensions. Ranks: A={:?}, B={:?}",
+                ad, bd
+            ))
+        };
+        let l_dims = l.dimensions();
+        let r_dims = r.dimensions();
+        // Rank>1 left: cell path (Kotlin `NotAPLFunctionImpl.eval2Arg`,
+        // math_functions.kt:975). Rank-0 (enclosed) right discloses to one
+        // compound cell; otherwise rows must match on all but the first axis.
+        if l_dims.len() > 1 {
+            let inner_a = l_dims[1..].to_vec();
+            let b_cells: Vec<AplRef<APLValue>> = match r.as_ref() {
+                APLValue::Array(a) if a.dimensions.is_empty() => {
+                    let content = a.elements().into_iter().next().unwrap_or_else(|| Rc::new(APLValue::Null));
+                    let cd = content.dimensions();
+                    if cd != inner_a {
                         return Err(AplError::runtime(format!(
-                            "~: All but the first axis needs to have the same dimensions. Ranks: A={:?}, B={:?}",
-                            a_dims, b_dims
+                            "Enclosed right argument found, but inner value does not have the expected dimensions. Got: {:?}, expected={:?}",
+                            cd, inner_a
                         )));
                     }
+                    vec![content]
                 }
-                let lb = la.elements();
-                let rb = ra.elements();
-                let mut out = Vec::with_capacity(lb.len());
-                for e in &lb {
-                    let mut found = false;
-                    for r in &rb {
-                        if Self::deep_equal(e.as_ref(), r.as_ref()) {
-                            found = true;
-                            break;
-                        }
+                _ => {
+                    let inner_b = if r_dims.is_empty() { vec![] } else { r_dims[1..].to_vec() };
+                    if inner_b != inner_a {
+                        return Err(dims_err(&l_dims, &r_dims));
                     }
-                    if !found {
-                        out.push(e.clone());
-                    }
+                    Self::setop_rows(r.as_ref(), &r_dims)
                 }
-                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                    vec![out.len()],
-                    ArrayData::Nested(out),
-                )))))
+            };
+            let b_keys: std::collections::HashSet<String> =
+                b_cells.iter().map(|m| Self::setop_key(m.as_ref())).collect();
+            let mut out: Vec<AplRef<APLValue>> = Vec::new();
+            for m in Self::setop_rows(l.as_ref(), &l_dims) {
+                if !b_keys.contains(&Self::setop_key(m.as_ref())) {
+                    out.push(m);
+                }
             }
-            (APLValue::Array(la), APLValue::Number(n)) => {
-                let lb = la.elements();
-                let mut out = Vec::with_capacity(lb.len());
-                for e in &lb {
-                    if let APLValue::Number(x) = e.as_ref() {
-                        if x != n {
-                            out.push(e.clone());
-                        }
-                    } else {
-                        out.push(e.clone());
-                    }
-                }
-                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                    vec![out.len()],
-                    ArrayData::Nested(out),
-                )))))
-            }
-            _ => Err(AplError::runtime("~ requires arrays".into())),
+            return Ok(Self::disclose_cells(out, &inner_a));
         }
+        // Rank ≤ 1: flat member removal (Kotlin `computeWithout`), both sides
+        // arrayified — scalars included (`2 ~ 1` → `⟨2⟩`, `2 ~ 2` → empty).
+        let a = self.members_of(l.as_ref());
+        let b = self.members_of(r.as_ref());
+        let b_keys: std::collections::HashSet<String> =
+            b.iter().map(|m| Self::type_qualified_key(m.as_ref())).collect();
+        let mut out = Vec::with_capacity(a.len());
+        for e in &a {
+            if !b_keys.contains(&Self::type_qualified_key(e.as_ref())) {
+                out.push(e.clone());
+            }
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![out.len()],
+            ArrayData::Nested(out),
+        )))))
     }
 
     /// Dyadic boolean AND/OR: operands are 0/1 (truthy: non-zero). Result 0/1.
@@ -16025,17 +16040,6 @@ impl Engine {
         if l.is_null() || r.is_null() {
             return Ok(Rc::new(APLValue::Null));
         }
-        // Rank check (Kotlin unique.kt:20-56): both args must have rank ≤ 1.
-        // If either has rank > 1, error with the dimension mismatch message.
-        let l_dims = l.dimensions();
-        let r_dims = r.dimensions();
-        if l_dims.len() > 1 || r_dims.len() > 1 {
-            return Err(AplError::runtime(format!(
-                "∩: All but the first axis needs to have the same dimensions. Ranks: A=[{}], B=[{}]",
-                l_dims.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "),
-                r_dims.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ")
-            )));
-        }
         if let (APLValue::Str(s1), APLValue::Str(s2)) = (l.as_ref(), r.as_ref()) {
             let mut seen_b = std::collections::HashSet::new();
             for c in s2.chars() {
@@ -16050,21 +16054,132 @@ impl Engine {
             }
             return Ok(Rc::new(APLValue::Str(out)));
         }
-        let a = self.members_of(&l);
-        let b = self.members_of(&r);
+        let dims_err = |ad: &[usize], bd: &[usize]| {
+            AplError::runtime(format!(
+                "∩: All but the first axis needs to have the same dimensions. Ranks: A=[{}], B=[{}]",
+                ad.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", "),
+                bd.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", ")
+            ))
+        };
+        let l_dims = l.dimensions();
+        let r_dims = r.dimensions();
+        // Rank ≤ 1 on both sides: flat vector intersection (A order, dups kept).
+        if l_dims.len() <= 1 && r_dims.len() <= 1 {
+            let a = self.members_of(l.as_ref());
+            let b = self.members_of(r.as_ref());
+            let b_keys: std::collections::HashSet<String> =
+                b.iter().map(|m| Self::type_qualified_key(m.as_ref())).collect();
+            let mut out: Vec<AplRef<APLValue>> = Vec::new();
+            for m in &a {
+                let key = Self::type_qualified_key(m.as_ref());
+                if b_keys.contains(&key) {
+                    out.push(m.clone());
+                }
+            }
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![out.len()],
+                ArrayData::Nested(out),
+            )))));
+        }
+        // Rank-1 A with higher-rank B: dimension error (Kotlin unique.kt:48).
+        if l_dims.len() <= 1 {
+            return Err(dims_err(&l_dims, &r_dims));
+        }
+        // Cell path (Kotlin `GenericIntersectionUnionFunctionImpl`, unique.kt:7):
+        // all but the first axis must match; enclosing the trailing axes turns
+        // rows into cells, the result discloses back to rows.
+        let inner_a = l_dims[1..].to_vec();
+        // Null/rank≤1-empty right: empty `[0] + inner` result (Kotlin
+        // `emptyRightArgument`). Higher-rank empties yield empty naturally
+        // (no B rows to match).
+        let b_is_empty = r.is_null()
+            || matches!(r.as_ref(), APLValue::Array(a) if a.dimensions.len() <= 1 && a.element_count() == 0);
+        if b_is_empty {
+            return Ok(Self::disclose_cells(Vec::new(), &inner_a));
+        }
+        // B cells: rank-0 (enclosed) B discloses to one compound cell whose
+        // dims must equal innerA; otherwise B splits into rows with matching
+        // inner dims.
+        let b_cells: Vec<AplRef<APLValue>> = match r.as_ref() {
+            APLValue::Array(a) if a.dimensions.is_empty() => {
+                let content = a.elements().into_iter().next().unwrap_or_else(|| Rc::new(APLValue::Null));
+                let cd = content.dimensions();
+                if cd != inner_a {
+                    return Err(AplError::runtime(format!(
+                        "Right argument is enclosed, the inner element have invalid dimensions. Got: {:?}, expected: {:?}",
+                        cd, inner_a
+                    )));
+                }
+                vec![content]
+            }
+            _ => {
+                let inner_b = if r_dims.is_empty() { vec![] } else { r_dims[1..].to_vec() };
+                if inner_b != inner_a {
+                    return Err(dims_err(&l_dims, &r_dims));
+                }
+                Self::setop_rows(r.as_ref(), &r_dims)
+            }
+        };
         let b_keys: std::collections::HashSet<String> =
-            b.iter().map(|m| Self::type_qualified_key(m.as_ref())).collect();
+            b_cells.iter().map(|m| Self::setop_key(m.as_ref())).collect();
+        let a_cells = Self::setop_rows(l.as_ref(), &l_dims);
         let mut out: Vec<AplRef<APLValue>> = Vec::new();
-        for m in &a {
-            let key = Self::type_qualified_key(m.as_ref());
-            if b_keys.contains(&key) {
+        for m in &a_cells {
+            if b_keys.contains(&Self::setop_key(m.as_ref())) {
                 out.push(m.clone());
             }
         }
-        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-            vec![out.len()],
-            ArrayData::Nested(out),
-        )))))
+        Ok(Self::disclose_cells(out, &inner_a))
+    }
+
+    /// Row-cells of a rank>1 array: each axis-0 slice as an `inner`-dims array.
+    fn setop_rows(v: &APLValue, dims: &[usize]) -> Vec<AplRef<APLValue>> {
+        let elems: Vec<AplRef<APLValue>> = match v {
+            APLValue::Array(a) => a.elements(),
+            other => vec![Rc::new(other.clone())],
+        };
+        let inner = dims[1..].to_vec();
+        let stride: usize = inner.iter().product::<usize>().max(1);
+        let n = dims[0];
+        (0..n)
+            .map(|i| {
+                Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    inner.clone(),
+                    ArrayData::Nested(elems[i * stride..(i + 1) * stride].to_vec()),
+                )))) as AplRef<APLValue>
+            })
+            .collect()
+    }
+
+    /// Disclose row-cells back to a `([k] + inner)`-dims array (empty result →
+    /// a `[0] + inner` empty). Mirrors `DisclosedArrayValue` in the set-op path.
+    fn disclose_cells(cells: Vec<AplRef<APLValue>>, inner: &[usize]) -> AplRef<APLValue> {
+        let mut dims = vec![cells.len()];
+        dims.extend_from_slice(inner);
+        let mut flat: Vec<AplRef<APLValue>> = Vec::new();
+        for c in &cells {
+            match c.as_ref() {
+                APLValue::Array(a) => flat.extend(a.elements()),
+                other => flat.push(Rc::new(other.clone())),
+            }
+        }
+        Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            dims,
+            ArrayData::Nested(flat),
+        ))))
+    }
+
+    /// Cell key for set operations: rank-0 boxes unwrap to their content
+    /// (Kap compares enclosed cells by disclosed value), otherwise the
+    /// standard type-qualified key.
+    fn setop_key(v: &APLValue) -> String {
+        match v {
+            APLValue::Array(a) if a.dimensions.is_empty() => match a.elements().into_iter().next() {
+                Some(e) => Self::setop_key(e.as_ref()),
+                None => "null".to_string(),
+            },
+            _ => Self::type_qualified_key(v),
+        }
     }
 
     /// Flat members of a value for set operations: scalars → 1 element, strings →
