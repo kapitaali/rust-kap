@@ -223,15 +223,15 @@ pub enum Instr {
         body: std::rc::Rc<Instr>,
     },
     /// Destructuring assignment `(a b c) ← expr` — bind each LHS symbol to the
-    /// corresponding element of the (vector) RHS (Kotlin `AssignmentInstruction` with
-    /// multiple targets). `names` are the bare/grouped targets in order.
+    /// corresponding element of the (vector) RHS (Kotlin
+    /// `DestructureAssignInstruction` + `deriveLvalueReader`, instr.kt:82/276/518).
+    /// `target` mirrors the LHS surface shape, nested to any depth: a
+    /// space-stranded group is `Array`, a `;`-separated group is `List`, leaves
+    /// are `Symbol` (e.g. `((a b) c)` → `Array[Array[a,b],c]`). A bare-symbol
+    /// target never reaches this variant (it is a plain `Assign`).
     DestructAssign {
-        names: Vec<(String, Option<String>)>,
+        target: Box<Instr>,
         value: Box<Instr>,
-        /// Whether the LHS uses `;` as a separator (e.g. `(a;b;c)←RHS`). When true,
-        /// the RHS must be a *list* (`APLValue::List`); a plain array is a type mismatch.
-        /// Space-separated LHS (`(a b c)←RHS`) accepts any array RHS.
-        semicolon: bool,
     },
     /// Destructuring *modified* assignment `(a b) op← expr` — apply `op` to the
     /// current values, then bind back elementwise (oracle: `(bar foo) +← 3`

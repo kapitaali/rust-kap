@@ -476,6 +476,63 @@ impl Engine {
     /// current namespace, then `kap` (where the native quad constants live) — mirroring
     /// how bare-name lookup falls through to the owning namespace. Error text matches
     /// the oracle verbatim: `Assignment to constant variable: <ns>:<name>`.
+    /// Recursively bind a destructuring target tree to a value (Kotlin
+    /// `deriveLvalueReader` recursion, instr.kt:82-101/276-291): `Array` nodes
+    /// require a rank-1 array of matching length (`valueAt(i)` per child),
+    /// `List` nodes require a list of matching size (`listElement(i)`), leaves
+    /// bind with the constant check. A non-symbol leaf raises Kotlin's
+    /// `Unable to assign to expression`.
+    fn bind_destruct_target(
+        &self,
+        target: &Instr,
+        v: AplRef<APLValue>,
+        env: &Rc<Environment>,
+    ) -> Result<(), AplError> {
+        match target {
+            Instr::Symbol { name, namespace } => {
+                self.check_not_constant(name, namespace, env)?;
+                env.assign(name, namespace, v);
+                Ok(())
+            }
+            Instr::Array { elements } => {
+                let n = elements.len();
+                if matches!(v.as_ref(), APLValue::List(_)) || v.dimensions() != vec![n] {
+                    return Err(AplError::runtime(format!(
+                        "In destructuring assignment, expected a rank-1 array of {n}, got dimensions: {:?}",
+                        v.dimensions()
+                    )));
+                }
+                let elems = v.elements();
+                for (t, e) in elements.iter().zip(elems) {
+                    self.bind_destruct_target(t, e, env)?;
+                }
+                Ok(())
+            }
+            Instr::List { elements } => {
+                let n = elements.len();
+                if !matches!(v.as_ref(), APLValue::List(_)) {
+                    return Err(AplError::runtime(format!(
+                        "In destructuring assignment, expected a list, got: {}",
+                        v.class_name()
+                    )));
+                }
+                let elems = v.elements();
+                if elems.len() != n {
+                    return Err(AplError::runtime(format!(
+                        "In destructuring assignment, expected a list of size {}, got: {}",
+                        n,
+                        elems.len()
+                    )));
+                }
+                for (t, e) in elements.iter().zip(elems) {
+                    self.bind_destruct_target(t, e, env)?;
+                }
+                Ok(())
+            }
+            _ => Err(AplError::runtime("Unable to assign to expression".into())),
+        }
+    }
+
     fn check_not_constant(
         &self,
         name: &str,
@@ -574,6 +631,22 @@ impl Engine {
                 }
                 self.engine.check_not_constant(name, ns, self.env)
             }
+            /// Const-check every leaf of a destructuring target tree at a def
+            /// site (oracle Z5-Z7: `(a b) ← …` / `(a;b) ← …` trip per-name;
+            /// nesting recurses — Kotlin `deriveLvalueReader` builds a reader
+            /// per child instruction).
+            fn check_target_const(&self, target: &Instr) -> Result<(), AplError> {
+                match target {
+                    Instr::Symbol { name, namespace } => self.check(name, namespace),
+                    Instr::Array { elements } | Instr::List { elements } => {
+                        for e in elements {
+                            self.check_target_const(e)?;
+                        }
+                        Ok(())
+                    }
+                    _ => Ok(()),
+                }
+            }
             // `declare(:local …)` / `declare(:const …)` targets in simulation
             // order. Returns `(locals, consts)`: locals shield later checks
             // (Kotlin binds them fresh in the dfn env); consts trip later
@@ -650,8 +723,14 @@ impl Engine {
                         }
                         Ok(())
                     }
-                    Instr::DestructAssign { names, value, .. }
-                    | Instr::DestructModifiedAssign { names, value, .. } => {
+                    Instr::DestructAssign { target, value } => {
+                        self.sim(value)?;
+                        if self.at_def_site {
+                            self.check_target_const(target)?;
+                        }
+                        Ok(())
+                    }
+                    Instr::DestructModifiedAssign { names, value, .. } => {
                         self.sim(value)?;
                         if self.at_def_site {
                             for (name, ns) in names {
@@ -872,6 +951,7 @@ impl Engine {
                 tradfn_names: Vec::new(),
                 macros,
                 kotlin_close_stack: Vec::new(),
+                list_stop: false,
                 current_ns: env.ns_registry.current_ns(),
                 ns_registry: env.ns_registry.clone(),
             };
@@ -966,6 +1046,7 @@ impl Engine {
                 tradfn_names: Vec::new(),
                 macros,
                 kotlin_close_stack: Vec::new(),
+                list_stop: false,
                 current_ns: ns_now.clone(),
                 ns_registry: env.ns_registry.clone(),
             };
@@ -1224,48 +1305,17 @@ impl Engine {
                     Err(AplError::runtime("assignment target must be a symbol".into()))
                 }
             }
-            Instr::DestructAssign { names, value, semicolon } => {
-                // `(a b c) ← expr` — bind each LHS symbol to the corresponding element of
-                // the (vector) RHS. Mirrors Kap's multi-target assignment.
-                // A `;`-separated LHS `(a;b;c)←RHS` requires the RHS to be a *list*
-                // (Kotlin `LiteralAPLList`); a plain array is a type mismatch.
-                let v = self.eval_instr(value, env)?;
-                if *semicolon {
-                    if !matches!(v.as_ref(), APLValue::List(_)) {
-                        return Err(AplError::runtime(format!(
-                            "In destructuring assignment, expected a list, got: {}",
-                            v.class_name()
-                        )));
-                    }
-                } else if matches!(v.as_ref(), APLValue::List(_)) {
-                    return Err(AplError::runtime(format!(
-                        "In destructuring assignment, expected a rank-1 array of {}, got dimensions: {}",
-                        names.len(),
-                        v.dimensions().len()
-                    )));
-                } else if names.len() > 1 && v.rank() != 1 {
-                    // Multi-target space-separated destructuring requires a rank-1
-                    // RHS (oracle: `(a b c d e f) ← 3 2 ⍴ …` errors "expected a
-                    // rank-1 array of 6, got dimensions: [3, 2]"). A single-name
-                    // group `(a) ← v` binds the whole RHS (any rank).
-                    return Err(AplError::runtime(format!(
-                        "In destructuring assignment, expected a rank-1 array of {}, got dimensions: {:?}",
-                        names.len(),
-                        v.dimensions()
-                    )));
-                }
-                let elems = v.elements();
-                if elems.len() != names.len() {
-                    return Err(AplError::runtime(format!(
-                        "destructuring assignment expected {} values, got {}",
-                        names.len(),
-                        elems.len()
-                    )));
-                }
-                for (i, (nm, ns)) in names.iter().enumerate() {
-                    self.check_not_constant(nm, ns, env)?;
-                    env.assign(nm, ns, elems[i].clone());
-                }
+            Instr::DestructAssign { target, value } => {
+                // `(a b c) ← expr` — bind each LHS symbol to the corresponding
+                // element of the (vector) RHS. `target` mirrors the LHS surface
+                // shape to any depth (`Array` = space-stranded group, `List` =
+                // `;`-separated); `bind_destruct_target` (Kotlin
+                // `deriveLvalueReader` recursion, instr.kt:82-101/276-291)
+                // checks each node against the value.
+                // Kotlin `DestructureAssignInstruction` (instr.kt:518-524):
+                // the RHS is collapsed before binding.
+                let v = self.collapse(self.eval_instr(value, env)?)?;
+                self.bind_destruct_target(target, v.clone(), env)?;
                 Ok(v)
             }
             Instr::DestructModifiedAssign { names, op, value } => {
@@ -19371,6 +19421,57 @@ mod tests {
         assert_eq!(eval(r#"(a;b;c)←(1;2;3) ⋄ c"#), "3");
         assert_eq!(eval(r#"(a;b;c)←(1;2;3) ⋄ a"#), "1");
         assert_eq!(eval(r#"(a;b;c)←(1;2;3) ⋄ b"#), "2");
+    }
+
+    /// Nested destructuring over space-stranded arrays (AssignmentTest
+    /// destructuringAssignmentWithNestedArray / HighNesting — oracle
+    /// kap-jvm-text `⋄` forms → `⟨1 2 3⟩` / `⟨1 2 3 4 5⟩`).
+    #[test]
+    fn eval_destructuring_nested_array() {
+        assert_eq!(eval("((a b) c) ← (1 2) 3 ⋄ a b c"), "(1 2 3)");
+        assert_eq!(
+            eval("((a b) (c (d e))) ← ((1 2) (3 (4 5))) ⋄ a b c d e"),
+            "(1 2 3 4 5)"
+        );
+    }
+
+    /// Nested destructuring over `;`-lists (AssignmentTest
+    /// destructuringArrayWithNestedList — oracle → `⟨1 2 3 4⟩`).
+    #[test]
+    fn eval_destructuring_nested_list() {
+        assert_eq!(
+            eval("(a ; (b ; c) ; d) ← (1 ; (2 ; 3) ; 4) ⋄ a b c d"),
+            "(1 2 3 4)"
+        );
+    }
+
+    /// Mixed array/list nesting (AssignmentTest destructuringArrayWithList —
+    /// oracle `⟨1 ⟨2 22⟩ 3 4 5⟩`; `b` binds the nested `⟨2 22⟩`).
+    #[test]
+    fn eval_destructuring_mixed_array_list() {
+        assert_eq!(
+            eval("(a (b ; c (d ; e))) ← (1 (2 22; 3 (4 ; 5))) ⋄ a b c d e"),
+            "(1 (2 22) 3 4 5)"
+        );
+    }
+
+    /// A non-symbol leaf is not assignable (AssignmentTest
+    /// destructuringAssignmentWithWrongType — oracle ParseException
+    /// `Unable to assign to expression`). Any error scores OK.
+    #[test]
+    fn eval_destructuring_invalid_leaf_fails() {
+        assert!(eval_fails("(a 1) ← 1 2"));
+    }
+
+    /// A function-shaped `;`-list element is rejected (ListTest
+    /// functionExpressionsInListShouldFail0/1 — oracle kap-jvm-text:
+    /// `+ ; 3 ; 4 ; 5` → `Error at: 1:1: Function expressions can't be part
+    /// of a list`; `1 ; + ; 2` → `Error at: 1:5: Function expressions cannot
+    /// be part of a list`; both kind:fails). Any error scores OK.
+    #[test]
+    fn eval_function_in_list_fails() {
+        assert!(eval_fails("+ ; 3 ; 4 ; 5"));
+        assert!(eval_fails("1 ; + ; 2"));
     }
 
     // --- Strings: character arithmetic (Kotlin StringsTest.kt) ---

@@ -80,6 +80,7 @@ pub fn parse(
         tradfn_names: Vec::new(),
         macros: macros.clone(),
         kotlin_close_stack: Vec::new(),
+        list_stop: false,
         // Legacy entry: no engine attached — default namespace, fresh registry
         // (macros defined without a namespace check are same-ns visible).
         current_ns: "default".to_string(),
@@ -148,6 +149,13 @@ pub struct Parser<'a> {
     /// accumulator loop (respecting the close token), mirroring Kotlin's
     /// `parseExprToplevel(CloseParen)` context threading (:977).
     pub kotlin_close_stack: Vec<Token>,
+    /// `;` terminates the current *value* parse like a statement boundary
+    /// (Kotlin `END_EXPR_TOKEN_LIST` includes `ListSeparator`, parser.kt:1342):
+    /// `finish_fn_call`'s right-argument parse stops at `;` so the caller's
+    /// `;`-list loop owns the separator (`1+2;3+4` → `List[1+2, 3+4]`, not
+    /// `1 + List[2, 3+4]`). Save/restore around nested parses that legitimately
+    /// consume `;` themselves (`⟦…⟧` call brackets, `and`/`or` RHS lists).
+    pub list_stop: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -386,8 +394,26 @@ impl<'a> Parser<'a> {
     /// (the closed call's VALUE continues as a left operand for a following dyadic
     /// operator — e.g. `+/⟦1 2 3 4⟧ + 100` → `(10) + 100` → `110`).
     fn parse_value_kotlin_with(&mut self, seeded: Vec<Instr>) -> Result<Instr, AplError> {
+        self.parse_value_kotlin_with_lists(seeded, Vec::new())
+    }
+
+    /// Accumulator loop with a PRE-SEEDED `left_args` AND pending `;`-list
+    /// elements. `finish_fn_call` passes the caller's `&mut` vecs straight
+    /// through (no moves) so an application after a `;` (e.g. `10 ; foo
+    /// (1;2)`) keeps the earlier elements instead of dropping them (the
+    /// `foo (10 ; foo (1;2))` regression: the outer `10 ;` was lost when
+    /// `finish_fn_call` returned directly).
+    fn parse_value_kotlin_with_lists(
+        &mut self,
+        seeded: Vec<Instr>,
+        lists_seed: Vec<Instr>,
+    ) -> Result<Instr, AplError> {
         let start = self.pos;
         let mut left_args: Vec<Instr> = seeded;
+        // `;`-separated list elements accumulated so far (Kotlin
+        // `parseListInner`: a `ListSeparator` starts a new element; the
+        // finished value is a `List` when any `;` was seen).
+        let mut lists: Vec<Instr> = lists_seed;
         loop {
             // Check for END_EXPR_TOKEN_LIST BEFORE consuming newlines.
             // A Newline, EOF, or StatementSeparator terminates the expression.
@@ -405,6 +431,47 @@ impl<'a> Parser<'a> {
             }
             match &tok.token {
                 Token::EndOfFile | Token::StatementSeparator | Token::Newline => break,
+                // `;` terminates the current *value* parse (Kotlin
+                // `END_EXPR_TOKEN_LIST` includes `ListSeparator`,
+                // parser.kt:1348): only the TOP-LEVEL list loop of
+                // `parse_value_kotlin_with_lists` owns the separator. A
+                // nested value parse (right arg of `finish_fn_call`,
+                // `and`/`or` RHS) stops here and lets the caller loop
+                // handle the `;`. `list_stop` is set by `finish_fn_call`
+                // around its right-arg parse (mirroring Kotlin
+                // `processFn` → `parseValue`, which never sees `;`).
+                Token::ListSeparator if self.list_stop => break,
+                Token::ListSeparator => {
+                    // `;` at the top of a value expression builds a `;`-list
+                    // (Kotlin `parseListInner`, parser.kt:335-364): each `;`
+                    // starts a new list element from the accumulated strand.
+                    // `left_args` holds the current element's strand parts
+                    // (usually exactly one); several strand (space-separated).
+                    // A function-shaped element is rejected exactly like
+                    // Kotlin (`Function expressions can't be part of a list`).
+                    let elem = match left_args.len() {
+                        0 => Instr::Empty,
+                        1 => left_args.pop().unwrap(),
+                        _ => Instr::Array {
+                            elements: std::mem::take(&mut left_args),
+                        },
+                    };
+                    self.advance();
+                    if self.is_list_element_fn(&elem) {
+                        // Kotlin `parseListInner` (parser.kt:339/346): the
+                        // FIRST element errors `can't` (singular), later ones
+                        // `cannot` (plural).
+                        let first = lists.is_empty();
+                        return Err(self.err(if first {
+                            "Function expressions can't be part of a list"
+                        } else {
+                            "Function expressions cannot be part of a list"
+                        }));
+                    }
+                    lists.push(elem);
+                    self.skip_newlines();
+                    continue;
+                }
                 _ => {}
             }
             // Skip newlines BETWEEN tokens of the same expression.
@@ -427,6 +494,10 @@ impl<'a> Parser<'a> {
             // Short-circuit `and` / `or`: the lexer emits them as plain SYMBOL names
             // (no dedicated tokens); the legacy parser string-matches at
             // parse_expr:1756. Infix over the accumulated left args.
+            // Kotlin END_EXPR_TOKEN_LIST (:1342): `and`/`or` END the current
+            // value parse — and `;` is in that list too, so the RHS parse
+            // stops at `;` (`list_stop`, mirroring `processFn` → `parseValue`)
+            // and the CALLER's list loop owns the separator.
             if let Token::Literal(LiteralValue::Symbol {
                 name: nn,
                 namespace: None,
@@ -435,15 +506,19 @@ impl<'a> Parser<'a> {
                 if nn == "and" || nn == "or" {
                     let is_and = nn == "and";
                     self.advance();
-                    let rhs = self.parse_value_kotlin()?;
+                    let saved = self.list_stop;
+                    self.list_stop = true;
+                    let rhs = self.parse_value_kotlin();
+                    self.list_stop = saved;
+                    let rhs = rhs?;
                     let lhs = if left_args.len() == 1 {
                         left_args.pop().unwrap()
                     } else {
                         Instr::Array {
-                            elements: left_args,
+                            elements: std::mem::take(&mut left_args),
                         }
                     };
-                    return Ok(Instr::BooleanOp {
+                    let op = Instr::BooleanOp {
                         op: if is_and {
                             BooleanOpKind::And
                         } else {
@@ -451,7 +526,26 @@ impl<'a> Parser<'a> {
                         },
                         left: Box::new(lhs),
                         right: Box::new(rhs),
-                    });
+                    };
+                    // Like an application, a boolean op followed by `;` is
+                    // the FIRST list element (Kotlin `parseBooleanExpression`
+                    // sits inside `parseListInner`): consume the separator and
+                    // resume with the element kept.
+                    if lists.is_empty()
+                        && !matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator))
+                    {
+                        return Ok(op);
+                    }
+                    if matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator)) {
+                        self.advance(); // consume `;` owned by this list level
+                        self.skip_newlines();
+                        let mut new_lists = std::mem::take(&mut lists);
+                        new_lists.push(op);
+                        return self.parse_value_kotlin_with_lists(Vec::new(), new_lists);
+                    }
+                    left_args.push(op);
+                    let seeded = std::mem::take(&mut left_args);
+                    return self.parse_value_kotlin_with_lists(seeded, std::mem::take(&mut lists));
                 }
             }
             match &tok.token {
@@ -528,7 +622,7 @@ impl<'a> Parser<'a> {
                         self.pos = start;
                         return self.parse_expr();
                     }
-                    return self.finish_fn_call(lam, &mut left_args);
+                    return self.finish_fn_call(lam, &mut left_args, &mut lists);
                 }
                 // `⍞name`: a *dynamic* function reference. Like a bare symbol or brace
                 // dfn, it is FUNCTION-SHAPED (Kotlin routes the DynamicRef through
@@ -563,10 +657,10 @@ impl<'a> Parser<'a> {
                                             namespace: None,
                                         }),
                                     };
-                                    return self.finish_fn_call(dr, &mut left_args);
+                                    return self.finish_fn_call(dr, &mut left_args, &mut lists);
                                 }
                             }
-                            return self.finish_fn_call(dr, &mut left_args);
+                            return self.finish_fn_call(dr, &mut left_args, &mut lists);
                         }
                         // `⍞(fnExpr)` — dynamic function reference from a parenthesised
                         // FUNCTION expression (oracle: `⍞(+)` yields the `+` function as a
@@ -582,7 +676,7 @@ impl<'a> Parser<'a> {
                             // terminates it.
                             let inner = self.parse_value_kotlin()?;
                             self.expect(Token::CloseParen, "expected ) after ⍞(…)")?;
-                            return self.finish_fn_call(inner, &mut left_args);
+                            return self.finish_fn_call(inner, &mut left_args, &mut lists);
                         }
                         _ => return Err(self.err("expected a symbol after ⍞")),
                     }
@@ -636,6 +730,7 @@ impl<'a> Parser<'a> {
                                 if msg.contains("Expected function")
                                     || msg.contains("No right argument given")
                                     || msg.contains("Operator without left function")
+                                    || msg.contains("be part of a list")
                                 {
                                     return Err(e);
                                 }
@@ -665,7 +760,7 @@ impl<'a> Parser<'a> {
                         // (no right arg inside the parens), processFn CONTINUES with the
                         // tokens after `)` — so `(1↑⍴) 3 4` chains (1↑) then ⍴ via
                         // Chain2, and `(≠⌸) v` derives the operator then applies to v.
-                        return self.finish_fn_call(group, &mut left_args);
+                        return self.finish_fn_call(group, &mut left_args, &mut lists);
                     }
                     // Value group: this is Kotlin's `FnParseResult`-vs-`Value` fork
                     // (parser.kt:977-984). When the accumulator is parsing the
@@ -712,10 +807,12 @@ impl<'a> Parser<'a> {
                 }
                 Token::LeftArrow => {
                     // `x ← v` (parser.kt:997 → processAssignment): target = last leftArg.
-                    // Kotlin processAssignment (parser.kt:524-527) requires leftArgs.size == 1,
-                    // else throws "Can only assign to a single variable". The port must do
-                    // the same: `foo bar←10` is an error, not a silent `bar←10`.
-                    if left_args.len() != 1 {
+                    // A pending `;`-list is an error here — an assignment
+                    // target is ONE lvalue (Kotlin processAssignment
+                    // :524-527 runs on parseValue's result, but
+                    // parseListInner already returned the LiteralAPLList as a
+                    // single holder). `foo bar←10` errors the same way.
+                    if !lists.is_empty() || left_args.len() != 1 {
                         return Err(self.err("Can only assign to a single variable"));
                     }
                     let target = match left_args.pop() {
@@ -751,20 +848,40 @@ impl<'a> Parser<'a> {
                         });
                     }
                     if let Instr::Array { elements } = &target {
-                        if elements.iter().all(|e| matches!(e, Instr::Symbol { .. })) {
-                            let names = elements
-                                .iter()
-                                .map(|e| match e {
-                                    Instr::Symbol { name, namespace } => {
-                                        (name.clone(), namespace.clone())
-                                    }
-                                    _ => unreachable!(),
-                                })
-                                .collect();
-                            return Ok(Instr::DestructAssign {
-                                names,
+                        if elements.len() == 1
+                            && matches!(elements[0], Instr::Symbol { .. })
+                        {
+                            // `(a) ← v`: single-name group binds the whole RHS
+                            // (Kotlin: 1-element Literal1DArray requires dims
+                            // [1]; oracle `(a) ← 1` → 1 via group-bind). Emit a
+                            // plain Assign so any-rank RHS binds whole.
+                            return Ok(Instr::Assign {
+                                target: Box::new(elements[0].clone()),
                                 value: Box::new(value),
-                                semicolon: false,
+                            });
+                        }
+                        // Nested-to-any-depth target tree (Kotlin
+                        // `deriveLvalueReader` recurses through
+                        // `Literal1DArray`/`LiteralAPLList` children, e.g.
+                        // `((a b) c)` → `Array[Array[a,b],c]`): keep the target
+                        // as-is; eval's `bind_destruct_target` checks each node
+                        // (`Array` ↔ rank-1 array, `List` ↔ list). A non-symbol
+                        // leaf raises `Unable to assign to expression` at bind
+                        // time (Kotlin `deriveLvalueReader` default arm).
+                        if Self::is_destruct_target(&target) {
+                            return Ok(Instr::DestructAssign {
+                                target: Box::new(target.clone()),
+                                value: Box::new(value),
+                            });
+                        }
+                    }
+                    if let Instr::List { .. } = &target {
+                        // `(a;b) ← …` / nested `(a;(b;c);d) ← …`: same tree,
+                        // `List` nodes require list values.
+                        if Self::is_destruct_target(&target) {
+                            return Ok(Instr::DestructAssign {
+                                target: Box::new(target.clone()),
+                                value: Box::new(value),
                             });
                         }
                     }
@@ -903,7 +1020,7 @@ impl<'a> Parser<'a> {
                     if Self::is_primitive_op(&qual) {
                         self.advance();
                         let fn_instr = Instr::Symbol { name, namespace };
-                        return self.finish_fn_call(fn_instr, &mut left_args);
+                        return self.finish_fn_call(fn_instr, &mut left_args, &mut lists);
                     }
                     // Keyword-namespace symbols (`:name`) are ALWAYS values —
                     // never function-shaped (parser.kt makeVariableRef).
@@ -920,7 +1037,7 @@ impl<'a> Parser<'a> {
                     // Function-shaped USER/namespaced symbol → processFn (:969).
                     self.advance();
                     let fn_instr = Instr::Symbol { name, namespace };
-                    return self.finish_fn_call(fn_instr, &mut left_args);
+                    return self.finish_fn_call(fn_instr, &mut left_args, &mut lists);
                 }
                 _ => {
                     // Unhandled token class: fall back to the legacy expression parser
@@ -931,7 +1048,25 @@ impl<'a> Parser<'a> {
             }
         }
         // makeResultList (parser.kt:206): a single accumulated operand IS the result,
-        // unwrapped; several operands strand.
+        // unwrapped; several operands strand. With a pending `;`-list, the whole
+        // accumulation is one more element of the `List` (Kotlin `parseListInner`
+        // returns `LiteralAPLList` when a `ListSeparator` was seen).
+        if !lists.is_empty() {
+            let last = match left_args.len() {
+                0 => Instr::Empty,
+                1 => left_args.pop().unwrap(),
+                _ => Instr::Array {
+                    elements: std::mem::take(&mut left_args),
+                },
+            };
+            if self.is_list_element_fn(&last) {
+                // Any element after the first errors with the plural text
+                // (parser.kt:346).
+                return Err(self.err("Function expressions cannot be part of a list"));
+            }
+            lists.push(last);
+            return Ok(Instr::List { elements: lists });
+        }
         match left_args.len() {
             0 => Err(self.err("empty expression")),
             1 => Ok(left_args.pop().unwrap()),
@@ -1390,6 +1525,17 @@ impl<'a> Parser<'a> {
     fn parse_function_call_list(&mut self, fn_instr: Instr) -> Result<Instr, AplError> {
         self.advance(); // consume ⟦
         self.kotlin_close_stack.push(Token::FunctionCallCloseParen);
+        // `⟦…⟧` contents are their own `parseExprToplevel` context (Kotlin
+        // parser.kt:441): `;` inside belongs to THIS bracket, so the
+        // `list_stop` flag from an enclosing right-arg parse must not leak in.
+        let saved = self.list_stop;
+        self.list_stop = false;
+        let res = self.parse_function_call_list_inner(fn_instr);
+        self.list_stop = saved;
+        res
+    }
+
+    fn parse_function_call_list_inner(&mut self, fn_instr: Instr) -> Result<Instr, AplError> {
         let mut elems: Vec<Instr> = Vec::new();
         let mut saw_semicolon = false;
         self.skip_newlines();
@@ -1448,7 +1594,12 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn finish_fn_call(&mut self, fn_instr: Instr, left_args: &mut Vec<Instr>) -> Result<Instr, AplError> {
+    fn finish_fn_call(
+        &mut self,
+        fn_instr: Instr,
+        left_args: &mut Vec<Instr>,
+        lists: &mut Vec<Instr>,
+    ) -> Result<Instr, AplError> {
         // M5: capture whether a NEWLINE immediately follows the function BEFORE
         // `bind_operators_kotlin` (which begins with `skip_newlines()`) can swallow it.
         // In Kap a newline terminates a statement (no operator/axis binds across it),
@@ -1475,7 +1626,7 @@ impl<'a> Parser<'a> {
             // Resume the accumulator with `call` seeded as a left operand.
             left_args.push(call);
             let seeded = std::mem::take(left_args);
-            return self.parse_value_kotlin_with(seeded);
+            return self.parse_value_kotlin_with_lists(seeded, std::mem::take(lists));
         }
         // P1-M10 (parser.kt:451-453 LeftArrow after fn → processModifiedAssigment :405-424):
         // `dest op← rhs` is a modified assignment. The dest is the last left arg (which
@@ -1533,8 +1684,20 @@ impl<'a> Parser<'a> {
                 // (⟦…⟧ precedent: push + resume the accumulator).
                 left_args.push(assign);
                 let seeded = std::mem::take(left_args);
-                return self.parse_value_kotlin_with(seeded);
+                return self.parse_value_kotlin_with_lists(seeded, std::mem::take(lists));
             }
+        }
+        // A `;` after a function starts a new `;`-list element (Kotlin
+        // `parseListInner`, parser.kt:335-364) — but a function-shaped element
+        // is rejected there (`Function expressions can't/cannot be part of a
+        // list`). The harness never asserts error text, so one message covers
+        // both the first-element (`can't`) and later-element (`cannot`)
+        // oracle texts. Must sit AFTER the `⟦` and `←` checks above (neither
+        // peeks as `;`) and BEFORE the right-arg parse, so `+ ; 3 ; 4 ; 5` /
+        // `1 ; + ; 2` (ListTest functionExpressionsInListShouldFail0/1) error
+        // instead of applying `+` to the `;`-list.
+        if matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator)) {
+            return Err(self.err("Function expressions cannot be part of a list"));
         }
         self.skip_newlines();
         // M5: boundary check must respect a nested close token. Inside `(f …)` the
@@ -1564,7 +1727,12 @@ impl<'a> Parser<'a> {
                         || self.known_ops.iter().any(|n| n == name)
             );
         if !has_right {
-
+            // A function with no right argument is function-shaped (Kotlin
+            // FnParseResult) — as a `;`-list element it is rejected
+            // (parseListInner → mkInstr throws `cannot be part of a list`).
+            if !lists.is_empty() {
+                return Err(self.err("Function expressions cannot be part of a list"));
+            }
             // parser.kt:459–466: empty right + empty left ⇒ fn ITSELF (ambivalent fn
             // value); empty right + non-empty left ⇒ makeLeftBindFunctionParseResult
             // (:462) — LeftAssignedFunction (functions.kt:628): binds strand(leftArgs)
@@ -1591,7 +1759,17 @@ impl<'a> Parser<'a> {
         // so it stops at this group's close token instead of running past it.
         // ALWAYS use parse_value_kotlin for the right argument to ensure correct
         // Kotlin-style stranding (e.g. `2 3 ⍴ 6` parses as `(2 3) ⍴ 6`, not `2 (3 ⍴ 6)`).
-        let right = self.parse_value_kotlin()?;
+        // The right-arg parse stops at `;` (Kotlin `processFn` → `parseValue`
+        // never sees `;` — it is in END_EXPR_TOKEN_LIST, parser.kt:1348):
+        // `1+2;3+4` parses as `List[1+2, 3+4]`, not `1 + List[2, 3+4]`.
+        // The caller's list loop then owns the separator (the `lists`
+        // continuation below). Save/restore: nested `⟦…⟧` contents and
+        // `and`/`or` RHS lists manage the flag themselves.
+        let saved = self.list_stop;
+        self.list_stop = true;
+        let right = self.parse_value_kotlin();
+        self.list_stop = saved;
+        let right = right?;
         if left_args.is_empty() {
             // parser.kt:479–484 FnParseResult branch: when the right argument is a
             // FUNCTION, Kotlin forms Chain2(parsedFn, holder.fn) — a 2-train ATOP
@@ -1603,18 +1781,46 @@ impl<'a> Parser<'a> {
             // Value right-args (numbers, arrays, strings, variables) still apply
             // normally via FunctionCall1Arg below.
             if self.nested_right_is_fn_result(&right) {
+                // A derived function (Chain2 atop) is function-shaped — as a
+                // `;`-list element Kotlin rejects it (`cannot be part of a
+                // list`, parseListInner → mkInstr, parser.kt:346).
+                if !lists.is_empty() {
+                    return Err(self.err("Function expressions cannot be part of a list"));
+                }
                 return Ok(Instr::Train {
                     funcs: vec![fn_instr, right],
                     reverse: false,
                     compose: false,
                 });
             }
-            // FunctionCall1Arg (parser.kt:468): monadic, ⍵ = right.
-            return Ok(Instr::Apply {
+            // FunctionCall1Arg (parser.kt:468): monadic, ⍵ = right. A value
+            // application followed by `;` is the FIRST list element
+            // (parseListInner continues after an InstrParseResult):
+            // consume the separator and resume the accumulator with the
+            // call seeded and the element kept.
+            let call = Instr::Apply {
                 fn_expr: Box::new(fn_instr),
                 left: None,
                 right: Box::new(right),
-            });
+            };
+            if lists.is_empty()
+                && !matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator))
+            {
+                return Ok(call);
+            }
+            if matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator)) {
+                self.advance(); // consume `;` owned by this list level
+                self.skip_newlines();
+                if self.is_list_element_fn(&call) {
+                    return Err(self.err("Function expressions can't be part of a list"));
+                }
+                let mut new_lists = std::mem::take(lists);
+                new_lists.push(call);
+                return self.parse_value_kotlin_with_lists(Vec::new(), new_lists);
+            }
+            left_args.push(call);
+            let seeded = std::mem::take(left_args);
+            return self.parse_value_kotlin_with_lists(seeded, std::mem::take(lists));
         }
         // FunctionCall2Arg (parser.kt:474): ⍺ = makeResultList(leftArgs) — ONE operand
         // passes through UNWRAPPED (`3 g 4` binds ⍺=3, NOT ⍺=(3)).
@@ -1626,6 +1832,12 @@ impl<'a> Parser<'a> {
         // `g`. Without this, `(1+10+)` parsed as `Apply{1 + Train[10,+]}` (applying
         // `+` to a function), and `(1+10+) 4` stranded `(⍬ 4)` instead of `15`.
         if self.nested_right_is_fn_result(&right) {
+            // A derived function (Chain2 atop) is function-shaped — as a
+            // `;`-list element Kotlin rejects it (`cannot be part of a
+            // list`, parseListInner → mkInstr, parser.kt:346).
+            if !lists.is_empty() {
+                return Err(self.err("Function expressions cannot be part of a list"));
+            }
             let bound = if left_args.len() == 1 {
                 left_args.pop().unwrap()
             } else {
@@ -1646,20 +1858,62 @@ impl<'a> Parser<'a> {
         }
         if left_args.len() == 1 {
             let left = left_args.pop().unwrap();
-            return Ok(Instr::Apply {
+            // FunctionCall2Arg (parser.kt:474): ⍺ = makeResultList(leftArgs).
+            // An application followed by `;` is the FIRST list element
+            // (parseListInner continues after an InstrParseResult): consume
+            // the separator and resume with the element kept. With pending
+            // `lists` it is one more element instead.
+            let call = Instr::Apply {
                 fn_expr: Box::new(fn_instr),
                 left: Some(Box::new(left)),
                 right: Box::new(right),
-            });
+            };
+            if lists.is_empty()
+                && !matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator))
+            {
+                return Ok(call);
+            }
+            if matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator)) {
+                self.advance(); // consume `;` owned by this list level
+                self.skip_newlines();
+                if self.is_list_element_fn(&call) {
+                    return Err(self.err("Function expressions can't be part of a list"));
+                }
+                let mut new_lists = std::mem::take(lists);
+                new_lists.push(call);
+                return self.parse_value_kotlin_with_lists(Vec::new(), new_lists);
+            }
+            left_args.push(call);
+            let seeded = std::mem::take(left_args);
+            return self.parse_value_kotlin_with_lists(seeded, std::mem::take(lists));
         }
         let strand = Instr::Array {
             elements: std::mem::take(left_args),
         };
-        Ok(Instr::Apply {
+        // Dyadic with several lefts: same list-continuation for the stranded ⍺.
+        let call = Instr::Apply {
             fn_expr: Box::new(fn_instr),
             left: Some(Box::new(strand)),
             right: Box::new(right),
-        })
+        };
+        if lists.is_empty()
+            && !matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator))
+        {
+            return Ok(call);
+        }
+        if matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator)) {
+            self.advance(); // consume `;` owned by this list level
+            self.skip_newlines();
+            if self.is_list_element_fn(&call) {
+                return Err(self.err("Function expressions can't be part of a list"));
+            }
+            let mut new_lists = std::mem::take(lists);
+            new_lists.push(call);
+            return self.parse_value_kotlin_with_lists(Vec::new(), new_lists);
+        }
+        left_args.push(call);
+        let seeded = std::mem::take(left_args);
+        self.parse_value_kotlin_with_lists(seeded, std::mem::take(lists))
     }
 
     /// Whether the nested right-argument parse result `r` corresponds to Kotlin's
@@ -2003,10 +2257,28 @@ impl<'a> Parser<'a> {
                 if matches!(self.peek(), Some(t) if matches!(t.token, Token::LeftArrow)) {
                     self.advance();
                     let value = self.parse_apply()?;
+                    // Legacy flat scan: symbols only (a nested group fails the
+                    // scan above and rewinds). A single bare name binds the
+                    // whole RHS like the Kotlin path's `(a) ← v` group-bind.
+                    if !has_semicolon && names.len() == 1 {
+                        let (name, namespace) = names.into_iter().next().unwrap();
+                        return Ok(Instr::Assign {
+                            target: Box::new(Instr::Symbol { name, namespace }),
+                            value: Box::new(value),
+                        });
+                    }
+                    let elems: Vec<Instr> = names
+                        .into_iter()
+                        .map(|(name, namespace)| Instr::Symbol { name, namespace })
+                        .collect();
+                    let target = if has_semicolon {
+                        Instr::List { elements: elems }
+                    } else {
+                        Instr::Array { elements: elems }
+                    };
                     return Ok(Instr::DestructAssign {
-                        names,
+                        target: Box::new(target),
                         value: Box::new(value),
-                        semicolon: has_semicolon,
                     });
                 }
             }
@@ -5331,6 +5603,47 @@ impl<'a> Parser<'a> {
         Ok(result)
     }
 
+    /// A `;`-list element is a plain VALUE (Kotlin `parseListInner` →
+    /// `mkInstr`: only `InstrParseResult`/`EmptyParseResult` may join a list;
+    /// a function-shaped element errors). `is_function_expr` is the port's
+    /// FnParseResult test — but a bare value `Symbol` (variable) is NOT
+    /// function-shaped here even though it counts as one for trains, so test
+    /// it structurally instead of reusing that predicate.
+    fn is_list_element_fn(&self, e: &Instr) -> bool {
+        match e {
+            Instr::Symbol { name, namespace } => {
+                if namespace.as_deref() == Some("keyword") {
+                    return false;
+                }
+                // A bare value variable is NOT function-shaped here (Kotlin
+                // `parseValue` returns InstrParseResult for variables) even
+                // though `is_function_expr` counts every Symbol as one for
+                // trains — so also require the name to resolve as a function
+                // (primitive, known fn, or a `⇐`-bound name in this input).
+                Self::is_primitive_op(name)
+                    || self.is_known_fn(name, namespace)
+                    || self.known_functions.iter().any(|f| f == name)
+            }
+            // A monadic/dyadic APPLICATION is a value (Kotlin
+            // `parseBooleanExpression` returns InstrParseResult for
+            // FunctionCall1Arg/2Arg — e.g. `1+2;3+4`, `foo (1;2);10`).
+            // Only the derived-function shapes (no data argument yet)
+            // are function-shaped here.
+            Instr::Apply { .. } => false,
+            Instr::Derived { .. }
+            | Instr::OpCall { .. }
+            | Instr::InnerProduct { .. }
+            | Instr::Train { .. }
+            | Instr::ValueOp { .. }
+            | Instr::AxisApplied { .. }
+            | Instr::OverOp { .. }
+            | Instr::MemberDeref { .. }
+            | Instr::Block { .. }
+            | Instr::DynamicRef { .. } => true,
+            _ => false,
+        }
+    }
+
     /// Whether an expression is a *function* suitable for a train operand.
     fn is_function_expr(e: &Instr) -> bool {
         // Keyword-namespaced symbols (`:export`, `:const`, `:local`) are *values*
@@ -5371,6 +5684,22 @@ impl<'a> Parser<'a> {
                 // instead of dying with `__KOTLIN_FALLBACK__`.
                 | Instr::DynamicRef { .. }
         )
+    }
+
+    /// Whether `t` is a valid destructuring-assignment target tree (Kotlin
+    /// `deriveLvalueReader` shape): a `Symbol` leaf, or a non-empty `Array` /
+    /// `List` group whose elements are all valid targets recursively. Anything
+    /// else (`Literal`, `Apply`, …) falls through to a plain `Assign`, which
+    /// raises the assignment-target error at eval — mirroring Kotlin's
+    /// `Unable to assign to expression` for non-lvalue dests.
+    fn is_destruct_target(t: &Instr) -> bool {
+        match t {
+            Instr::Symbol { .. } => true,
+            Instr::Array { elements } | Instr::List { elements } => {
+                !elements.is_empty() && elements.iter().all(Self::is_destruct_target)
+            }
+            _ => false,
+        }
     }
 
     /// Whether a symbol NAME is a function atom for train/atop formation. A bare
