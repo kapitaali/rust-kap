@@ -74,6 +74,10 @@ pub fn parse(
         // Legacy entry: no 2-arg info available; `ValueCall` still works
         // intra-input via `parse_fn_def` regrowth (see known_ops2 seeding).
         known_ops2: Vec::new(),
+        // Legacy entry: seed = the entry set (statement-start view); no
+        // sibling tradfns yet (PLAN §2.8a closed-env restriction).
+        seed_functions: known_functions.iter().map(|s| s.to_string()).collect(),
+        tradfn_names: Vec::new(),
         macros: macros.clone(),
         kotlin_close_stack: Vec::new(),
         // Legacy entry: no engine attached — default namespace, fresh registry
@@ -116,6 +120,16 @@ pub struct Parser<'a> {
     /// binds `y=20`). After a 1-arg operator the same token stays the data
     /// argument (`(+bar 20)` applies the derived op to `20`).
     pub known_ops2: Vec<String>,
+    /// Statement-start snapshot of `known_functions` (Kotlin's root +
+    /// engine-global view at statement entry). PLAN §2.8a: `∇` bodies parse
+    /// in a `closed=true` env (parser.kt:757/771/783) that hides block-local
+    /// `⇐` names — `parse_fn_def` restricts `known_functions` to
+    /// (seed ∪ ∇-defined names ∪ self) while parsing the body.
+    pub seed_functions: Vec<String>,
+    /// Every `∇` name defined during this input's parse (engine-global
+    /// registration, parser.kt:671-676). Sibling `∇`s stay visible inside
+    /// later `∇` bodies; `⇐` names never enter here (block-local).
+    pub tradfn_names: Vec<String>,
     /// Registered `defsyntax` macros (session-global, mirrored from `Engine::macros`).
     /// When a bare symbol matches a trigger name here, the parser expands the macro inline
     /// (Kotlin `syntax.kt`'s `processCustomSyntax`). Keyed by bare trigger name.
@@ -2285,6 +2299,39 @@ impl<'a> Parser<'a> {
         }
         // Register the name as a known function/operator *now* (before the body is parsed)
         // so a recursive reference inside the body parses as an application.
+        // PLAN §2.8a (Kotlin closed=true, parser.kt:757/771/783): the body
+        // sees ONLY (a) the statement-start seed (outer `⇐` names, incl.
+        // later-evaluated root defs like `foo ⇐ …` before `{∇ bar …}`),
+        // (b) sibling `∇` names defined earlier in this input's parse
+        // (engine-global registration, parser.kt:671-676), and (c) itself.
+        // Block-local `⇐`/nested-`∇` names added while parsing an ENCLOSING
+        // body (saved vs seed delta) stay hidden; after the body they merge
+        // back so later siblings see every def. Params (⍺/⍵/named) are
+        // Kotlin bindLocal VALUE bindings — invisible to lookupFunction, so
+        // they stay OUT (oracle `{∇ foo (v) {v¨ v}}` errors; `{∇ foo {⍺¨
+        // ⍵}}` errors). A param in operand position must NOT parse as a fn.
+        let enclosing_added: Vec<String> = self
+            .known_functions
+            .iter()
+            .filter(|n| !self.seed_functions.iter().any(|s| s == *n))
+            .filter(|n| !self.tradfn_names.iter().any(|t| t == *n))
+            .cloned()
+            .collect();
+        let mut restricted: Vec<String> = self.seed_functions.clone();
+        for n in self.tradfn_names.iter() {
+            if !restricted.iter().any(|x| x == n) {
+                restricted.push(n.clone());
+            }
+        }
+        if !restricted.iter().any(|x| x == &name) {
+            restricted.push(name.clone());
+        }
+        self.known_functions = restricted;
+        if !self.tradfn_names.iter().any(|n| n == &name) && !is_op {
+            self.tradfn_names.push(name.clone());
+        }
+        let saved_ops = self.known_ops.clone();
+        let saved_ops2 = self.known_ops2.clone();
         if is_op {
             if !self.known_ops.iter().any(|n| n == &name) {
                 self.known_ops.push(name.clone());
@@ -2295,11 +2342,32 @@ impl<'a> Parser<'a> {
             if op_right.is_some() && !self.known_ops2.iter().any(|n| n == &name) {
                 self.known_ops2.push(name.clone());
             }
-        } else if !self.known_functions.iter().any(|n| n == &name) {
-            self.known_functions.push(name.clone());
         }
         self.skip_newlines();
         let body = self.parse_block_body()?; // expects `{ … }`
+        // Merge every name the body parsing added (nested `⇐` AND nested
+        // `∇`) into the ENCLOSING sets, so later sibling statements still
+        // see every def; likewise any names added by an enclosing body that
+        // this body hid (they were never visible here, but siblings need them).
+        for n in self.known_functions.drain(..) {
+            if !self.seed_functions.iter().any(|x| x == &n) {
+                self.seed_functions.push(n.clone());
+            }
+        }
+        for n in enclosing_added {
+            if !self.seed_functions.iter().any(|x| x == &n) {
+                self.seed_functions.push(n);
+            }
+        }
+        self.known_functions = self.seed_functions.clone();
+        self.known_ops = saved_ops;
+        if is_op && !self.known_ops.iter().any(|n| n == &name) {
+            self.known_ops.push(name.clone());
+        }
+        self.known_ops2 = saved_ops2;
+        if is_op && op_right.is_some() && !self.known_ops2.iter().any(|n| n == &name) {
+            self.known_ops2.push(name.clone());
+        }
         // NOTE: Kap allows a library `∇`/`⇐` definition to *shadow* a primitive name in
         // its own namespace (e.g. `math-kap.kap` redefines `⊥`/`⊤`). We deliberately do
         // NOT reject redefinition of primitive names here; the evaluator resolves a bound

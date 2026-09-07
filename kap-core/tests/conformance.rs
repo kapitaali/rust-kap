@@ -180,10 +180,12 @@ fn run_kotlin_conformance() {
                 Outcome::Mismatch => "MISMATCH",
                 Outcome::Unsupported => "UNSUPPORTED",
             };
+            let dump_path = std::env::var("CONFORM_DUMP_PATH")
+                .unwrap_or_else(|_| "/tmp/conform_dump.txt".to_string());
             let mut f = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("/tmp/conform_dump.txt")
+                .open(&dump_path)
                 .unwrap();
             let _ = writeln!(f, "{}\t{}\t{}", c.file, oc, c.expr);
             let _ = c.expected.as_ref().map(|e| writeln!(f, "\t\tEXP {}", e));

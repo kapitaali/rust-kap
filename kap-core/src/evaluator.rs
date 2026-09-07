@@ -865,9 +865,11 @@ impl Engine {
             let mut p = parser::Parser {
                 toks: &toks,
                 pos,
-                known_functions: fn_names,
+                known_functions: fn_names.clone(),
                 known_ops: op_names,
                 known_ops2: op2_names,
+                seed_functions: fn_names,
+                tradfn_names: Vec::new(),
                 macros,
                 kotlin_close_stack: Vec::new(),
                 current_ns: env.ns_registry.current_ns(),
@@ -947,9 +949,11 @@ impl Engine {
             let mut p = parser::Parser {
                 toks: &toks,
                 pos,
-                known_functions: fn_names,
+                known_functions: fn_names.clone(),
                 known_ops: op_names,
                 known_ops2: op2_names,
+                seed_functions: fn_names,
+                tradfn_names: Vec::new(),
                 macros,
                 kotlin_close_stack: Vec::new(),
                 current_ns: ns_now.clone(),
@@ -1507,6 +1511,10 @@ impl Engine {
                 // a `closed=true` env, parser.kt:757/771/783) and never trip —
                 // oracle `∇ foo (x) {a ← 2}` with const `a` → `0`, and calling it
                 // assigns freely (runtime `setVar` is unchecked). No check here.
+                // PLAN §2.8a: def-time strictness lives in the PARSER
+                // (`parse_fn_def` closed-env restriction): a hidden operand
+                // hits the `Operator without left function` guard while the
+                // body parses, before this hook ever runs. No check here.
                 let v = Rc::new(APLValue::UserFn {
                     params,
                     split,
@@ -18715,6 +18723,33 @@ mod tests {
     fn eval_fails(src: &str) -> bool {
         let e = Engine::new();
         e.eval_string(src).is_err()
+    }
+
+    #[test]
+    fn tradfn_body_closed_env_hides_block_local_fns() {
+        // Oracle (kap-jvm-text, UTF-8): `{abc ⇐ {+[1] ⍵} ⋄ ∇ foo (v) {abc¨ v}
+        // ⋄ foo 4 5 6} 0` → `Error at: 1:33: Operator without left function:
+        // ¨` (ScopeTest axisAssignedFunctionWithDifferentEnv3, kind:fails).
+        // Any error scores OK; returning a value is the MISMATCH.
+        assert!(eval_fails("{abc ⇐ {+[1] ⍵} ⋄ ∇ foo (v) {abc¨ v} ⋄ foo 4 5 6} 0"));
+    }
+
+    #[test]
+    fn tradfn_body_sees_outer_and_sibling_tradfns() {
+        // Guards (oracle ⟨11 12 13⟩ / ⟨1 2 3⟩, kap-jvm-text): must stay
+        // values after the closed-env restriction — an outer `⇐` (root
+        // scope) and a sibling `∇` (engine-global) are visible inside.
+        // NOTE: `abc ⇐ +[1]` is deliberately NOT the outer guard — its
+        // monadic application hits the pre-existing AxisApplied-⇐
+        // delegation gap (`undefined symbol: ⍺`), unrelated to §2.8a.
+        assert_eq!(
+            eval("foo ⇐ {⍵+10} ⋄ {∇ bar (v) {foo¨ v} ⋄ bar 1 2 3} 0"),
+            "(11 12 13)"
+        );
+        assert_eq!(
+            eval("{∇ foo (v) {v} ⋄ ∇ bar (v) {foo¨ v} ⋄ bar 1 2 3} 0"),
+            "(1 2 3)"
+        );
     }
 
     #[test]
