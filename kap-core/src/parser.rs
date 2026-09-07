@@ -1491,28 +1491,29 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 // Explicit axis on a reduce/scan derived fn (`+/[0] x`): Kotlin binds
-                // the bracket to the FUNCTION operand of the reduction
-                // (`+/[0]` ≡ `(+/)[0]`): Derived{ func: AxisApplied{fn,k}, op: / } —
-                // so the evaluator's adverb arm finds adv_explicit_axis on its func.
+                // the bracket to the REDUCE ITSELF (`(+/)[0]` ≡ AxisApplied{
+                // Derived{…,/}, k} — NOT Derived{AxisApplied{+,k},/}), so the
+                // evaluator's top-level AxisApplied arm unwraps to the Derived
+                // and threads the axis as adv_explicit_axis. (A previous port
+                // shape wrapped the INNER fn, misrouting `+/[1]` as an
+                // axis-broadcast fold and erroring on nested args.)
                 let wants_axis = matches!(
                     op_name.as_str(),
                     "/" | "reduce" | "\\" | "scan" | "⌿" | "⍀"
                 ) && matches!(self.peek().map(|t| &t.token), Some(Token::OpenBracket));
-                let func_part = if wants_axis {
+                cur = Instr::Derived {
+                    func: Box::new(cur),
+                    op: Box::new(Instr::Symbol { name: op_name, namespace: ns }),
+                };
+                if wants_axis {
                     self.advance(); // consume [
                     let ax = self.parse_value_kotlin()?;
                     self.expect(Token::CloseBracket, "expected ] after axis specifier")?;
-                    Instr::AxisApplied {
+                    cur = Instr::AxisApplied {
                         func: Box::new(cur),
                         axis: Box::new(ax),
-                    }
-                } else {
-                    cur
-                };
-                cur = Instr::Derived {
-                    func: Box::new(func_part),
-                    op: Box::new(Instr::Symbol { name: op_name, namespace: ns }),
-                };
+                    };
+                }
             }
         }
         Ok(cur)
