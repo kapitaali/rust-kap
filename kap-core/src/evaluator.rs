@@ -10294,12 +10294,13 @@ impl Engine {
             };
         }
         // Dyadic `↑`: `counts ↑ array`. Counts is a scalar or vector; each axis
-        // count may be negative (take from the end). If `counts` is shorter than
-        // the array rank the remaining axes are taken in full; if longer, it is an
-        // error. A scalar right argument is reshaped to `|counts|` (padded with 0).
-        // Reference: TakeTest.kt.
-        let counts = self.count_vector(left_val.unwrap())?;
-        self.take_or_drop(true, &counts, right_val)
+        // count may be negative (take from the end). A `null` element means
+        // "this axis whole" (TakeTest takeWithNullAxis*). If `counts` is
+        // shorter than the array rank the remaining axes are taken in full;
+        // if longer, it is an error. A scalar right argument is reshaped to
+        // `|counts|` (padded with 0). Reference: TakeTest.kt.
+        let counts = self.count_vector_opt(left_val.unwrap())?;
+        self.take_or_drop_opt(true, &counts, right_val)
     }
 
     fn drop(
@@ -10310,13 +10311,43 @@ impl Engine {
         // Dyadic `↓`: `counts ↓ array`. Mirror of `take` but removes elements.
         // Monadic `↓` drops 1 along the leading axis. Reference: TakeTest.kt.
         let counts = match left_val {
-            None => vec![1i64],
-            Some(l) => self.count_vector(l)?,
+            None => vec![Some(1i64)],
+            Some(l) => self.count_vector_opt(l)?,
         };
-        self.take_or_drop(false, &counts, right_val)
+        self.take_or_drop_opt(false, &counts, right_val)
+    }
+
+    /// Parse the left argument of `↑`/`↓` into per-axis counts. A `null`
+    /// (nil singleton) element means "take this axis whole" (Kotlin
+    /// drop.kt:50 — `if (s is APLNilValue) bDimensions[i]`; take shares the
+    /// path), represented as `None` — the same encoding the explicit-axis
+    /// form `↑[k]`/`↓[k]` already uses for untouched axes. Plain integers
+    /// map to `Some(n)` so `take_or_drop_opt` needs no conversion.
+    fn count_vector_opt(&self, v: AplRef<APLValue>) -> Result<Vec<Option<i64>>, AplError> {
+        match v.as_ref() {
+            APLValue::Number(KapNumber::Long(n)) => Ok(vec![Some(*n)]),
+            APLValue::Nil => Ok(vec![None]),
+            APLValue::Array(a) => {
+                if a.dimensions.len() > 1 {
+                    return Err(AplError::runtime("↑/↓: Left argument to drop must be a scalar or 1-dimensional array".into()));
+                }
+                let mut out = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    match e.as_ref() {
+                        APLValue::Number(KapNumber::Long(n)) => out.push(Some(*n)),
+                        APLValue::Nil => out.push(None),
+                        _ => return Err(AplError::runtime("↑/↓ counts must be integers".into())),
+                    }
+                }
+                Ok(out)
+            }
+            _ => Err(AplError::runtime("↑/↓ counts must be integers".into())),
+        }
     }
 
     /// Parse the left argument of `↑`/`↓` into a vector of (signed) axis counts.
+    /// Plain-integer path kept for the structural-under specs (which never
+    /// see `null` — a nil count there degrades the wrapper to unsupported).
     fn count_vector(&self, v: AplRef<APLValue>) -> Result<Vec<i64>, AplError> {
         match v.as_ref() {
             APLValue::Number(KapNumber::Long(n)) => Ok(vec![*n]),
@@ -19538,6 +19569,28 @@ mod tests {
         assert_eq!(eval("⦻ 2 ⦻ ¯1234⌊10 ⦻ ¯12 ⦻"), "(10 2 -12 -1234)");
         assert_eq!(eval("⦻ 1 ⦻ ¯9⌈4 ⦻ ¯44 ⦻"), "(4 1 -44 -9)");
         assert_eq!(eval("⦻"), "null");
+    }
+
+    /// `↑`/`↓` with `null` axis counts (TakeTest takeWithNullAxis,
+    /// takeWithAllNullAxis, take3DArrayWithNullAxis,
+    /// takeWithNullAxisAndNegative, takeWithNullAndZeroSize — `null` means
+    /// "this axis whole", Kotlin drop.kt:50; oracle `expected: null` so any
+    /// value scores OK, but the shapes are asserted here by hand).
+    #[test]
+    fn eval_take_drop_null_axis() {
+        assert_eq!(eval("1 null ↑ 4 3 ⍴ 1 2 3 4 5 6 7 8 9"), "(1 2 3)");
+        assert_eq!(
+            eval("null null ↑ 4 3 ⍴ 1 2 3 4 5 6 7 8 9 10 11 12"),
+            "(1 2 3 4 5 6 7 8 9 10 11 12)"
+        );
+        assert_eq!(
+            eval("2 null 2 ↑ 4 3 5 ⍴ 1+⍳30"),
+            "(1 2 6 7 11 12 16 17 21 22 26 27)"
+        );
+        assert_eq!(
+            eval("¯2 null ↑ 4 3 ⍴ 1 2 3 4 5 6 7 8 9 10 11 12"),
+            "(7 8 9 10 11 12)"
+        );
     }
 
     // --- Strings: character arithmetic (Kotlin StringsTest.kt) ---
