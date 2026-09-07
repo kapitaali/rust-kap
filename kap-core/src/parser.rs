@@ -5077,6 +5077,10 @@ impl<'a> Parser<'a> {
             // parser stops at the literal, so fold the value run ourselves:
             // [Lit(1), Lit(2), +, ≢] ⇒ Train[Array[1,2], +, ≢] — called with y,
             // the left-bind rule gives (1 2)+(≢y). Oracle: `p9⇐1 2+≢ ⋄ p9 5` → ⟨2 3⟩.
+            // SINGLE values left-bind too: `a ⇐ 5 {⍺+⍵+50}` ≡ `(5 {⍺+⍵+50})`
+            // (Kotlin parser.kt:486 Chain2(LeftBind, dfn), oracle `a 4` → 59).
+            // The old `vals.len() > 1` gate dropped single-value runs to the
+            // 2-train arm below, which stranded `5` beside the dfn.
             if matches!(left, Instr::Literal(_)) {
                 let mut vals = vec![left.clone()];
                 while matches!(self.peek().map(|t| &t.token), Some(Token::Literal(LiteralValue::Number(_)))) {
@@ -5088,12 +5092,17 @@ impl<'a> Parser<'a> {
                 );
                 // A user/known fn can also start the chain continuation (e.g.
                 // `'kap:array f UserFn`); widen via is_fn_atom_name below when
-                // the left run has more than one element.
+                // the left run has more than one element. A `{…}` dfn block
+                // is function-shaped too (Kotlin routes `{` through processFn
+                // → FnParseResult) — needed for `a ⇐ 5 {⍺+⍵+50}`.
                 let is_chain_start = matches!(
                     self.peek().map(|t| &t.token),
                     Some(Token::Literal(LiteralValue::Symbol { name, namespace })) if self.is_fn_atom_name(name, namespace)
+                ) || matches!(
+                    self.peek().map(|t| &t.token),
+                    Some(Token::OpenBrace)
                 );
-                if vals.len() > 1 && is_chain_start {
+                if !vals.is_empty() && is_chain_start {
                     // Kotlin `parseExpr` returns at the FIRST FnParseResult, so a
                     // `⇐` RHS / train value+fn chain is built by processFn's
                     // FnParseResult branch: value-strand ⇒ leftArgs, first fn ⇒
@@ -5105,7 +5114,14 @@ impl<'a> Parser<'a> {
                     // dyadically to (v*; arg)), and the remaining functions RIGHT-
                     // FOLD as the outer fn0 (so f1 wraps f2's result). Oracle:
                     // `f⇐1 2+≢ ⋄ f 5` → ⟨2 3⟩ ; `f⇐1 2+×≢ ⋄ f 5` → ⟨2 3⟩.
-                    let arr = Instr::Array { elements: vals };
+                    // Kotlin `makeResultList` (:206/:515): a SINGLE left arg
+                    // passes UNWRAPPED — `a ⇐ 5 {…}` binds ⍺=5, NOT ⍺=(5).
+                    // The port wrapped singles as Array[5], yielding (59).
+                    let arr = if vals.len() == 1 {
+                        vals.pop().unwrap()
+                    } else {
+                        Instr::Array { elements: vals }
+                    };
                     // First function member (the left-bind target).
                     let mut f0 = self.parse_function_atom()?;
                     if let Some(Token::Literal(LiteralValue::Symbol { name: adv, namespace: None })) =

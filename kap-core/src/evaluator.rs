@@ -19636,6 +19636,17 @@ mod tests {
     }
 
     #[test]
+    fn eval_leftbind_value_fn_rhs() {
+        // RED: value-leading `⇐` RHS must left-bind (`a ⇐ 5 {⍺+⍵+50}` ≡
+        // `(5 {⍺+⍵+50})`, Kotlin parser.kt:486 Chain2(LeftBind, dfn)).
+        // Oracle: `a ⇐ 5 {⍺+⍵+50} ⋄ a 4` → 59; `a ⇐ 10+ ⋄ a 1` → 11
+        // (regression guard); `f ⇐ 1 2+≢ ⋄ f 5` → (2 3) (multi-value guard).
+        assert_eq!(eval("a ⇐ 5 {⍺+⍵+50} ⋄ a 4"), "59");
+        assert_eq!(eval("a ⇐ 10+ ⋄ a 1"), "11");
+        assert_eq!(eval("f ⇐ 1 2+≢ ⋄ f 5"), "(2 3)");
+    }
+
+    #[test]
     fn eval_scan() {
         assert_eq!(eval("+\\ 1 2 3 4"), "(1 3 6 10)");
         assert_eq!(eval("×\\ 1 2 3 4"), "(1 2 6 24)");
