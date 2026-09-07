@@ -1068,6 +1068,14 @@ pub enum AplError {
     /// return without a function call" runtime error.
     #[error("return: {0:?}")]
     Return(AplRef<APLValue>, Option<usize>),
+    /// Control-flow throw signal raised by `throw` (Kotlin `ThrowFunction` →
+    /// `TagCatch(ThrowableTag(key, data))`, div_functions.kt:254-267). Carried
+    /// separately from `Runtime` so `catch` (CatchOperator, engine.kt:412) can
+    /// match the KEY against its handler table; anything uncaught renders as
+    /// the oracle text `throw: <data>` at the top level. Monadic `throw x` has
+    /// key `Symbol{error, kap}` (Kotlin `internSymbol("error", coreNamespace)`).
+    #[error("throw: {1:?}")]
+    Thrown(AplRef<APLValue>, AplRef<APLValue>),
 }
 
 impl AplError {

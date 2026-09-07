@@ -878,7 +878,17 @@ impl Engine {
             match p.parse_statements()? {
                 Some(instr) => {
                     pos = p.pos;
-                    last = self.eval_instr(&instr, env)?;
+                    last = match self.eval_instr(&instr, env) {
+                        // An uncaught `throw` surfaces as the oracle text
+                        // `throw: <data>` (the tag key is NOT shown).
+                        Err(AplError::Thrown(_, data)) => {
+                            return Err(AplError::runtime(format!(
+                                "throw: {}",
+                                data.format_value()
+                            )))
+                        }
+                        other => other?,
+                    };
                 }
                 None => break,
             }
@@ -2927,10 +2937,17 @@ impl Engine {
                     };
                     return self.bitwise_apply(&fname, left, right, env);
                 }
-                // `⌸` (Key operator): `keys {fn}⌸ values`. Groups `values` by the
-                // corresponding key; for each unique key (first-occurrence order) the
-                // result row is `(key, fn(group))`. The fn is called dyadically with
-                // ⍺=key, ⍵=the enclosed group vector.
+                // `catch` (Kotlin CatchOperator, engine.kt:412 + div_functions.kt:269):
+                // `tryfn catch handlers` — handlers is rank-1 even or rank-2
+                // with dim[1]==2 (else `catch: Invalid dimensions of catch
+                // argument`). Eval tryfn monadically on ⍬; on a `Thrown(key,
+                // data)`, scan pairs for a key match (symbol total-equality)
+                // and apply the handler dyadically (⍺=data, ⍵=key). Non-lambda
+                // handlers error; unmatched tags rethrow. A bare block tryfn
+                // (`{…}catch h`) is the fn value itself (Y-oracle: U-block
+                // fails only because the port applies `{…}` as data, a
+                // separate gap — the `f ⇐ {…}` name form works).
+                "catch" => return self.catch_apply(func, left, right, env),
                 "⌸" | "key" => return self.key_apply(func, left, right, env),
                 other => Err(AplError::runtime(format!("unknown adverb: {}", other))),
             };
@@ -3817,16 +3834,21 @@ impl Engine {
                 Err(AplError::runtime(rendered))
             }
             // `throw` (monadic + dyadic) — Kotlin `ThrowFunction` (engine.kt:411,
-            // div_functions.kt:254). Monadic `throw x` ⇒ TagCatch(key=error, data=x);
-            // dyadic `a throw b` ⇒ TagCatch(key=a, data=b). The REPL renders any
-            // TagCatch as `<fn-name>: <data.formatted(PLAIN)>`, so both forms surface
-            // as `throw: <data>` (the tag key is NOT shown). Oracle: `throw "x"` →
+            // div_functions.kt:254). Monadic `throw x` ⇒ Thrown(key=`kap:error`,
+            // data=x); dyadic `a throw b` ⇒ Thrown(key=a, data=b). `catch`
+            // matches on the key; anything uncaught renders `throw: <data>`
+            // (the tag key is NOT shown). Oracle: `throw "x"` →
             // `Error at: 1:1: throw: x`; `99 throw "msg"` → `Error at: 1:4: throw: msg`.
             "throw" => {
                 let data = right_val.force(self)?;
-                // PLAIN rendering: strings drop their quotes (matching the oracle).
-                let rendered = format!("throw: {}", data.format_value());
-                Err(AplError::runtime(rendered))
+                let key: AplRef<APLValue> = match left_val.as_ref() {
+                    Some(lv) => lv.force(self)?,
+                    None => Rc::new(APLValue::Symbol {
+                        name: "error".to_string(),
+                        namespace: Some("kap".to_string()),
+                    }),
+                };
+                return Err(AplError::Thrown(key, data));
             }
             // `typeof` (monadic): returns a *symbol* naming the Kap class of the
             // argument (Kotlin `TypeofFunction` → `classManager.nameForClass`).
@@ -5289,6 +5311,14 @@ impl Engine {
         // would drop the operand — e.g. `foo ⇐ ×/ ⋄ foo 1 2 3`, or apply `-` ambivalently
         // for `foo ⇐ -`). `eval_apply` dispatches primitives (and looks up user-fn names)
         // correctly with the supplied left/right.
+        //
+        // NOTE: a bare `Block` body is NOT routed here — it is evaluated as
+        // data in the child scope (Kotlin evaluates the *dfn value*, not an
+        // application of it). Routing `Block` through `eval_apply` rebinds
+        // `⍺`/`⍵` in a grandchild scope and breaks operator-operand closures
+        // (`-bar ⍞f0` died with `x is not a function (got number)`): the
+        // operand wrapper's `Symbol`-chain body resolved `x` against the
+        // grandchild instead of the operator body scope.
         //
         // `→` (branch/return) raises `AplError::Return(v)`; the enclosing function frame
         // catches it here and returns `v`. If it escapes uncaught (top level), `eval_string_in_env`
@@ -14910,6 +14940,106 @@ impl Engine {
         )))))
     }
 
+    /// `catch` (Kotlin CatchOperator, engine.kt:412 + div_functions.kt:269-307).
+    /// `tryfn catch handlers`: handlers must be rank-1 with even length or
+    /// rank-2 with dim[1]==2 (else `catch: Invalid dimensions of catch
+    /// argument`). Runs tryfn monadically on ⍬; on `Thrown(key, data)` scans
+    /// (tag, handler) pairs for a key match and applies that handler
+    /// dyadically (⍺=data, ⍵=key). A non-lambda handler errors
+    /// (`catch: The handler is not callable, this is currently an error.`);
+    /// an unmatched tag rethrows. Non-thrown evaluation returns its value.
+    fn catch_apply(
+        &self,
+        fn_instr: &Instr,
+        left: &Option<Box<Instr>>,
+        right: &Box<Instr>,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        if left.is_some() {
+            return Err(AplError::runtime("catch: catch does not take a left argument".into()));
+        }
+        let handlers_v = self.eval_instr(right, env)?.force(self)?;
+        let (dims, flat): (Vec<usize>, Vec<AplRef<APLValue>>) = match handlers_v.as_ref() {
+            APLValue::Array(a) => (a.dimensions.clone(), a.elements()),
+            // A scalar handler table (single fn/symbol) has no pairs — Kotlin
+            // reads `.dimensions` ([] rank-0) and throws InvalidDimensions.
+            _ => {
+                return Err(AplError::runtime(
+                    "catch: Invalid dimensions of catch argument".into(),
+                ))
+            }
+        };
+        let ok_dims = (dims.len() == 1 && dims[0] % 2 == 0)
+            || (dims.len() == 2 && dims[1] == 2);
+        if !ok_dims {
+            return Err(AplError::runtime(
+                "catch: Invalid dimensions of catch argument".into(),
+            ));
+        }
+        let null = Rc::new(APLValue::Null);
+        let null_instr = Box::new(self.value_to_instr(&null)?);
+        match self.eval_apply(fn_instr, &None, &null_instr, env) {
+            Ok(v) => Ok(v),
+            Err(AplError::Thrown(key, data)) => {
+                let npairs = flat.len() / 2;
+                for i in 0..npairs {
+                    let tag = flat[i * 2].force(self)?;
+                    if Self::symbols_total_equal(key.as_ref(), tag.as_ref()) {
+                        let handler = flat[i * 2 + 1].force(self)?;
+                        let data_instr = Box::new(self.value_to_instr(&data)?);
+                        let key_instr = Box::new(self.value_to_instr(&key)?);
+                        let left_arg = Some(data_instr);
+                        // Match the handler value DIRECTLY (mirror the DynamicRef
+                        // arm at ~2646): routing a fn value through `value_to_instr`
+                        // → `Instr::Value` has no fn-position arm in `eval_apply`
+                        // (`only symbol/lambda functions supported yet`). Args stay
+                        // `Instr::Value`-wrapped (⍺=data, ⍵=key).
+                        match handler.as_ref() {
+                            APLValue::UserFn { params, split, body, env: fenv } => {
+                                return self.apply_user_fn(
+                                    params,
+                                    *split,
+                                    body.as_ref(),
+                                    &left_arg,
+                                    &key_instr,
+                                    env,
+                                    fenv,
+                                    None,
+                                );
+                            }
+                            APLValue::Escape { target } => {
+                                return self.apply_escape(*target, &left_arg, &key_instr, env);
+                            }
+                            APLValue::NonBoundFn { body } => {
+                                return self.apply_nonbound_fn(body, &left_arg, &key_instr, env);
+                            }
+                            _ => {
+                                return Err(AplError::runtime(
+                                    "catch: The handler is not callable, this is currently an error."
+                                        .into(),
+                                ));
+                            }
+                        }
+                    }
+                }
+                Err(AplError::Thrown(key, data))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Symbol total-equality for `catch` tag matching (Kotlin
+    /// `compareEqualsTotalOrdering` on the thrown key vs the table tag).
+    fn symbols_total_equal(x: &APLValue, y: &APLValue) -> bool {
+        match (x, y) {
+            (
+                APLValue::Symbol { name: an, namespace: ans },
+                APLValue::Symbol { name: bn, namespace: bns },
+            ) => an == bn && ans == bns,
+            _ => false,
+        }
+    }
+
     /// `⌸` (Key operator, oracle-native semantics): `keys {fn}⌸ values`.
     /// For each unique key of `keys` in first-occurrence order, call `fn` dyadically
     /// with ⍺=key and ⍵=the enclosed vector of values at matching positions. The
@@ -18750,6 +18880,15 @@ mod tests {
             eval("{∇ foo (v) {v} ⋄ ∇ bar (v) {foo¨ v} ⋄ bar 1 2 3} 0"),
             "(1 2 3)"
         );
+    }
+
+    #[test]
+    fn catch_operator_matrix_and_single_handlers() {
+        // Oracle (kap-jvm-text, UTF-8): `{'foo throw 1}catch 1 2 ⍴ 'foo λ{2+⍺}` → `3`;
+        // `{'foo throw 1}catch 'foo λ{2+⍺}` → `3` (ExceptionsTest simpleException ×2,
+        // currently UNSUPPORTED: `catch` is not a known adverb so the port strands it).
+        assert_eq!(eval("{'foo throw 1}catch 1 2 ⍴ 'foo λ{2+⍺}"), "3");
+        assert_eq!(eval("{'foo throw 1}catch 'foo λ{2+⍺}"), "3");
     }
 
     #[test]

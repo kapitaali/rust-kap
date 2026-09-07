@@ -3603,9 +3603,9 @@ impl<'a> Parser<'a> {
     }
 
     /// Higher-order operators (adverbs) that take a *function* as one operand:
-    /// `/` reduce, `\\` scan, `¨` each.
+    /// `/` reduce, `\\` scan, `¨` each, `catch` (Kotlin CatchOperator, engine.kt:412).
     fn is_adverb(name: &str) -> bool {
-        matches!(name, "/" | "reduce" | "\\" | "scan" | "⌿" | "⍀" | "¨" | "each" | "⍨" | "commute" | "∵" | "bitwise" | "⌸" | "key" | "⌻" | "˝" | "inverse" | "⍰" | "∥")
+        matches!(name, "/" | "reduce" | "\\" | "scan" | "⌿" | "⍀" | "¨" | "each" | "⍨" | "commute" | "∵" | "bitwise" | "⌸" | "key" | "⌻" | "˝" | "inverse" | "⍰" | "∥" | "catch")
     }
 
     /// Pure adverbs that ALWAYS need a left function — invalid as a bare RHS

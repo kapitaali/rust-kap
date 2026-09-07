@@ -171,6 +171,8 @@ fn run(session: &Session, src: &str) {
             }
             AplError::Runtime(msg) => eprintln!("error: {}", msg),
             AplError::Return(..) => eprintln!("→: Call to return without a function call"),
+            // An uncaught `throw` renders the oracle text (the tag key is NOT shown).
+            AplError::Thrown(_, data) => eprintln!("error: throw: {}", data.format_value()),
         },
     }
 }
