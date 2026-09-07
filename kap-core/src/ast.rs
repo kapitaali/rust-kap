@@ -175,6 +175,11 @@ pub enum Instr {
     ValueOp { func: Box<Instr>, op_name: String, operand: Box<Instr> },
     /// An empty array / nil.
     Empty,
+    /// The nil singleton `⦻` (Kotlin `NilToken` → `EmptyValueMarker` →
+    /// `APLNilValue`; renders `null`). Distinct from `Empty` (the `()`
+    /// group / missing-element marker → `APLValue::Null`): `⦻` is an
+    /// arithmetic identity (`⦻ 3 × 4 ⦻` → `(4 3)`).
+    Nil,
     /// Indexed assignment: `array[index] ← value` (Kotlin `processAssignment`
     /// with an `ArrayIndex` dest — `deriveLvalueReader()` on an index produces
     /// an lvalue reader that updates the array at the selected positions).

@@ -269,6 +269,7 @@ fn single_char_token(c: char) -> Option<Token> {
         '◊' => Token::StatementSeparator,
         '←' => Token::LeftArrow,
         '⍬' => Token::APLNullSym,
+        '⦻' => Token::NilToken,
         'λ' => Token::LambdaToken,
         '⍞' => Token::ApplyToken,
         ';' => Token::ListSeparator,

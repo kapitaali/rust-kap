@@ -570,6 +570,14 @@ impl<'a> Parser<'a> {
                     // evaluates to the empty array (`⍴⍬` → `(0)`, `⍬+5` → `⍬`).
                     left_args.push(Instr::Array { elements: vec![] });
                 }
+                Token::NilToken => {
+                    self.advance();
+                    // `⦻` is Kotlin `NilToken` → `EmptyValueMarker` →
+                    // `APLNilValue` (the nil singleton; renders `null`). A
+                    // strand element like any value: `⦻ 3 × 4 ⦻` strands,
+                    // then `×` applies with nil-identity per element.
+                    left_args.push(Instr::Nil);
+                }
                 // P1-M7 (parser.kt:1014–1015 IfToken/WhileToken → processIf/processWhile):
                 // control-flow keyword blocks are plain INSTRUCTIONS. They are
                 // statement-complete (no trailing operands), so RETURN them — the loop
@@ -3767,7 +3775,8 @@ impl<'a> Parser<'a> {
             | Token::Literal(LiteralValue::Str(_))
             | Token::OpenParen
             | Token::OpenBracket
-            | Token::APLNullSym => true,
+            | Token::APLNullSym
+            | Token::NilToken => true,
             // A symbol LITERAL (`'a`, `'ns:a`) is always data (Kotlin parser.kt:1003
             // LiteralSymbol) — strand it like any operand so `'a 'b 'c` is a
             // 3-strand, and the QuotePrefix token itself opens a literal.
@@ -6123,6 +6132,12 @@ impl<'a> Parser<'a> {
                 self.advance();
                 // `⍬` = empty vector (see the strand-site comment above).
                 Ok(Instr::Array { elements: vec![] })
+            }
+            Token::NilToken => {
+                self.advance();
+                // `⦻` = nil singleton (Kotlin `NilToken` →
+                // `EmptyValueMarker` → `APLNilValue`).
+                Ok(Instr::Nil)
             }
             Token::LambdaToken => {
                 // `λ` — Kap's "create function reference" operator (Kotlin

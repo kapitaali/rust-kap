@@ -1125,6 +1125,8 @@ impl Engine {
                 }))
             }
             Instr::Empty => Ok(Rc::new(APLValue::Null)),
+            // `⦻` (Kotlin `NilToken` → `EmptyValueMarker` → `APLNilValue`).
+            Instr::Nil => Ok(Rc::new(APLValue::Nil)),
             // An inner/outer product is a FUNCTION value; a bare occurrence routes
             // through eval_apply so its guard produces the proper arity error.
             Instr::InnerProduct { left_fn, right_fn } => self.eval_apply(
@@ -6647,6 +6649,41 @@ impl Engine {
         })
     }
 
+    /// Nil-operand rule for dyadic `⌊ ⌈` (Kotlin MinAPLFunction/MaxAPLFunction
+    /// `fnOther`, math_functions.kt:1302-1303/1357-1358): nil beside a
+    /// number/char passes it through either side; anything else (incl.
+    /// nil+nil) is an incompatible-arg error.
+    fn minmax_nil(
+        &self,
+        left: &APLValue,
+        right: &APLValue,
+        sym: &str,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let l_nil = matches!(left, APLValue::Nil);
+        let r_nil = matches!(right, APLValue::Nil);
+        let other = if l_nil && !r_nil {
+            right
+        } else if r_nil && !l_nil {
+            left
+        } else {
+            return Err(AplError::runtime(format!(
+                "{}: Incompatible argument types. Left arg: {}, Right arg: {}",
+                sym,
+                left.class_name(),
+                right.class_name()
+            )));
+        };
+        match other {
+            APLValue::Number(_) | APLValue::Char(_) => Ok(Rc::new(other.clone())),
+            _ => Err(AplError::runtime(format!(
+                "{}: Incompatible argument types. Left arg: {}, Right arg: {}",
+                sym,
+                left.class_name(),
+                right.class_name()
+            ))),
+        }
+    }
+
     fn num2_impl(
         &self,
         left_val: Option<AplRef<APLValue>>,
@@ -6667,11 +6704,19 @@ impl Engine {
         // reduce/scan internals; direct dyadic operands are intercepted by the
         // `nil_dyadic` pre-check in the `+ - × ÷` arms). Other functions
         // (`| ⋆ √ ⍟` …) fall through to the arms below and error on Nil,
-        // matching the oracle (`2⋆null` errors).
-        if matches!(sym, "+" | "-" | "×" | "÷")
+        // matching the oracle (`2⋆null` errors). `⌊ ⌈` route here from
+        // `ceil_floor_dyadic` with array operands (per-cell nil identity —
+        // Kotlin Min/MaxAPLFunction fnOther).
+        if (matches!(sym, "+" | "-" | "×" | "÷")
+            || matches!(sym, "⌊" | "⌈"))
             && (matches!(a.as_ref(), APLValue::Nil) || matches!(right_val.as_ref(), APLValue::Nil))
         {
-            if let Some(r) = self.nil_dyadic(a.as_ref(), right_val.as_ref(), sym) {
+            let r = if matches!(sym, "⌊" | "⌈") {
+                Some(self.minmax_nil(a.as_ref(), right_val.as_ref(), sym))
+            } else {
+                self.nil_dyadic(a.as_ref(), right_val.as_ref(), sym)
+            };
+            if let Some(r) = r {
                 return r;
             }
         }
@@ -6817,15 +6862,19 @@ impl Engine {
                 for e in xa.elements() {
                     if let APLValue::Number(x) = e.as_ref() {
                         out.push(Rc::new(APLValue::Number(f(x, y))));
-                    } else if matches!(e.as_ref(), APLValue::Nil)
-                        && matches!(sym, "+" | "-" | "×" | "÷")
-                    {
-                        // Nil strand element under `+ - × ÷`: per-cell nil rule
-                        // (`(1 null 2)+10` → `(11 10 12)`; `-`/`÷` with nil on
-                        // the left errors the whole operation).
-                        if let Some(r) =
+                    } else if matches!(e.as_ref(), APLValue::Nil) {
+                        // Nil strand element: per-cell nil rule for the
+                        // symbol's own family (`+ - × ÷` via `nil_dyadic`,
+                        // `⌊ ⌈` via `minmax_nil` — Kotlin Min/MaxAPLFunction
+                        // fnOther passes numbers/chars through either side).
+                        let r = if matches!(sym, "⌊" | "⌈") {
+                            Some(self.minmax_nil(e.as_ref(), &APLValue::Number(y.clone()), sym))
+                        } else if matches!(sym, "+" | "-" | "×" | "÷") {
                             self.nil_dyadic(e.as_ref(), &APLValue::Number(y.clone()), sym)
-                        {
+                        } else {
+                            None
+                        };
+                        if let Some(r) = r {
                             out.push(r?);
                         }
                     }
@@ -6840,15 +6889,18 @@ impl Engine {
                 for e in xa.elements() {
                     if let APLValue::Number(x) = e.as_ref() {
                         out.push(Rc::new(APLValue::Number(f(y, x))));
-                    } else if matches!(e.as_ref(), APLValue::Nil)
-                        && matches!(sym, "+" | "-" | "×" | "÷")
-                    {
-                        // Nil strand element on the right: `(10 20 30)` with a
-                        // nil cell under `10+…` — nil on the right passes the
-                        // number through for all four (`-`/`÷` included).
-                        if let Some(r) =
+                    } else if matches!(e.as_ref(), APLValue::Nil) {
+                        // Nil strand element on the right: per-cell nil rule
+                        // for the symbol's own family (nil on the right passes
+                        // the number through for `+ - × ÷ ⌊ ⌈`).
+                        let r = if matches!(sym, "⌊" | "⌈") {
+                            Some(self.minmax_nil(&APLValue::Number(y.clone()), e.as_ref(), sym))
+                        } else if matches!(sym, "+" | "-" | "×" | "÷") {
                             self.nil_dyadic(&APLValue::Number(y.clone()), e.as_ref(), sym)
-                        {
+                        } else {
+                            None
+                        };
+                        if let Some(r) = r {
                             out.push(r?);
                         }
                     }
@@ -19472,6 +19524,20 @@ mod tests {
     fn eval_function_in_list_fails() {
         assert!(eval_fails("+ ; 3 ; 4 ; 5"));
         assert!(eval_fails("1 ; + ; 2"));
+    }
+
+    /// The `⦻` nil singleton (NilTest addWithNull/mulWithNull/subtractNull/
+    /// divideNull/minWithNil/maxWithNil — oracle `⟨1 2⟩`/`⟨4 3⟩`/`⟨2 3⟩`/
+    /// `⟨2 3⟩`/`⟨10 2 -12 -1234⟩`/`⟨4 1 -44 -9⟩`; port renders `(…)`).
+    #[test]
+    fn eval_nil_singleton_arithmetic() {
+        assert_eq!(eval("⦻ 2 + 1 ⦻"), "(1 2)");
+        assert_eq!(eval("⦻ 3 × 4 ⦻"), "(4 3)");
+        assert_eq!(eval("2 3 - ⦻"), "(2 3)");
+        assert_eq!(eval("2 3 ÷ ⦻"), "(2 3)");
+        assert_eq!(eval("⦻ 2 ⦻ ¯1234⌊10 ⦻ ¯12 ⦻"), "(10 2 -12 -1234)");
+        assert_eq!(eval("⦻ 1 ⦻ ¯9⌈4 ⦻ ¯44 ⦻"), "(4 1 -44 -9)");
+        assert_eq!(eval("⦻"), "null");
     }
 
     // --- Strings: character arithmetic (Kotlin StringsTest.kt) ---
