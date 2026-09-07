@@ -14361,6 +14361,66 @@ impl Engine {
             return self.reshape(b_shape_val, result);
         }
 
+        // PICK family (`⊇`, Kotlin PickAPLFunctionImpl.evalWithStructuralUnder2Arg,
+        // lookup.kt:222-233): `base ⍢ pick sel b` selects `wa = pick(sel, b)`,
+        // transforms `updated = base(wa)` (a scalar result resizes to the
+        // selection dims), and overlays `updated` back at the SELECTED FLAT
+        // POSITIONS of `b` (NOT a leading window — `replaceForUnder` maps
+        // each index coord to its flat position). A `(2⊇)`-style left-bound
+        // train wrapper carries the selection as its first member.
+        if let Some(sel_instr) = self.under_pick_selector(wrapper, env) {
+            let a = self.eval_instr(right, env)?.force(self)?;
+            let b_dims = Self::value_dims(&a);
+            let sel_val = self.eval_instr(&sel_instr, env)?.force(self)?;
+            // Compute selected flat positions directly (mirrors pick_apl's
+            // coord→flat mapping, including negative-index support).
+            let positions = self.pick_flat_positions(&sel_val, &a)?;
+            let wa_elems: Vec<AplRef<APLValue>> = {
+                let b_flat = self.flat_elements(&a);
+                positions.iter().map(|p| b_flat[*p].clone()).collect()
+            };
+            let wa_dims = Self::value_dims(&sel_val);
+            let wa_v = if wa_dims.is_empty() {
+                // Scalar selection: wa is the scalar itself (Kotlin
+                // PickResultValue unwraps to rank-0; the base sees the scalar,
+                // e.g. `{≢⍴⍵}⍢(1⊇)` feeds scalar 2 → `≢⍴2` = 0).
+                let b_flat = self.flat_elements(&a);
+                b_flat[positions[0]].clone()
+            } else {
+                Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    wa_dims.clone(),
+                    ArrayData::Nested(wa_elems),
+                ))))
+            };
+            let updated = self.eval_apply(base, &None, &Box::new(Instr::Value(wa_v.clone())), env)?;
+            // Kotlin evalWithStructuralUnder2Arg: a SCALAR updated resizes to
+            // the selection dims (`{9}⍢(2 5⊇)` → 9 at both positions); any
+            // other shape must match EXACTLY (Kotlin replaceForUnder:
+            // `{,6}⍢(1⊇)` errors since [1] ≠ selection []).
+            let upd_dims = Self::value_dims(&updated);
+            let upd_flat: Vec<AplRef<APLValue>> = if upd_dims.is_empty() && !wa_dims.is_empty() {
+                let u = updated.clone();
+                let n = wa_dims.iter().product::<usize>().max(1);
+                vec![u; n]
+            } else {
+                if upd_dims != wa_dims {
+                    return Err(AplError::runtime(
+                        "⊇: Updated result does not have the same dimensions as selection".into(),
+                    ));
+                }
+                updated.elements()
+            };
+            if upd_flat.len() != positions.len() {
+                return Err(AplError::runtime(
+                    "under not supported for function".to_string(),
+                ));
+            }
+            let mut out = self.flat_elements(&a);
+            for (slot, v) in positions.iter().zip(upd_flat.iter()) {
+                out[*slot] = v.clone();
+            }
+            return self.build_nested(&out, &b_dims);
+        }
         // FROM-LIST family (`fromList`, Kotlin FromListFunctionImpl
         // div_functions.kt:497): under = toList(base(fromList(a))).
         // The wrapper converts the list arg to an array, base transforms the
@@ -14388,7 +14448,67 @@ impl Engine {
         self.eval_apply(&inv_wrapper, &None, &Box::new(Instr::Value(bwa)), env)
     }
 
-    /// True when `wrapper` is an axis-qualified take/drop (`↑[k]`/`↓[k]`) whose
+    /// Recognise a `⍢` pick wrapper and return its SELECTION instr: either a
+    /// bare `⊇` applied dyadically elsewhere (selection = the under-fn's left
+    /// arg) or a `(sel ⊇)` left-bound train (selection = first member).
+    /// Returns `None` for non-pick wrappers (take/drop/reshape/inverse path).
+    fn under_pick_selector(&self, wrapper: &Instr, _env: &AplRef<Environment>) -> Option<Box<Instr>> {
+        match wrapper {
+            Instr::Symbol { name, namespace: None } if name == "⊇" => None,
+            Instr::Train { funcs, .. } if funcs.len() == 2 => {
+                match (&funcs[0], &funcs[1]) {
+                    (sel, Instr::Symbol { name, namespace: None }) if name == "⊇" => {
+                        Some(Box::new(sel.clone()))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Flat positions in `b` selected by `sel` (mirrors `pick_apl`'s
+    /// coord→flat mapping: scalar coord for rank-1 `b`, vector coord
+    /// otherwise; negative indices wrap via
+    /// `check_and_adjust_selected_index`).
+    fn pick_flat_positions(
+        &self,
+        sel: &AplRef<APLValue>,
+        b: &AplRef<APLValue>,
+    ) -> Result<Vec<usize>, AplError> {
+        let b_dims = Self::value_dims(b);
+        let r = b_dims.len();
+        let mut bstride = vec![1usize; r];
+        if r > 1 {
+            for k in (0..r - 1).rev() {
+                bstride[k] = bstride[k + 1] * b_dims[k + 1];
+            }
+        }
+        let sel_elems: Vec<AplRef<APLValue>> = match sel.as_ref() {
+            APLValue::Array(x) if x.dimensions.len() == 1 => x.elements(),
+            APLValue::Array(x) if x.dimensions.is_empty() => x.elements(),
+            other => vec![Rc::new(other.clone())],
+        };
+        let mut out = Vec::with_capacity(sel_elems.len());
+        for idx in &sel_elems {
+            let idx = idx.force(self)?;
+            let coord_elems: Vec<AplRef<APLValue>> = match idx.as_ref() {
+                APLValue::Array(x) => x.elements(),
+                _ => vec![Rc::new(idx.as_ref().clone())],
+            };
+            if coord_elems.len() != r.max(1) {
+                return Err(AplError::runtime("under not supported for function".into()));
+            }
+            let mut flat = 0usize;
+            for k in 0..r {
+                let i = self.index_to_i64(coord_elems[k].as_ref())?;
+                let adj = check_and_adjust_selected_index(i, b_dims[k])?;
+                flat += adj * bstride[k];
+            }
+            out.push(flat);
+        }
+        Ok(out)
+    }
     /// COUNT comes from the dyadic left arg of the under-fn (Kotlin 2-arg
     /// `evalWithStructuralUnder2Arg`). Only then does `apply_under_op` thread
     /// `left` into the wrapper evaluation.
@@ -19499,6 +19619,20 @@ mod tests {
         assert_eq!(eval("⍴(4 5 ⍴ ⍳20) ,[1] 1000+⍳4"), "(4 6)");
         assert_eq!(eval("⍴(4 5 ⍴ ⍳20) ,[0] 1000+⍳5"), "(5 5)");
         assert_eq!(eval("⍴(1 2) ,[0] 2 2 ⍴ 3 4 5 6"), "(3 2)");
+    }
+
+    #[test]
+    fn eval_pick_under() {
+        // RED: `⊇` (pick) wrapper under `⍢` has no inverse path — it needs the
+        // overlay path (Kotlin PickAPLFunctionImpl.evalWithStructuralUnder2Arg,
+        // lookup.kt:222-233): wa = ⊇(a,b); updated = base(wa) (scalar→resize);
+        // result = wa.replaceForUnder(updated) (same-dims check + overlay).
+        // Oracle (kap-jvm-text): `(1+)⍢(2⊇) 10 20 30 40 50 60` → (10 20 31 40 50 60);
+        // `(1+)⍢(2 5⊇) 10 20 30 40 50 60` → (10 20 31 40 50 61);
+        // `{9}⍢(2 5⊇) 10 20 30 40 50 60` → (10 20 9 40 50 9) (scalar resize).
+        assert_eq!(eval("(1+)⍢(2⊇) 10 20 30 40 50 60"), "(10 20 31 40 50 60)");
+        assert_eq!(eval("(1+)⍢(2 5⊇) 10 20 30 40 50 60"), "(10 20 31 40 50 61)");
+        assert_eq!(eval("{9}⍢(2 5⊇) 10 20 30 40 50 60"), "(10 20 9 40 50 9)");
     }
 
     #[test]
