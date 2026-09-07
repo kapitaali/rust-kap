@@ -1031,9 +1031,14 @@ impl<'a> Parser<'a> {
                         return self.finish_fn_call(fn_instr, &mut left_args, &mut lists);
                     }
                     // Keyword-namespace symbols (`:name`) are ALWAYS values —
-                    // never function-shaped (parser.kt makeVariableRef).
-                    let is_fn = (namespace.is_some() && namespace.as_deref() != Some("keyword"))
-                        || self.is_known_fn(&name, &namespace)
+                    // never function-shaped (parser.kt makeVariableRef). A
+                    // namespaced symbol whose namespace is NOT yet known as a
+                    // function/operator namespace is also a VALUE here: it may
+                    // be an assignment target (`foo:bar ← 1`, Kotlin
+                    // processAssignment → deriveLvalueReader on VariableRef)
+                    // or a strand element. Only a symbol the engine already
+                    // knows as a function takes the processFn path.
+                    let is_fn = self.is_known_fn(&name, &namespace)
                         || self.known_functions.iter().any(|f| f == &name);
                     if !is_fn {
                         // Keyword-namespace symbols (`:name`) are VALUES (parser.kt

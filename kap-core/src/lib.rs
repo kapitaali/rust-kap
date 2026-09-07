@@ -188,7 +188,7 @@ impl APLValue {
             APLValue::Number(n) => n.format(false), // PLAIN style: ASCII minus (matches oracle ⍕)
             APLValue::Char(c) => c.to_string(),
             APLValue::Str(s) => s.clone(),
-            APLValue::Null => "null".to_string(),
+            APLValue::Null => "⍬".to_string(),
             APLValue::Nil => "null".to_string(),
             APLValue::Array(a) => {
                 // Kap vectors render with parentheses, not brackets (brackets are
