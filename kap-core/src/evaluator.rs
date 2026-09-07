@@ -8847,35 +8847,107 @@ impl Engine {
                 b1_laminate_labels.as_ref(),
             );
         }
-        // Plain integer-axis concatenation.
+        // Plain integer-axis concatenation (Kotlin `joinByAxis`, :188-247):
+        // scalar args broadcast to ConstantArrays, then a rank gap of exactly
+        // 1 is closed by inserting a length-1 axis at `axis` in the LOWER-rank
+        // side (`makeResizedArray(dims.insert(axis,1))`, :236-247).
         let na = new_axis as usize;
-        let a_dims = a.dimensions();
-        let b_dims = b.dimensions();
-        if na > a_dims.len() {
+        if new_axis < 0 {
+            return Err(AplError::runtime(",: Axis is negative".into()));
+        }
+        let a_is_scalar = a.rank() == 0;
+        let b_is_scalar = b.rank() == 0;
+        if a_is_scalar && b_is_scalar {
+            return Err(AplError::runtime(",: Both a and b are scalar".into()));
+        }
+        // Empty rank-1 side conforms to the other side (`⍬,[k]B → B`).
+        let a_dims0 = a.dimensions();
+        let b_dims0 = b.dimensions();
+        if a_dims0.len() == 1 && a_dims0[0] == 0 && !b_is_scalar {
+            return Ok(b);
+        }
+        if b_dims0.len() == 1 && b_dims0[0] == 0 && !a_is_scalar {
+            return Ok(a);
+        }
+        // Scalar → ConstantArray over the other side's dims with `axis` set
+        // to 1 (Kotlin :216-233; disclose the scalar first).
+        let a2: AplRef<APLValue> = if a_is_scalar {
+            let bd = b.dimensions();
+            let mut cd = bd.clone();
+            if na < cd.len() {
+                cd[na] = 1;
+            }
+            let count = cd.iter().product::<usize>().max(1);
+            self.make_simple_or_nested(cd, vec![self.disclose_scalar(&a)?; count])?
+        } else {
+            a.clone()
+        };
+        let b2: AplRef<APLValue> = if b_is_scalar {
+            let ad = a2.dimensions();
+            let mut cd = ad.clone();
+            if na < cd.len() {
+                cd[na] = 1;
+            }
+            let count = cd.iter().product::<usize>().max(1);
+            self.make_simple_or_nested(cd, vec![self.disclose_scalar(&b)?; count])?
+        } else {
+            b.clone()
+        };
+        // Close a rank gap of exactly 1 on the lower-rank side.
+        // Kotlin inserts at `axis` (a2) / `axis` (b2) AFTER the scalar
+        // promotion, and `insert` on a short dims vector APPENDS when
+        // axis > len (`(4) ,[1] (4 5)` inserts at 1 → (4 1), matching the
+        // (4 5) side on axis 0's complement). `Vec::insert` panics past
+        // len, so clamp: insert at min(axis, len).
+        let mut a3 = a2;
+        let mut b3 = b2;
+        let ar = a3.rank();
+        let br = b3.rank();
+        if br as isize - ar as isize == 1 {
+            let d = a3.dimensions();
+            a3 = self.reshape_insert_axis(&a3, na.min(d.len()))?;
+        } else if ar as isize - br as isize == 1 {
+            let d = b3.dimensions();
+            b3 = self.reshape_insert_axis(&b3, na.min(d.len()))?;
+        }
+        let a_dims = a3.dimensions();
+        let b_dims = b3.dimensions();
+        if na >= a_dims.len() {
             return Err(AplError::runtime(format!(
                 ",[axis]: Axis {} is not valid. Expected: {}",
                 na,
                 a_dims.len()
             )));
         }
-        let a_labels = match a.as_ref() {
+        let a_labels = match a3.as_ref() {
             APLValue::Array(arr) => arr.labels(),
             _ => None,
         };
-        let b_labels = match b.as_ref() {
+        let b_labels = match b3.as_ref() {
             APLValue::Array(arr) => arr.labels(),
             _ => None,
         };
         self.join_by_axis(
-            &a.elements(),
+            &a3.elements(),
             &a_dims,
-            &b.elements(),
+            &b3.elements(),
             &b_dims,
             na,
             ",",
             a_labels,
             b_labels,
         )
+    }
+
+    /// Disclose a rank-0 value for ConstantArray building (Kotlin
+    /// `a.disclose()`: rank-0 arrays unwrap to their single element).
+    fn disclose_scalar(&self, v: &AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        match v.as_ref() {
+            APLValue::Array(a) if a.dimensions.is_empty() => {
+                Ok(a.elements().into_iter().next().unwrap_or_else(|| Rc::new(APLValue::Null)))
+            }
+            other => Ok(Rc::new(other.clone())),
+        }
     }
 
     /// Insert a length-1 axis at `axis` in `v`, reshaping its elements in place
@@ -19413,6 +19485,20 @@ mod tests {
         assert_eq!(eval("6+/1+⍳5"), "⍬");
         assert_eq!(eval(",/⍬"), "⍬");
         assert_eq!(eval("⍴,/[0] 3 0 3 ⍴ 0"), "(0 3)");
+    }
+
+    #[test]
+    fn eval_catenate_axis_2d() {
+        // RED: integer-axis `,[k]` on rank-mismatched args errors
+        // `ranks of A and B are different` instead of Kotlin's
+        // scalar→ConstantArray + rank±1→insert-axis promotion
+        // (concatenate-array.kt joinByAxis :211-247).
+        // Oracle (kap-jvm-text): `(4 5 ⍴ ⍳20) ,[1] 1000+⍳4` → dims (4 6);
+        // `(4 5 ⍴ ⍳20) ,[0] 1000+⍳5` → dims (5 5); `(1 2) ,[0] 2 2 ⍴ 3 4 5 6`
+        // → dims (3 2).
+        assert_eq!(eval("⍴(4 5 ⍴ ⍳20) ,[1] 1000+⍳4"), "(4 6)");
+        assert_eq!(eval("⍴(4 5 ⍴ ⍳20) ,[0] 1000+⍳5"), "(5 5)");
+        assert_eq!(eval("⍴(1 2) ,[0] 2 2 ⍴ 3 4 5 6"), "(3 2)");
     }
 
     #[test]
