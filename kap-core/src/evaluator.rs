@@ -13461,9 +13461,9 @@ impl Engine {
         // Derived{AxisApplied{+,k},/} reaching adverb_reduce directly is the
         // LEGACY shape — treat it the same way: reduce on the DEFAULT axis,
         // fold steps call plain `+`. Strip the wrapper for the steps.
-        // KEEP the original for the fold steps: `+[k]/` (axis on the SCALAR
-        // fn, not on a Derived) threads the axis as `functionAxis` into each
-        // step (math_functions.kt:505 axis branch → num2_axis). The lane loop
+        // `+[k]/` (axis on the SCALAR fn, not on a Derived) threads the axis
+        // as `functionAxis` into each fold step (math_functions.kt:505
+        // axis branch; reduce.kt fold loop passes it through). The lane loop
         // below rebuilds the AxisApplied step fn from this — EXCEPT the axis
         // is validated against the ENCLOSED rank-1 data first: Kotlin's
         // AxisValAssignedFunctionDirect wraps the reduce fn, whose eval1Arg
@@ -13473,21 +13473,33 @@ impl Engine {
         // Scope: ONLY AxisApplied{scalar-symbol} (functionAxis shape). A
         // Derived inner (`(+/[k])-style`) carries the REDUCE's own axis and
         // must NOT be validated here (it is threaded as adv_explicit_axis).
+        // VALIDATION MUST MIRROR joinByAxis (concatenate-array.kt:188-260),
+        // NOT num2_axis rank-1 rules: for `,` the axis is checked against
+        // the FULL data dims (ensureValidAxis(axis, da)) while scalars
+        // broadcast and rank gaps of 1 close via insert — so `,[1]/` on
+        // rank-1 cells with rank-2/3 contents folds fine. Validating `,`
+        // via num2_axis's "exactly one side rank-1" rule would wrongly
+        // reject it. Hence: `,`-family inner symbols skip this enclosed
+        // check entirely (their per-step axis validation lives in
+        // catenate_axis/join_by_axis).
         let enclosed_rank: usize = {
             let d = self.eval_instr(right, env)?.force(self)?;
             d.dimensions().len()
         };
         if let Instr::AxisApplied { func: inner, axis } = fn_instr {
-            if matches!(inner.as_ref(), Instr::Symbol { .. }) {
-                let av = self.eval_instr(axis, env)?.force(self)?;
-                if let APLValue::Number(n) = av.as_ref() {
-                    if let Ok(k) = n.as_long() {
-                        if k < 0 || (k as usize) >= enclosed_rank.max(1) {
-                            return Err(AplError::runtime(format!(
-                                "Axis {} is not valid. Expected: {}",
-                                k,
-                                enclosed_rank.max(1)
-                            )));
+            if let Instr::Symbol { name, .. } = inner.as_ref() {
+                let is_catenate = matches!(name.as_str(), "," | "⍪");
+                if !is_catenate {
+                    let av = self.eval_instr(axis, env)?.force(self)?;
+                    if let APLValue::Number(n) = av.as_ref() {
+                        if let Ok(k) = n.as_long() {
+                            if k < 0 || (k as usize) >= enclosed_rank.max(1) {
+                                return Err(AplError::runtime(format!(
+                                    "Axis {} is not valid. Expected: {}",
+                                    k,
+                                    enclosed_rank.max(1)
+                                )));
+                            }
                         }
                     }
                 }
