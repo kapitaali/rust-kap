@@ -6446,6 +6446,15 @@ impl<'a> Parser<'a> {
                         let tag = name.clone();
                         self.advance();
                         match tag.as_str() {
+                            "constant" => {
+                                // Kotlin `ConstantSyntaxRule` (syntax.kt:20): a
+                                // literal name that must match verbatim, binding
+                                // NOTHING. Needed by SyntaxTest `constants`,
+                                // `nonMatchedConstants`, the 5 `xif` rows, and
+                                // `defsyntaxRepeat` (via `defsyntaxsub`).
+                                let name = self.expect_keyword_var()?;
+                                rules.push(SyntaxRule::Constant { name });
+                            }
                             "function" | "nfunction" | "exprfunction" | "nexprfunction" => {
                                 let var = self.expect_keyword_var()?;
                                 let rule = match tag.as_str() {
@@ -6558,6 +6567,38 @@ impl<'a> Parser<'a> {
         let mut bindings: Vec<(String, Box<Instr>)> = Vec::new();
         for rule in &m.rules {
             match rule {
+                SyntaxRule::Constant { name } => {
+                    // Kotlin `ConstantSyntaxRule` (syntax.kt:20-31): the next
+                    // token must be a bare `Name` === the declared symbol.
+                    // Binds NOTHING. Mismatch errors with Kotlin's exact text
+                    // (common.kt:175); the harness scores kind:fails either way.
+                    self.skip_newlines();
+                    match self.peek() {
+                        Some(t) => match &t.token {
+                            Token::Literal(LiteralValue::Symbol { name: got, namespace: None }) if got == name => {
+                                self.advance();
+                            }
+                            Token::Literal(LiteralValue::Symbol { name: got, .. }) => {
+                                return Err(self.err(&format!(
+                                    "In custom syntax rule: Expected: {}. Found: {}",
+                                    name, got
+                                )));
+                            }
+                            _ => {
+                                return Err(self.err(&format!(
+                                    "In custom syntax rule: Expected: {}. Found: <non-name>",
+                                    name
+                                )));
+                            }
+                        },
+                        None => {
+                            return Err(self.err(&format!(
+                                "In custom syntax rule: Expected: {}. Found: <end of input>",
+                                name
+                            )));
+                        }
+                    }
+                }
                 SyntaxRule::Function { var } => {
                     self.skip_newlines();
                     if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenBrace)) {
@@ -6586,7 +6627,22 @@ impl<'a> Parser<'a> {
                         Box::new(Instr::NonBoundFn { body: Box::new(body) }),
                     ));
                 }
-                SyntaxRule::ExprFunction { var } | SyntaxRule::NExprFunction { var } => {
+                SyntaxRule::ExprFunction { var } => {
+                    // Kotlin `ExprFunctionSyntaxRule` (syntax.kt:128): parse the
+                    // `(…)` as a FUNCTION definition (new environment), bound as
+                    // a no-arg lambda value — NOT an eagerly-evaluated value
+                    // expression. `⍞a` then applies it (`exprFunction`:
+                    // `foo (2)` → 3; `exprfunctionWithVariableLookup` → 106).
+                    // The inner expr is a VALUE expression (Kotlin parses the
+                    // `(…)` via `parseValueToplevel`, like `:value`).
+                    // THUNK WRAP: the bound lambda's body is wrapped in a
+                    // `Block` so `apply_user_fn` evaluates it via `eval_instr`
+                    // (value position, args ignored) instead of `eval_apply`
+                    // (which would APPLY a bare-Symbol body as a function —
+                    // `f ⇐ bar` delegation — and die with `unknown function: b`
+                    // on `{ b ← 5+⍵ ◊ foo (b) } 100`). Kotlin's
+                    // `EvalLambdaFnx`/`DynamicFunctionImpl` likewise resolves
+                    // the inner VariableRef as a VALUE at apply time.
                     self.skip_newlines();
                     if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenParen)) {
                         return Err(self.err(&format!("expected '(' for :exprfunction rule '{}'", var)));
@@ -6598,7 +6654,31 @@ impl<'a> Parser<'a> {
                         return Err(self.err(&format!("expected ')' after :exprfunction rule '{}'", var)));
                     }
                     self.advance();
-                    bindings.push((var.clone(), Box::new(inner)));
+                    bindings.push((
+                        var.clone(),
+                        Box::new(Instr::Lambda {
+                            params: vec![],
+                            body: Box::new(Instr::Block { body: vec![inner] }),
+                        }),
+                    ));
+                }
+                SyntaxRule::NExprFunction { var } => {
+                    // Kotlin `NExprFunctionSyntaxRule` (syntax.kt:137): same
+                    // shape, no new environment → `NonBoundFn` (caller's
+                    // context, like `:nfunction`). Inner is likewise a VALUE
+                    // expression.
+                    self.skip_newlines();
+                    if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenParen)) {
+                        return Err(self.err(&format!("expected '(' for :nexprfunction rule '{}'", var)));
+                    }
+                    self.advance();
+                    let inner = self.parse_expr()?;
+                    self.skip_newlines();
+                    if !matches!(self.peek(), Some(t) if matches!(t.token, Token::CloseParen)) {
+                        return Err(self.err(&format!("expected ')' after :nexprfunction rule '{}'", var)));
+                    }
+                    self.advance();
+                    bindings.push((var.clone(), Box::new(Instr::NonBoundFn { body: Box::new(inner) })));
                 }
                 SyntaxRule::Value { var } => {
                     self.skip_newlines();
@@ -6679,6 +6759,13 @@ impl<'a> Parser<'a> {
     /// Whether the next token(s) begin a match for the head rule of `inner`.
     fn optional_matches(&self, inner: &[SyntaxRule]) -> bool {
         match inner.first() {
+            Some(SyntaxRule::Constant { name }) => {
+                // A `:constant` head matches iff the next token is that exact
+                // bare name (Kotlin `ConstantSyntaxRule.isValid`). Needed for
+                // `:optional (:constant xelse …)` — without this the 4 `xif`
+                // rows never see the else-branch.
+                matches!(self.peek(), Some(t) if matches!(&t.token, Token::Literal(LiteralValue::Symbol { name: got, namespace: None }) if got == name))
+            }
             Some(SyntaxRule::Function { .. }) | Some(SyntaxRule::NFunction { .. }) => {
                 matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenBrace))
             }
@@ -6705,6 +6792,31 @@ impl<'a> Parser<'a> {
     /// Apply a single optional inner rule, consuming its tokens (bindings are discarded).
     fn apply_optional_rule(&mut self, rule: &SyntaxRule) -> Result<(), AplError> {
         match rule {
+            SyntaxRule::Constant { name } => {
+                // Consume the literal name (the head match was already verified
+                // by `optional_matches`; re-check for the direct-call path).
+                self.skip_newlines();
+                match self.peek() {
+                    Some(t) => match &t.token {
+                        Token::Literal(LiteralValue::Symbol { name: got, namespace: None }) if got == name => {
+                            self.advance();
+                            Ok(())
+                        }
+                        Token::Literal(LiteralValue::Symbol { name: got, .. }) => Err(self.err(&format!(
+                            "In custom syntax rule: Expected: {}. Found: {}",
+                            name, got
+                        ))),
+                        _ => Err(self.err(&format!(
+                            "In custom syntax rule: Expected: {}. Found: <non-name>",
+                            name
+                        ))),
+                    },
+                    None => Err(self.err(&format!(
+                        "In custom syntax rule: Expected: {}. Found: <end of input>",
+                        name
+                    ))),
+                }
+            }
             SyntaxRule::Function { var } | SyntaxRule::NFunction { var } => {
                 self.skip_newlines();
                 if matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenBrace)) {
@@ -6835,6 +6947,37 @@ impl<'a> Parser<'a> {
                             _ => return Err(self.err(&format!("expected string in sub :string '{}'", var))),
                         },
                         None => return Err(self.err(&format!("expected string in sub :string '{}'", var))),
+                    }
+                }
+                SyntaxRule::Constant { name } => {
+                    // `:constant` inside `defsyntaxsub` (e.g. `defsyntaxRepeat`'s
+                    // `bar`: `(:constant ab :value x)`): consume the literal
+                    // name verbatim, binding nothing.
+                    self.skip_newlines();
+                    match self.peek() {
+                        Some(t) => match &t.token {
+                            Token::Literal(LiteralValue::Symbol { name: got, namespace: None }) if got == name => {
+                                self.advance();
+                            }
+                            Token::Literal(LiteralValue::Symbol { name: got, .. }) => {
+                                return Err(self.err(&format!(
+                                    "In custom syntax rule: Expected: {}. Found: {}",
+                                    name, got
+                                )));
+                            }
+                            _ => {
+                                return Err(self.err(&format!(
+                                    "In custom syntax rule: Expected: {}. Found: <non-name>",
+                                    name
+                                )));
+                            }
+                        },
+                        None => {
+                            return Err(self.err(&format!(
+                                "In custom syntax rule: Expected: {}. Found: <end of input>",
+                                name
+                            )));
+                        }
                     }
                 }
                 SyntaxRule::Special { token } => {

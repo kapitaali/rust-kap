@@ -263,13 +263,17 @@ pub enum BooleanOpKind {
 }
 
 /// A single `defsyntax` rule, mirroring Kotlin `syntax.kt`'s `SyntaxRule` subclasses.
-/// Only the rule kinds the stdlib actually uses are modelled:
+/// `:constant` (a literal name that must match verbatim, binding nothing),
 /// `:function`/`:nfunction`/`:nexprfunction` (a `{…}` block parsed as a no-param lambda),
 /// `:value` (a `(…)` parenthesised expression), `:string` (a string literal),
 /// `:special :openBrace|:closeBrace|:newline` (a literal token), `:optional (…)`
 /// (try the inner rules), and `:repeat (name subName)` (repeat a sub-macro while it matches).
 #[derive(Debug, Clone)]
 pub enum SyntaxRule {
+    /// A literal name that must match verbatim (Kotlin `ConstantSyntaxRule`):
+    /// binds NOTHING. Mismatch errors `In custom syntax rule: Expected: <want>.
+    /// Found: <got>` (Kotlin `SyntaxRuleMismatch`, common.kt:175).
+    Constant { name: String },
     /// A `{…}` function block → bound to `var` as a no-param `Instr::Lambda`.
     Function { var: String },
     /// Same shape, but the body becomes an `Instr::NonBoundFn` (Kotlin

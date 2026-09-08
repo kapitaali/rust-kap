@@ -1534,6 +1534,27 @@ impl Engine {
                         continue;
                     }
                     let v = self.eval_instr(instr, env)?;
+                    // An `:exprfunction` argument `(…)` evaluated to a bare
+                    // SYMBOL means the inner expr was a call-site local holding
+                    // a function (`{ b ← λ{…} ◊ foo (b) }`: `(b)` → UserFn, but
+                    // if `b` held a value the Symbol leaks through). Re-resolve
+                    // it in the CALLER env so `⍞a` applies `b`'s UserFn value
+                    // (Kotlin `VariableRef` inside `DynamicFunctionImpl`
+                    // resolves at apply time in the linked call-site frame).
+                    let v = match (instr.as_ref(), v.as_ref()) {
+                        (Instr::Lambda { params, .. }, APLValue::Symbol { name, namespace })
+                            if params.is_empty() =>
+                        {
+                            match env.lookup(name, namespace) {
+                                Some(found) => found,
+                                None => Rc::new(APLValue::Symbol {
+                                    name: name.clone(),
+                                    namespace: namespace.clone(),
+                                }),
+                            }
+                        }
+                        _ => v,
+                    };
                     child.define(var, &None, v);
                 }
                 self.eval_instr(body, &child)
