@@ -14160,9 +14160,86 @@ impl Engine {
         // this reduces to: overlay apply_under_op(base, f0, f1(a))  into  a at f1's region.
         // The outer `f1` selects its region of `a`; the inner `f0` is applied (recursively,
         // via apply_under_op) to `f1(a)` with the SAME base — matching Kotlin's nested
-        // structuralUnder. Only fires for genuine 2-trains where BOTH members are
-        // function-expressions (a value-left-bound take/drop `Train[v, ↑]` is a leaf, not
-        // a compose, and must fall through to the overlay block below).
+        // structuralUnder.
+        //
+        // LEFT-BOUND-OUTER ATOP: when f0 is a bare VALUE (a count, e.g. the `5`
+        // in `(5↑0↓)` = atop(LeftAssign(5,↑), LeftAssign(0,↓))), the train is
+        // NOT function-composition — it is a left-bound take/drop whose count
+        // happens to sit beside another train. Kotlin parses `(5↑0↓)` as
+        // atop(LeftAssign(5,↑), LeftAssign(0,↓)) and LeftAssign.under delegates
+        // to take's 2-arg under with the BOUND count: f0.under(base, f1(a))
+        // where f0 = take-with-count-5. So: eval f1(a), then run the plain
+        // take/drop overlay path with wrapper=f0. This MUST precede the
+        // generic 2-train compose check below (which would misread the value
+        // head as a compose member).
+        if let Instr::Train { funcs, .. } = wrapper {
+            if funcs.len() == 2 {
+                // Gate: ONLY the atop-of-two-leftbinds shape `Train[Train, Train]`
+                // (e.g. `(5↑0↓)` = atop(LeftAssign(5,↑), LeftAssign(0,↓))). A plain
+                // left-bound leaf `Train[Literal/Array, ↑/↓]` (e.g. `(2↑)`) must
+                // fall through to the overlay block below — recursing with
+                // wrapper=Literal(2) dies in eval_apply ("only symbol/lambda
+                // functions supported yet").
+                let f0_is_bound_train = matches!(
+                    &funcs[0],
+                    Instr::Train { funcs: inner, .. } if inner.len() == 2
+                );
+                // The outer member must be a SIMPLE take/drop leaf (its region
+                // comes from under_take_drop_spec). A nested-train f1 falls
+                // through to the generic 2-train path below (shape-model
+                // region), NOT here.
+                let f1_spec = self.under_take_drop_spec(&funcs[1], env)?;
+                if f0_is_bound_train && f1_spec.is_some() {
+                    let f1a = self.eval_apply(&funcs[1], &None, right, env)?;
+                    let inner = self.apply_under_op(
+                        base,
+                        &funcs[0],
+                        &None,
+                        &Box::new(Instr::Value(f1a)),
+                        env,
+                    )?;
+                    // Overlay the transformed f1-region back into the ORIGINAL
+                    // `a` at f1's region (Kotlin Chain2.under: outer under
+                    // overlays innerFn(f1(a)) via f1's replaceForUnder).
+                    // E.g. `(100+)⍢(3↑5↓) ⍳10`: inner=(105 106 107 8 9),
+                    // f1=(5↓) region sel=[5] off=[5] → (0 1 2 3 4 105..107 8 9).
+                    let a = self.eval_instr(right, env)?.force(self)?;
+                    let src_dims = Self::value_dims(&a);
+                    let rank = src_dims.len();
+                    let (is_take1, counts1) = f1_spec.unwrap();
+                    let mut sel_dims = Vec::with_capacity(rank);
+                    let mut offset: Vec<i64> = Vec::with_capacity(rank);
+                    for i in 0..rank {
+                        let n = src_dims[i];
+                        match counts1.get(i).copied() {
+                            None => {
+                                sel_dims.push(n);
+                                offset.push(0);
+                            }
+                            Some(c) if is_take1 => {
+                                let keep = c.unsigned_abs() as usize;
+                                sel_dims.push(keep);
+                                offset.push(if c >= 0 {
+                                    0
+                                } else {
+                                    n as i64 - keep as i64
+                                });
+                            }
+                            Some(c) => {
+                                let d = (c.unsigned_abs() as usize).min(n);
+                                sel_dims.push(n - d);
+                                offset.push(if c >= 0 { d as i64 } else { 0 });
+                            }
+                        }
+                    }
+                    let inner_flat = self.deep_flatten(&inner);
+                    let inner_dims = Self::value_dims(&inner);
+                    let inner_ravel =
+                        self.make_simple_or_nested(inner_dims, inner_flat)?;
+                    return self.overlay_replacement(&a, &sel_dims, &inner_ravel, &offset);
+                }
+            }
+        }
         if let Instr::Train { funcs, .. } = wrapper {
             if funcs.len() == 2
                 && self.is_under_compose_leaf(&funcs[0], env)
@@ -14251,10 +14328,72 @@ impl Engine {
                     }
                     return Ok(r);
                 }
-                // f1 is a structural-under-capable leaf we don't yet specialise (e.g.
-                // axis-qualified take/drop) — fall through to unsupported rather than
-                // silently misbehave.
-                return Err(unsupported());
+                // f1 is a NESTED 2-train of leaves (e.g. `(5↑0↓)`): recurse into the
+                // ATOP rule — inner = f0.under(base, f1(a)) at line 14185
+                // already handled it as a nested train, and the OUTER region
+                // is f1's OWN selected region. A nested take/drop train does
+                // NOT select via under_take_drop_spec (which reads only the
+                // OUTER head `f0`'s count: 5 for `(5↑0↓)`, giving sel=[5]
+                // against inner=[8×14] → rank mismatch → `⍬`). Instead the
+                // outer region is the INTERSECTION of both selections: for
+                // `(5↑0↓)` on 14 chars: take-5 gives [5], drop-0 of THAT gives
+                // [5]. Compute it by applying f1 to a shape-model: eval f1 on
+                // an index vector of a's length, count the result.
+                if let Instr::Train { funcs: inner_f, .. } = f1 {
+                    if inner_f.len() == 2 {
+                        let n_total: usize = src_dims.iter().product();
+                        let model: Vec<AplRef<APLValue>> = (0..n_total as i64)
+                            .map(|i| Rc::new(APLValue::Number(KapNumber::Long(i))))
+                            .collect();
+                        let model_v = self.make_simple_or_nested(vec![n_total], model)?;
+                        let sel_v = self.eval_apply(
+                            f1,
+                            &None,
+                            &Box::new(Instr::Value(model_v)),
+                            env,
+                        )?;
+                        let sel_flat = self.flat_elements(&sel_v);
+                        let sel_len = sel_flat.len();
+                        // Scalar selection (drop-0 of a length-1 take, etc.):
+                        // the region is the single selected cell. Otherwise
+                        // the region is the leading sel_len cells (take/drop
+                        // trains always select a prefix/suffix window; inner
+                        // here came from f1(a) so leading is correct when
+                        // f1's head count is non-negative).
+                        let first = sel_flat.first().and_then(|v| match v.as_ref() {
+                            APLValue::Number(n) => n.as_long().ok(),
+                            _ => None,
+                        });
+                        let (sel_dims, offset) = if sel_len <= 1 {
+                            let off = first.unwrap_or(0).max(0) as i64;
+                            (vec![sel_len.max(1); rank], vec![off; rank])
+                        } else {
+                            let mut sd = vec![0usize; rank];
+                            let mut off = vec![0i64; rank];
+                            sd[0] = sel_len;
+                            off[0] = 0;
+                            for i in 1..rank {
+                                sd[i] = src_dims[i];
+                            }
+                            (sd, off)
+                        };
+                        let inner_flat = self.deep_flatten(&inner);
+                        let inner_dims = Self::value_dims(&inner);
+                        let inner_ravel =
+                            self.make_simple_or_nested(inner_dims, inner_flat)?;
+                        return self.overlay_replacement(&a, &sel_dims, &inner_ravel, &offset);
+                    }
+                }
+                // f1 is a NESTED left-bound train of leaves. The generic
+                // shape-model block below handles any 2-train of
+                // take/drop leaves (e.g. `(5↑0↓)`, `(¯1 a ¯1↓)` with
+                // `a⇐↑`) by evaluating f1 on an index model of `a`.
+                // Fall through to unsupported for anything else
+                // (e.g. axis-qualified take/drop) rather than silently
+                // misbehave.
+                if !matches!(f1, Instr::Train { funcs: inner_f, .. } if inner_f.len() == 2) {
+                    return Err(unsupported());
+                }
             }
         }
         // DYADIC INVERSE-FAMILY under: `a f ⍢ g b` where g ∈ {-, +, ×, ÷}.
@@ -14289,7 +14428,10 @@ impl Engine {
         }
         // v = wrapper(a)
         let wa = self.eval_apply(wrapper, &None, right, env)?;
-        // res' = base(v)
+        // res' = base(v). NOTE: for a base that is `{…}` dfn-shaped this
+        // applies the dfn to the WRAPPER'S RESULT VALUE — the value must be
+        // passed by VALUE (Instr::Value), never re-evaluated as code. `wa`
+        // here is already a forced value; wrap it directly.
         let bwa = self.eval_apply(base, &None, &Box::new(Instr::Value(wa.clone())), env)?;
 
         // OVERLAY family: if the wrapper is a take/drop, splice `bwa` back into the
@@ -14726,6 +14868,46 @@ impl Engine {
                 }
                 None
             }
+            // A 2-train whose members are THEMSELVES resolvable (e.g. the
+            // `(¯1 a ¯1↓)` chain with `a⇐↑`): resolve each side so the
+            // Chain2 under-rule fires on primitives. A member that is a bare
+            // VALUE (the `5` count head) is not itself resolvable — keep it
+            // in place so the result stays a left-bound train.
+            Instr::Train { funcs, reverse, compose } if funcs.len() == 2 => {
+                let r0 = match self.resolve_under_wrapper(&funcs[0], env) {
+                    Some(r) => r,
+                    None => match &funcs[0] {
+                        Instr::Symbol { .. } | Instr::Literal(_) | Instr::Array { .. } => {
+                            funcs[0].clone()
+                        }
+                        _ => return None,
+                    },
+                };
+                let r1 = match self.resolve_under_wrapper(&funcs[1], env) {
+                    Some(r) => r,
+                    None => match &funcs[1] {
+                        Instr::Symbol { .. } | Instr::Literal(_) | Instr::Array { .. } => {
+                            funcs[1].clone()
+                        }
+                        _ => return None,
+                    },
+                };
+                // No member resolved (both kept as-is): nothing to do.
+                if matches!(&r0, Instr::Symbol { .. } | Instr::Literal(_) | Instr::Array { .. })
+                    && matches!(&r1, Instr::Symbol { .. } | Instr::Literal(_) | Instr::Array { .. })
+                {
+                    let same0 = format!("{:?}", r0) == format!("{:?}", funcs[0]);
+                    let same1 = format!("{:?}", r1) == format!("{:?}", funcs[1]);
+                    if same0 && same1 {
+                        return None;
+                    }
+                }
+                Some(Instr::Train {
+                    funcs: vec![r0, r1],
+                    reverse: *reverse,
+                    compose: *compose,
+                })
+            }
             _ => None,
         }
     }
@@ -14774,6 +14956,9 @@ impl Engine {
     /// True when `f` is a structural-under leaf the 2-train COMPOSE block in
     /// `apply_under_op` can specialise via overlay: a bare/axis/left-bound
     /// take/drop, or identity (`⊢`/`⊣`); also a user-fn alias to one (`a⇐↑`).
+    /// A nested 2-train of leaves is itself a leaf (the atop-under rule,
+    /// instr.kt:608): `(5↑0↓)` = atop(take-5, drop-0) — both leaves, so the
+    /// whole composes under-recursively.
     /// Anything else (reshape, generic inverse-capable wrapper) is NOT
     /// intercepted — it falls through to the reshape/inverse paths so we don't
     /// regress cases the inverse machinery already handles.
@@ -14794,8 +14979,30 @@ impl Engine {
                     if name == "↑" || name == "↓")
             }
             Instr::Train { funcs, .. } if funcs.len() == 2 => {
-                matches!(funcs[1], Instr::Symbol { ref name, namespace: None }
+                // Left-bound take/drop `Train[value, ↑/↓]` (e.g. `(5↑)`, `(0↓)`):
+                // the head is a VALUE (count), not a function — accept on the
+                // fn member alone (resolving a user-fn alias like `(¯1 a)`).
+                match &funcs[1] {
+                    Instr::Symbol { name, namespace: None }
+                        if name == "↑" || name == "↓" =>
+                    {
+                        return true;
+                    }
+                    other => match self.resolve_under_leaf_name(other, env).as_deref() {
+                        Some("↑") | Some("↓") => return true,
+                        _ => {}
+                    },
+                }
+                if matches!(funcs[1], Instr::Symbol { ref name, namespace: None }
                     if name == "↑" || name == "↓")
+                {
+                    return true;
+                }
+                // A nested 2-train of leaves is itself a leaf (Kotlin Chain2
+                // under, instr.kt:608): `(5↑0↓)` = atop(take-5, drop-0) —
+                // both leaves, so the whole composes under-recursively.
+                self.is_under_compose_leaf(&funcs[0], env)
+                    && self.is_under_compose_leaf(&funcs[1], env)
             }
             _ => false,
         }
