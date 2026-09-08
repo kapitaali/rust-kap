@@ -3426,16 +3426,34 @@ impl Engine {
                 }, "math:lcm"),
                 None => Err(AplError::runtime("lcm: Function cannot be called with one argument".into())),
             },
-            // numerator/denominator: rational components (Long n → n/1).
-            "math:numerator" => match right_val.as_ref() {
-                APLValue::Number(n) => Ok(Rc::new(APLValue::Number(match n {
-                    KapNumber::Rational(r) => KapNumber::BigInt(r.numer().clone()),
-                    KapNumber::Double(d) if d.fract() == 0.0 && *d >= i64::MIN as f64 && *d <= i64::MAX as f64 =>
-                        KapNumber::Long(*d as i64),
-                    KapNumber::Double(_) => return Err(AplError::runtime("math:numerator: Cannot return numerator from a double".into())),
-                    other => KapNumber::Long(other.as_long().map_err(|e| AplError::runtime(e))?),
-                }))),
-                _ => Err(AplError::runtime("math:numerator requires a number".into())),
+            // numerator/denominator: rational components (Long n → n/1). Kotlin
+            // `MathCombineAPLFunction.combine1Arg` maps element-wise over arrays.
+            "math:numerator" => {
+                let one = |n: &KapNumber| -> Result<KapNumber, AplError> {
+                    Ok(match n {
+                        KapNumber::Rational(r) => KapNumber::BigInt(r.numer().clone()),
+                        KapNumber::Double(d) if d.fract() == 0.0 && *d >= i64::MIN as f64 && *d <= i64::MAX as f64 =>
+                            KapNumber::Long(*d as i64),
+                        KapNumber::Double(_) => return Err(AplError::runtime("math:numerator: Cannot return numerator from a double".into())),
+                        other => KapNumber::Long(other.as_long().map_err(|e| AplError::runtime(e))?),
+                    })
+                };
+                match right_val.as_ref() {
+                    APLValue::Number(n) => Ok(Rc::new(APLValue::Number(one(n)?))),
+                    APLValue::Array(a) => {
+                        let mut out = Vec::with_capacity(a.element_count());
+                        for e in a.elements() {
+                            match e.force(self)?.as_ref() {
+                                APLValue::Number(n) => {
+                                    out.push(Rc::new(APLValue::Number(one(n)?)))
+                                }
+                                _ => return Err(AplError::runtime("math:numerator requires a number".into())),
+                            }
+                        }
+                        self.make_simple_or_nested(a.dimensions.clone(), out)
+                    }
+                    _ => Err(AplError::runtime("math:numerator requires a number".into())),
+                }
             },            "math:denominator" => match right_val.as_ref() {
                 APLValue::Number(n) => Ok(Rc::new(APLValue::Number(match n {
                     KapNumber::Rational(r) => KapNumber::BigInt(r.denom().clone()),
@@ -4948,7 +4966,20 @@ impl Engine {
             b_dims.clear();
             b_dims.extend(Self::value_dims(&b));
         }
-        // Axis compatibility: last axis of A must equal first axis of B (:244–251).
+        // Axis compatibility (outer_join.kt:244-251): scalars AND 1-element
+        // vectors stretch to the shared axis (`scalarOrOneElementVector`).
+        let scalar_or_single = |d: &[usize]| d.is_empty() || (d.len() == 1 && d[0] == 1);
+        if scalar_or_single(&a_dims) && scalar_or_single(&b_dims) {
+            // Both collapse to length-1 shared axis.
+        } else if scalar_or_single(&a_dims) {
+            let n = b_dims.first().copied().unwrap_or(1);
+            a = self.broadcast_along_first_axis(&a, n)?;
+            a_dims = Self::value_dims(&a);
+        } else if scalar_or_single(&b_dims) {
+            let n = a_dims.last().copied().unwrap_or(1);
+            b = self.broadcast_along_first_axis(&b, n)?;
+            b_dims = Self::value_dims(&b);
+        }
         let ak = a_dims.last().copied().unwrap_or(1);
         let bk = b_dims.first().copied().unwrap_or(1);
         if ak != bk && !(a_dims.len() <= 1 && b_dims.len() <= 1) {
@@ -4979,38 +5010,81 @@ impl Engine {
             }
             return Ok(acc.unwrap_or_else(|| Rc::new(APLValue::Null)));
         }
-        // Higher-rank: frame-of-cells. For each index (i…, j…) over A's leading
-        // axes × B's trailing axes, fold fn₁ over the inner axis then reduce fn₀.
+        // Higher-rank: Kotlin `InnerJoinResult` (outer_join.kt:90) — result dims =
+        // A[..-1] ++ B[1..]; cell (i…, j…) folds fn₁ over the shared axis then
+        // fn₀-reduces. Like Kotlin, apply fn₁ to whole axis-VECTORS
+        // (`fn2.eval2Arg(leftArg, rightArg)`), then fn₀-reduce the vector result:
+        // A-slice is contiguous (last axis fastest), B-slice strides by bStep =
+        // multipliers(B)[0] along B's first axis.
+        // NOTE: a broadcast-stretched scalar (e.g. `10 +∙× 3 4 5⍴⍳1000`) arrives
+        // as rank-1 len-k but must fold against B's FIRST axis — address it with
+        // the B-side strided rule.
         let a_frame: Vec<usize> = a_dims[..a_dims.len() - 1].to_vec();
         let b_frame: Vec<usize> = b_dims[1..].to_vec();
-        let a_cells = self.frame_cells(&a, &a_frame)?;
-        let b_cells = self.frame_cells(&b, &b_frame)?;
-        let mut out_rows: Vec<AplRef<APLValue>> = Vec::with_capacity(a_cells.len());
-        for ac in &a_cells {
-            let mut row: Vec<AplRef<APLValue>> = Vec::with_capacity(b_cells.len());
-            for bc in &b_cells {
-                // Fold fn₁ dyadically over the shared inner axis, then fn₀-reduce.
-                let ce = self.flat_elements(ac);
-                let de = self.flat_elements(bc);
-                if ce.len() != de.len() {
-                    return Err(AplError::runtime(format!(
-                        "∙: Dimensions of A and B are incompatible. Dimensions of A: {:?}, Dimensions of B: {:?}. The size of the last axis of A has to be the same as the first axis of B.",
-                        a_dims, b_dims
-                    )));
+        let k: usize = *a_dims.last().unwrap_or(&1);
+        let a_flat = self.flat_elements(&a);
+        let b_flat = self.flat_elements(&b);
+        // Row-major multipliers of A and B.
+        let mults = |d: &[usize]| -> Vec<usize> {
+            let mut m = vec![1usize; d.len()];
+            for i in (0..d.len()).rev() {
+                if i + 1 < d.len() {
+                    m[i] = m[i + 1] * d[i + 1];
                 }
-                let mut acc: Option<AplRef<APLValue>> = None;
-                for i in 0..ce.len() {
-                    let cell = self.apply_fn_instr(right_fn, Some(&ce[i]), &de[i], env)?;
-                    acc = Some(match acc {
-                        None => cell,
-                        Some(prev) => self.apply_fn_instr(lfn, Some(&prev), &cell, env)?,
-                    });
-                }
-                row.push(acc.unwrap_or_else(|| Rc::new(APLValue::Null)));
             }
-            out_rows.push(self.vec_to_value(row)?);
+            m
+        };
+        let a_mult = mults(&a_dims);
+        let b_mult = mults(&b_dims);
+        let b_step: usize = b_mult.first().copied().unwrap_or(1);
+        // Result dims + row-major multipliers for output index decomposition.
+        let mut res_dims: Vec<usize> = a_frame.clone();
+        res_dims.extend(b_frame.iter().copied());
+        let res_mult = mults(&res_dims);
+        let total: usize = res_dims.iter().product::<usize>().max(1);
+        let a_stretched = scalar_or_single(&a_dims) && b_dims.len() > 1;
+        let mut flat: Vec<AplRef<APLValue>> = Vec::with_capacity(total);
+        for p in 0..total {
+            let na = a_frame.len();
+            let mut abase = 0usize;
+            for i in 0..na {
+                let coord = (p / res_mult[i]) % res_dims[i];
+                abase += coord * a_mult[i];
+            }
+            let mut bbase = 0usize;
+            for j in 0..b_frame.len() {
+                let coord = (p / res_mult[na + j]) % res_dims[na + j];
+                bbase += coord * b_mult[j + 1];
+            }
+            // Gather the two axis vectors, apply fn₁ once, then fn₀-reduce.
+            let avec: Vec<AplRef<APLValue>> = (0..k)
+                .map(|t| {
+                    let ai = if a_stretched {
+                        t % a_flat.len().max(1)
+                    } else {
+                        abase + t
+                    };
+                    a_flat[ai].clone()
+                })
+                .collect();
+            let bvec: Vec<AplRef<APLValue>> = (0..k)
+                .map(|t| b_flat[bbase + t * b_step].clone())
+                .collect();
+            let va = self.vec_to_value(avec)?;
+            let vb = self.vec_to_value(bvec)?;
+            let v = self.apply_fn_instr(right_fn, Some(&va), &vb, env)?;
+            // fn₀-reduce the fn₁ result vector (reduce rank-1 along its axis).
+            let ve = self.flat_elements(&v);
+            let mut acc: Option<AplRef<APLValue>> = None;
+            for cell in &ve {
+                acc = Some(match acc {
+                    None => cell.clone(),
+                    Some(prev) => self.apply_fn_instr(lfn, Some(&prev), cell, env)?,
+                });
+            }
+            flat.push(acc.unwrap_or_else(|| Rc::new(APLValue::Null)));
         }
-        self.nest_rows(out_rows, &b_frame)
+        self.build_nested(&flat, &res_dims)
     }
 
     /// Outer product helper: result shape concat(a,b), every (i,j) pair via fn.
@@ -8965,8 +9039,11 @@ impl Engine {
             // `joinByLaminate`: scalar args are first reshaped to the other side's
             // shape (Kotlin :133-151), then a length-1 axis is inserted in both and
             // they are joined along it.
-            let a_is_scalar = matches!(a.as_ref(), APLValue::Number(_) | APLValue::Char(_) | APLValue::Str(_));
-            let b_is_scalar = matches!(b.as_ref(), APLValue::Number(_) | APLValue::Char(_) | APLValue::Str(_));
+            // Kotlin `a.isScalar()` is `rank == 0` (types.kt:344): an ENCLOSED
+            // value like `⊂"foo"` is rank 0 even though it wraps an array, so it
+            // resizes to the other side's shape rather than failing the shape check.
+            let a_is_scalar = a.dimensions().is_empty();
+            let b_is_scalar = b.dimensions().is_empty();
             if a_is_scalar && b_is_scalar {
                 return Err(AplError::runtime(",: Both arguments are scalar".into()));
             }
@@ -12008,38 +12085,46 @@ impl Engine {
                         "⊃: Left argument to pick should be rank 0 or 1".into(),
                     ));
                 }
+                // Kotlin `DiscloseAPLFunctionImpl.eval2Arg` (disclose.kt:474):
+                // each member of A is rank 0 (scalar index into rank-1 curr) or
+                // rank 1 (multi-axis coordinate via `indexFromPosition`, which
+                // supports negative indices). Bounds check is `index in 0..size`.
                 let mut curr = right_val.force(self)?;
                 for idx in a.elements() {
                     let idx = idx.force(self)?;
-                    let (d, index) = match idx.as_ref() {
-                        APLValue::Array(ia) => {
-                            // vector coordinate: its length must equal curr.rank
-                            if ia.element_count() != curr.dimensions().len() {
+                    let index: usize = match idx.as_ref() {
+                        APLValue::Array(ia) if ia.dimensions.len() == 1 => {
+                            let cdims = curr.dimensions();
+                            let r = cdims.len();
+                            let coord = ia.elements();
+                            if coord.len() != r {
                                 return Err(AplError::runtime(
                                     "⊃: Dimensions does not match".into(),
                                 ));
                             }
-                            let coord = ia.dimensions.clone();
-                            let mut flat = 0usize;
-                            let r = curr.dimensions().len();
                             let mut stride = vec![1usize; r];
                             if r > 1 {
                                 for k in (0..r - 1).rev() {
-                                    stride[k] = stride[k + 1] * curr.dimensions()[k + 1];
+                                    stride[k] = stride[k + 1] * cdims[k + 1];
                                 }
                             }
+                            let mut flat = 0usize;
                             for k in 0..r {
-                                let i = self.index_to_i64(ia.elements()[k].as_ref())?;
-                                let n = curr.dimensions()[k] as i64;
-                                let adj = if i < 0 { i.rem_euclid(n) } else { i };
-                                if adj < 0 || adj >= n {
-                                    return Err(AplError::runtime(
-                                        "⊃: Selection index out of bounds".into(),
-                                    ));
-                                }
+                                let i = self.index_to_i64(coord[k].as_ref())?;
+                                let adj = check_and_adjust_selected_index(i, cdims[k])
+                                    .map_err(|_| {
+                                        AplError::runtime(
+                                            "⊃: Selection index out of bounds".into(),
+                                        )
+                                    })?;
                                 flat += (adj as usize) * stride[k];
                             }
-                            (coord, flat)
+                            flat
+                        }
+                        APLValue::Array(_ia) => {
+                            return Err(AplError::runtime(
+                                "⊃: Selection should be rank 0 or 1".into(),
+                            ));
                         }
                         _ => {
                             // scalar coordinate: curr must be rank 1
@@ -12049,18 +12134,16 @@ impl Engine {
                                 ));
                             }
                             let i = self.index_to_i64(idx.as_ref())?;
-                            let n = curr.dimensions()[0] as i64;
-                            let adj = if i < 0 { i.rem_euclid(n) } else { i };
-                            if adj < 0 || adj >= n {
-                                return Err(AplError::runtime(
-                                    "⊃: Selection index out of bounds".into(),
-                                ));
-                            }
-                            (curr.dimensions().clone(), adj as usize)
+                            check_and_adjust_selected_index(i, curr.dimensions()[0]).map_err(
+                                |_| {
+                                    AplError::runtime(
+                                        "⊃: Selection index out of bounds".into(),
+                                    )
+                                },
+                            )?
                         }
                     };
-                    let size: usize = d.iter().product();
-                    if index >= size {
+                    if index >= curr.element_count() {
                         return Err(AplError::runtime(
                             "⊃: Selection index out of bounds".into(),
                         ));
@@ -13618,13 +13701,16 @@ impl Engine {
         let data = self.eval_instr(right, env)?.force(self)?;
         let dims = data.dimensions();
         let rank = dims.len();
+        // Kotlin `ScanFunctionImpl.eval1Arg` (reduce.kt:414): rank-0 returns `a`
+        // itself; empty-axis scan preserves dims (ScanResult1Arg keeps
+        // `a.dimensions`), so both cases return the data unchanged.
         if rank == 0 {
-            return Err(AplError::runtime("scan: cannot scan a scalar".into()));
+            return Ok(data);
         }
         let axis = explicit_axis.unwrap_or(if last_axis { rank - 1 } else { 0 });
         let axis_len = dims[axis];
         if axis_len == 0 {
-            return Err(AplError::runtime("scan: cannot scan an empty axis".into()));
+            return Ok(data);
         }
         // Row-major strides for the full shape.
         let mut strides = vec![1usize; rank];
@@ -15126,6 +15212,20 @@ impl Engine {
                 ))))
             };
             let updated = self.eval_apply(base, &None, &Box::new(Instr::Value(wa_v.clone())), env)?;
+            // Empty selection: Kotlin builds `updated = base(empty)` but then
+            // `replaceForUnder` overlays zero positions — the RESULT keeps `a`'s
+            // shape with `updated`'s CONTENT type. `⍬ {1}⍢⊇ 2 3 4 → (2 3 4)`
+            // (scalar 1 broadcast over 0 slots = empty); `⍬ {10 11}⍢⊇ 2 3 4`
+            // ERRORS (`Updated: [2] vs selection: [0]`, InvalidDimensions).
+            if positions.is_empty() {
+                let upd_dims = Self::value_dims(&updated);
+                if !upd_dims.is_empty() && upd_dims != vec![0] {
+                    return Err(AplError::runtime(
+                        "⊇: Updated result does not have the same dimensions as selection".into(),
+                    ));
+                }
+                return Ok(a);
+            }
             // Kotlin evalWithStructuralUnder2Arg: a SCALAR updated resizes to
             // the selection dims (`{9}⍢(2 5⊇)` → 9 at both positions); any
             // other shape must match EXACTLY (Kotlin replaceForUnder:
@@ -15168,6 +15268,31 @@ impl Engine {
             }
         }
 
+        // RAVEL/CATENATE under (`,` = ravel, Kotlin
+        // `ConcatenateAPLFunctionLastAxisImpl.evalWithStructuralUnder1Arg`,
+        // concatenate-array.kt:606): wa = ravel(a); updated = base(wa) with
+        // EXACT same dims required; result = reshape(a.dims, updated).
+        // E.g. `{100,↓⍵}⍢, 2 3⍴10+⍳6`: wa=(10..15), updated=(100 11..15),
+        // reshape to 2 3 → ((100 11 12)(13 14 15)). Must precede the generic
+        // inverse path (`,` has no inverse).
+        if let Instr::Symbol { name, namespace: None } = wrapper {
+            if name == "," {
+                let a = self.eval_instr(right, env)?.force(self)?;
+                let wa = self.eval_apply(wrapper, &None, right, env)?;
+                let bwa = self.eval_apply(base, &None, &Box::new(Instr::Value(wa.clone())), env)?;
+                let wa_dims = Self::value_dims(&wa);
+                let upd_dims = Self::value_dims(&bwa);
+                if wa_dims != upd_dims {
+                    return Err(AplError::runtime(format!(
+                        "Result does not have the same dimensions as input. Expected: {:?}, got: {:?}",
+                        wa_dims, upd_dims
+                    )));
+                }
+                let a_dims = Self::value_dims(&a);
+                let flat = self.flat_elements(&bwa);
+                return self.build_nested(&flat, &a_dims);
+            }
+        }
         // MODULUS family (`|`, Kotlin ModAPLFunctionImpl.
         // evalWithStructuralUnder1Arg, math_functions.kt:1105): NOT an
         // inverse — `|x` is not invertible (sign lost). Rule: mod =
@@ -17029,36 +17154,88 @@ impl Engine {
         true
     }
 
-    /// Prime factorisation, monadic only (prime.kt FactorAPLFunctionImpl): non-integers
-    /// error "Only integers can be factorised", negatives "Argument must be positive".
+    /// Prime factorisation, monadic only (prime.kt FactorAPLFunctionImpl via
+    /// `MathCombineAPLFunction.combine1Arg` + `singleArgNumericRelationOperation`):
+    /// element-wise over arrays, Long/BigInt/integer-Rational accepted, doubles and
+    /// complexes error "Only integers can be factorised", negatives "Argument must
+    /// be positive". BigInt factors reduce to Long when in range
+    /// (`makeAPLNumberWithReduction`).
     fn math_factor(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
-        let one = |v: i64| -> Result<Vec<i64>, AplError> {
-            if v < 0 {
+        let one = |n: &KapNumber| -> Result<Vec<KapNumber>, AplError> {
+            let big = match n {
+                KapNumber::Long(v) => num_bigint::BigInt::from(*v),
+                KapNumber::BigInt(v) => v.clone(),
+                KapNumber::Rational(r) if r.denom() == &num_bigint::BigInt::from(1) => {
+                    r.numer().clone()
+                }
+                _ => {
+                    return Err(AplError::runtime(
+                        "Only integers can be factorised".into(),
+                    ))
+                }
+            };
+            if big < num_bigint::BigInt::from(0) {
                 return Err(AplError::runtime("Argument must be positive".into()));
             }
-            let mut n = v;
-            let mut out = Vec::new();
-            let mut d = 2u64;
-            while (d as i64) * (d as i64) <= n {
-                while n % (d as i64) == 0 {
-                    out.push(d as i64);
-                    n /= d as i64;
+            // Trial division on BigInt (mpmaths `factorBigint` equivalent).
+            // `defaultFactorLong` (factorisation.kt): 0 → empty, n ≤ 3 → [n]
+            // itself (1 → [1], NOT empty). BigInt path assumed identical.
+            let mut rem = big;
+            let mut out: Vec<KapNumber> = Vec::new();
+            let mut push = |f: num_bigint::BigInt| {
+                out.push(crate::number::bigint_to_kap(&f));
+            };
+            // `defaultFactorLong`: 0 → empty, but n ≤ 3 (incl. 1) → [n] itself.
+            if rem == num_bigint::BigInt::from(0) {
+                return Ok(out);
+            }
+            if rem <= num_bigint::BigInt::from(3) {
+                let one = rem.clone();
+                push(one);
+                return Ok(out);
+            }
+            let zero = num_bigint::BigInt::from(0);
+            let mut d = num_bigint::BigInt::from(2);
+            while &d * &d <= rem {
+                while (&rem % &d) == zero {
+                    push(d.clone());
+                    rem = rem / &d;
                 }
                 d += 1;
             }
-            if n > 1 {
-                out.push(n);
+            if rem > num_bigint::BigInt::from(1) {
+                push(rem);
             }
             Ok(out)
         };
+        let one_vec = |n: &KapNumber| -> Result<AplRef<APLValue>, AplError> {
+            let fs = one(n)?;
+            self.make_simple_or_nested(
+                vec![fs.len()],
+                fs.into_iter()
+                    .map(|f| Rc::new(APLValue::Number(f)))
+                    .collect(),
+            )
+        };
         match right_val.as_ref() {
-            APLValue::Number(KapNumber::Long(v)) => {
-                let fs = one(*v)?;
-                self.make_long_vector(fs)
+            APLValue::Number(n) => one_vec(n),
+            APLValue::Array(a) => {
+                let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    match e.force(self)?.as_ref() {
+                        APLValue::Number(n) => out.push(one_vec(n)?),
+                        _ => {
+                            return Err(AplError::runtime(
+                                "Only integers can be factorised".into(),
+                            ))
+                        }
+                    }
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    a.dimensions.clone(),
+                    ArrayData::Nested(out),
+                )))))
             }
-            APLValue::Array(a) => Err(AplError::runtime(
-                "math:factor requires a scalar integer".into(),
-            )),
             _ => Err(AplError::runtime("Only integers can be factorised".into())),
         }
     }
@@ -18448,10 +18625,51 @@ impl Engine {
         let l_dims = l.dimensions();
         let r_dims = r.dimensions();
         if l_dims.len() > 1 || r_dims.len() > 1 {
+            // Kotlin `GenericIntersectionUnionFunctionImpl.eval2Arg`
+            // (unique.kt:7-56): collapse, then if B is null-dims ([0], i.e. ⍬)
+            // return A unchanged; if A rank > 1 and B rank 0, disclose B to one
+            // compound cell (checked against A's inner dims) tiled as rows.
+            if r_dims == vec![0] {
+                return Ok(l.clone());
+            }
             // Split each arg into major cells: leading dims form the frame, the
             // trailing (rank-1) dims form each cell's shape.
             let (l_frame, l_cell_dims, l_elems) = self.split_major_cells(&l)?;
-            let (_r_frame, r_cell_dims, r_elems) = self.split_major_cells(&r)?;
+            let (r_cell_dims, r_elems): (Vec<usize>, Vec<AplRef<APLValue>>) =
+                match r.as_ref() {
+                    APLValue::Array(a) if a.dimensions.is_empty() => {
+                        let content = a
+                            .elements()
+                            .into_iter()
+                            .next()
+                            .unwrap_or_else(|| Rc::new(APLValue::Null));
+                        let cd = content.dimensions();
+                        if cd != l_cell_dims {
+                            return Err(AplError::runtime(format!(
+                                "Right argument is enclosed, the inner element have invalid dimensions. Got: {:?}, expected: {:?}",
+                                cd, l_cell_dims
+                            )));
+                        }
+                        (cd, vec![content])
+                    }
+                    _ => {
+                        let (_r_frame, rcd, re) = self.split_major_cells(&r)?;
+                        (rcd, re)
+                    }
+                };
+            // Dims describing r_elems' row layout: rank-0-B disclosed content is
+            // a single row of shape `r_cell_dims`; otherwise B's own dims.
+            let r_dims_for_rows: Vec<usize> = {
+                let mut d = vec![r_elems.len().max(1)];
+                d.extend(r_cell_dims.iter().copied());
+                // If B is genuinely rank>1 the elems are its full ravel: use its
+                // own dims so ragged-vs-flat detection works.
+                if r_dims.len() > 1 {
+                    r_dims.clone()
+                } else {
+                    d
+                }
+            };
             // Kotlin unique.kt:20-40 — the leading axis (frame) may differ, but
             // every major cell must have the SAME trailing shape on both sides.
             // Otherwise throw the exact dimensions error (∩ uses the same text).
@@ -18461,27 +18679,29 @@ impl Engine {
                     l_dims, r_dims
                 )));
             }
-            // Cells are equal only when their shapes AND contents match.
-            let l_cell_size: usize = l_cell_dims.iter().product::<usize>().max(1);
-            let r_cell_size: usize = r_cell_dims.iter().product::<usize>().max(1);
-            let l_cells: Vec<Vec<AplRef<APLValue>>> = l_elems.chunks(l_cell_size).map(|c| c.to_vec()).collect();
-            let r_cells: Vec<Vec<AplRef<APLValue>>> = r_elems.chunks(r_cell_size).map(|c| c.to_vec()).collect();
+            // Cells are ROWS: like Kotlin's `AxisMultiDimensionEnclosedValue`
+            // path, each axis-0 slice is one cell (ragged storage keeps one
+            // element per row — `⍳3 3` has 3 elems for 3 rows, NOT 9 flats).
+            // `setop_rows` handles both ragged and flat storage.
+            let l_cells: Vec<AplRef<APLValue>> = Self::setop_rows_from_elems(&l_elems, &l_dims);
+            let r_cells: Vec<AplRef<APLValue>> = Self::setop_rows_from_elems(&r_elems, &r_dims_for_rows);
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             let mut out: Vec<AplRef<APLValue>> = Vec::new();
             for cell in &l_cells {
-                let key = self.cell_key(cell);
+                let key = Self::setop_key(cell.as_ref());
                 seen.insert(key);
-                out.push(self.make_cell(l_cell_dims.clone(), cell)?);
+                out.push(cell.clone());
             }
             for cell in &r_cells {
-                let key = self.cell_key(cell);
+                let key = Self::setop_key(cell.as_ref());
                 if seen.insert(key) {
-                    out.push(self.make_cell(l_cell_dims.clone(), cell)?);
+                    out.push(cell.clone());
                 }
             }
-            // Re-disclose: frame dims × number of result cells.
-            let mut dims = l_frame.clone();
-            dims.push(out.len());
+            // Re-disclose (`DisclosedArrayValue`): result dims = [nCells] +
+            // inner (trailing) dims of A.
+            let mut dims = vec![out.len()];
+            dims.extend(l_cell_dims.iter().copied());
             return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
                 dims,
                 ArrayData::Nested(out),
@@ -18506,6 +18726,24 @@ impl Engine {
             vec![out.len()],
             ArrayData::Nested(out),
         )))))
+    }
+
+    /// Row-cells from an element vec + dims: ragged storage (one elem per row)
+    /// returns the elems as-is; flat storage slices by inner-product strides.
+    /// Used by the `∪` major-cell path (Kotlin `AxisMultiDimensionEnclosedValue`
+    /// + `DisclosedArrayValue`, unique.kt:40-50).
+    fn setop_rows_from_elems(elems: &[AplRef<APLValue>], dims: &[usize]) -> Vec<AplRef<APLValue>> {
+        let inner = if dims.is_empty() { vec![] } else { dims[1..].to_vec() };
+        if elems.len() == dims.first().copied().unwrap_or(0) {
+            return elems.to_vec();
+        }
+        Self::setop_rows(
+            &APLValue::Array(std::rc::Rc::new(KapArray::new(
+                dims.to_vec(),
+                ArrayData::Nested(elems.to_vec()),
+            ))),
+            dims,
+        )
     }
 
     /// Split a value into its major cells: returns (frame_dims, cell_dims, flat_elems).
@@ -18620,11 +18858,13 @@ impl Engine {
         // all but the first axis must match; enclosing the trailing axes turns
         // rows into cells, the result discloses back to rows.
         let inner_a = l_dims[1..].to_vec();
-        // Null/rank≤1-empty right: empty `[0] + inner` result (Kotlin
-        // `emptyRightArgument`). Higher-rank empties yield empty naturally
-        // (no B rows to match).
-        let b_is_empty = r.is_null()
-            || matches!(r.as_ref(), APLValue::Array(a) if a.dimensions.len() <= 1 && a.element_count() == 0);
+        // Null-dims ([0], i.e. ⍬) right: empty `[0] + inner` result (Kotlin
+        // `IntersectionAPLFunctionImpl.emptyRightArgument`, unique.kt:167-173).
+        // A genuine Null (⍬ literal is Null, not [0]-dims) is caught by the
+        // `is_null` early return above and also yields ⍬ — matching oracle
+        // `(⍳1 3) ∩ ⊂… → empty` vs `… ∩ ⍬ → ⍬`-family behaviour. Higher-rank
+        // empties yield empty naturally (no B rows to match).
+        let b_is_empty = matches!(r.as_ref(), APLValue::Array(a) if a.dimensions == vec![0]);
         if b_is_empty {
             return Ok(Self::disclose_cells(Vec::new(), &inner_a));
         }
@@ -18664,6 +18904,9 @@ impl Engine {
     }
 
     /// Row-cells of a rank>1 array: each axis-0 slice as an `inner`-dims array.
+    /// `elems` may be shorter than the full frame (ragged storage: each row is
+    /// one element, e.g. `⍳` rows or enclosed rows) — in that case each element
+    /// IS the cell. Otherwise slice flat storage by `inner`-product strides.
     fn setop_rows(v: &APLValue, dims: &[usize]) -> Vec<AplRef<APLValue>> {
         let elems: Vec<AplRef<APLValue>> = match v {
             APLValue::Array(a) => a.elements(),
@@ -18672,11 +18915,15 @@ impl Engine {
         let inner = dims[1..].to_vec();
         let stride: usize = inner.iter().product::<usize>().max(1);
         let n = dims[0];
+        if elems.len() == n {
+            return elems;
+        }
         (0..n)
             .map(|i| {
+                let end = ((i + 1) * stride).min(elems.len());
                 Rc::new(APLValue::Array(Rc::new(KapArray::new(
                     inner.clone(),
-                    ArrayData::Nested(elems[i * stride..(i + 1) * stride].to_vec()),
+                    ArrayData::Nested(elems[i * stride..end].to_vec()),
                 )))) as AplRef<APLValue>
             })
             .collect()

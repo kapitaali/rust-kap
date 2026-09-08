@@ -862,7 +862,7 @@ fn curated_kap_parity() {
         // engine.kt:489). `∘∙f` => outer product (NullFunction sentinel); `f1∙f2` =>
         // inner join (normalize/error/reduce ladder, outer_join.kt:176-266).
         ("1 2 3 +∙× 1 2 3", "14"),
-        ("(2 2⍴1 2 3 4) +∙× (2 2⍴1 2 3 4)", "((5 11) (11 25))"),
+        ("(2 2⍴1 2 3 4) +∙× (2 2⍴1 2 3 4)", "((7 10) (15 22))"),
         ("5 +∙× 1 2 3", "30"),
         ("1 2 3 +∙× 3 4 5", "26"),
         ("f ⇐ ∘∙× ⋄ (1 2 3) f (3 4)", "((3 4) (6 8) (9 12))"),

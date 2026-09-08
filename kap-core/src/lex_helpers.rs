@@ -146,10 +146,19 @@ pub fn lex_number(chars: &[char], i: usize) -> Result<(KapNumber, usize), String
     // gather the numeric run: digits, ¯, ., e/E, r/R, j/J, x/b prefix, sign in exponent
     let mut j = i;
     let start = i;
-    // hex / binary
-    if chars[i] == '0' && i + 1 < chars.len() && (chars[i + 1] == 'x' || chars[i + 1] == 'b') {
-        let radix = if chars[i + 1] == 'x' { 16 } else { 2 };
-        j = i + 2;
+    // hex / binary, with optional leading ¯ (Kotlin `^(¯?)0x…$` / `^(¯?)0b…$`).
+    let (neg, hstart) = if chars[i] == '¯'
+        && i + 3 < chars.len() + 1
+        && chars.get(i + 1) == Some(&'0')
+        && matches!(chars.get(i + 2), Some('x') | Some('b'))
+    {
+        (true, i + 1)
+    } else {
+        (false, i)
+    };
+    if chars[hstart] == '0' && hstart + 1 < chars.len() && (chars[hstart + 1] == 'x' || chars[hstart + 1] == 'b') {
+        let radix = if chars[hstart + 1] == 'x' { 16 } else { 2 };
+        j = hstart + 2;
         let mut digits = String::new();
         while j < chars.len() && (chars[j].is_ascii_alphanumeric()) {
             digits.push(chars[j]);
@@ -157,6 +166,7 @@ pub fn lex_number(chars: &[char], i: usize) -> Result<(KapNumber, usize), String
         }
         let v = BigInt::parse_bytes(digits.as_bytes(), radix)
             .ok_or_else(|| "invalid integer literal".to_string())?;
+        let v = if neg { -v } else { v };
         // negative? handled by leading ¯ already consumed? Here `0x..` is non-negative.
         // Normalise to `Long` when it fits, exactly as the DECIMAL path below does
         // (see the tail of `parse_kap_number`). Without this, `0x20` stayed a
@@ -211,6 +221,27 @@ pub fn lex_number(chars: &[char], i: usize) -> Result<(KapNumber, usize), String
     parse_kap_number(&buf).map(|n| (n, j))
 }
 
+/// Exact decimal string (e.g. `2.5`, `¯3.25`, `10`) → BigRational.
+/// Kotlin `Rational.make` equivalent for the trailing-r decimal token form.
+fn decimal_str_to_rational(s: &str) -> Result<BigRational, String> {
+    let s = s.trim();
+    let neg = s.starts_with('-');
+    let digits = if neg { &s[1..] } else { s };
+    let dot = digits.find('.').unwrap_or(digits.len());
+    let frac_len = digits.len() - dot - if dot < digits.len() { 1 } else { 0 };
+    let mant_str: String = digits.chars().filter(|c| *c != '.').collect();
+    if mant_str.is_empty() {
+        return Err("invalid rational numerator".into());
+    }
+    let mant = BigInt::parse_bytes(mant_str.as_bytes(), 10)
+        .ok_or_else(|| "invalid rational numerator".to_string())?;
+    let mut r = BigRational::new(mant, BigInt::from(1));
+    if frac_len > 0 {
+        r /= BigRational::new(BigInt::from(10).pow(frac_len as u32), BigInt::from(1));
+    }
+    Ok(if neg { -r } else { r })
+}
+
 /// Parse a Kap numeric string into KapNumber. Handles int / bigint / float / rational /
 /// complex per reference.
 pub fn parse_kap_number(buf: &str) -> Result<KapNumber, String> {
@@ -224,15 +255,28 @@ pub fn parse_kap_number(buf: &str) -> Result<KapNumber, String> {
     }
     // rational: num r den. Whole rationals collapse to integers at lex time
     // (Kotlin `makeAPLNumber` reduction: oracle `typeof 2r2` → kap:integer).
+    // Trailing-r decimal form (`2.5r`, tokeniser.kt `([0-9]+)(\.([0-9]*))?r$`):
+    // the value is the exact decimal itself as a rational.
     if let Some(idx) = buf.find('r') {
         let num_s = &buf[..idx];
         let den_s = &buf[idx + 1..];
-        let num = parse_signed_int(num_s)?;
+        if den_s.is_empty() {
+            return decimal_str_to_rational(num_s).map(crate::number::rational_to_kap);
+        }
         let den = parse_signed_int(den_s)?;
         if den == BigInt::from(0) {
             return Err("division by zero in rational".into());
         }
-        return Ok(crate::number::rational_to_kap(BigRational::new(num, den)));
+        let num_rat: BigRational = if num_s.contains('e') || num_s.contains('E') {
+            // No Kotlin number regex pairs an exponent numerator with a
+            // denominator; float fallback for an impossible-in-practice shape.
+            let f: f64 = num_s.parse().map_err(|_| "invalid rational numerator".to_string())?;
+            decimal_str_to_rational(&format!("{:?}", f))?
+        } else {
+            decimal_str_to_rational(num_s)?
+        };
+        let r = num_rat / BigRational::new(den, BigInt::from(1));
+        return Ok(crate::number::rational_to_kap(r));
     }
     // float (has '.' or 'e')
     if buf.contains('.') || buf.contains('e') || buf.contains('E') {
