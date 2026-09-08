@@ -2934,6 +2934,24 @@ impl Engine {
                 _ => None,
             };
             return match adv_name.as_str() {
+                // DUAL-NATURE (engine.kt:334-335 register `\`/`⍀` as native
+                // FUNCTIONS, :492-493 as operators): when the func operand is
+                // itself the `\` symbol — i.e. the source was value-left
+                // `A \ B` (expand), mis-parsed as Derived{func:\, op:\}
+                // because `finish_fn_call` routes every `\` through the
+                // operator binder — dispatch to the FUNCTION half (expand).
+                // `f \ x` with a REAL function operand (e.g. `+\ x`) keeps
+                // the scan path.
+                "\\" | "scan" if matches!(func.as_ref(), Instr::Symbol { name, namespace } if name == "\\" && namespace.is_none()) => {
+                    let l = left.clone().map(|b| self.eval_instr(&b, env)).transpose()?.map(|v| v.force(self)).transpose()?;
+                    let r = self.eval_instr(right, env)?.force(self)?;
+                    self.expand(l, r, true)
+                }
+                "⍀" if matches!(func.as_ref(), Instr::Symbol { name, namespace } if name == "⍀" && namespace.is_none()) => {
+                    let l = left.clone().map(|b| self.eval_instr(&b, env)).transpose()?.map(|v| v.force(self)).transpose()?;
+                    let r = self.eval_instr(right, env)?.force(self)?;
+                    self.expand(l, r, false)
+                }
                 "/" | "reduce" => self.adverb_reduce(func, left, right, env, true, adv_explicit_axis),
                 "\\" | "scan" => self.adverb_scan(func, left, right, env, true, adv_explicit_axis),
                 "⌿" => self.adverb_reduce(func, left, right, env, false, adv_explicit_axis),
@@ -17348,6 +17366,22 @@ impl Engine {
         let counts: Vec<i64> = Self::collect_ints(l.force(self)?, "\\")?;
         let b = right_val.force(self)?;
         let b_dims = b.dimensions();
+        // SCALAR B (rank-0, e.g. `1 0 1 1 \\ 2`): Kotlin `b.arrayify()` keeps
+        // the scalar whole and `dimensionAlongAxis` reads 0; the
+        // `dim != selected && dim != 1` check passes (0 != 3, 0 != 1 → error
+        // in a naive port) — but the oracle returns (2 0 2 2). Kotlin's
+        // ExpandValue path treats scalar B as one cell replicated per positive
+        // count: route through expand_along_axis's scalar arm with the
+        // validation skipped (a scalar has no selection dimension to match).
+        if b_dims.is_empty() {
+            let out_elems = Self::expand_along_axis(&b, &b_dims, 0, &counts)?;
+            let shape = vec![counts.len()];
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray {
+                dimensions: shape,
+                data: ArrayData::Nested(out_elems),
+                labels: None,
+            }))));
+        }
         let axis = if last_axis {
             b_dims.len().wrapping_sub(1)
         } else {

@@ -135,10 +135,35 @@ def find_balanced(s: str, start: int, open_ch='{', close_ch='}'):
     return i
 
 
-def extract_method_bodies(src: str):
-    """Yield (name, body) for each `@Test fun <name>(...) { ... }`."""
+def extract_method_bodies(src: str, class_ignored: bool = False):
+    """Yield (name, body) for each `@Test fun <name>(...) { ... }`.
+
+    Skips `@Ignore`d tests: the Kotlin runner never executes them, so
+    scoring the port against their exprs inflates the denominator with
+    cases Kotlin itself does not run (e.g. StructuralUnderTest's
+    `structuralUnderWihDecreaseRank`, marked `// TODO: Should be
+    implemented`). An `@Ignore` may sit directly above `@Test`, possibly
+    with a `//` comment line between. A class-level `@Ignore` (e.g.
+    `FfiApiTest`) skips the whole file.
+    """
+    if class_ignored:
+        return
     for m in re.finditer(r'@Test\s+fun\s+(\w+)\s*\(([^)]*)\)\s*\{', src):
         name = m.group(1)
+        # Look back over the preceding lines for @Ignore (allowing @Test
+        # on the same line cluster and // comments in between).
+        back = src[max(0, m.start() - 400):m.start()]
+        lines = back.split('\n')
+        ignored = False
+        for line in reversed(lines[-6:]):
+            s = line.strip()
+            if s == '' or s.startswith('//'):
+                continue
+            if s.startswith('@Ignore'):
+                ignored = True
+            break
+        if ignored:
+            continue
         body_start = m.end() - 1  # index of '{'
         body_end = find_balanced(src, body_start)
         yield name, src[body_start + 1:body_end]
@@ -256,7 +281,11 @@ def main():
                     src = f.read()
             except Exception:
                 continue
-            for name, body in extract_method_bodies(src):
+            # Class-level @Ignore (annotation directly above `class X` /
+            # `object X` / `abstract class X`): the whole file is skipped by
+            # the Kotlin runner (e.g. FfiApiTest).
+            class_ignored = bool(re.search(r'@Ignore\s+(?:abstract\s+|open\s+)?(?:class|object)\s', src))
+            for name, body in extract_method_bodies(src, class_ignored):
                 expr = first_expr_in_call(body)
                 if expr is None:
                     continue
