@@ -568,6 +568,23 @@ impl KapNumber {
         }
     }
 
+    /// Magnitude (Kap monadic `|`): real → |x|; complex → hypot(re, im) as a
+    /// REAL Double (Kotlin ModAPLFunction.numberCombine1Arg,
+    /// math_functions.kt:1044-1052).
+    pub fn abs_val(&self) -> KapNumber {
+        use KapNumber::*;
+        match self {
+            Long(v) => match v.checked_abs() {
+                Some(n) => Long(n),
+                None => BigInt(-num_bigint::BigInt::from(*v)),
+            },
+            Double(v) => Double(v.abs()),
+            BigInt(v) => BigInt(if *v < num_bigint::BigInt::from(0) { -v.clone() } else { v.clone() }),
+            Rational(v) => rational_to_kap(if *v < BigRational::new(num_bigint::BigInt::from(0), num_bigint::BigInt::from(1)) { -v.clone() } else { v.clone() }),
+            Complex(r, i) => Double(r.hypot(*i)),
+        }
+    }
+
     /// Subtraction with the Kap promotion rules (Long/Double/BigInt/Rational/Complex).
     pub fn sub(&self, other: &KapNumber) -> KapNumber {
         use KapNumber::*;

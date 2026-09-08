@@ -4391,15 +4391,12 @@ impl Engine {
                 Some(_) => self.ceil_floor_dyadic(left_val, right_val, false, "⌊"),
             },
             // `|`: dyadic = modulo; monadic = magnitude (absolute value).
+            // Kotlin ModAPLFunction.numberCombine1Arg (math_functions.kt:1044):
+            // real → |x|; complex → hypot(re, im) (a REAL magnitude).
+            // The port's old closure negated on Less but CLONED complex
+            // unchanged (wrong: `| 0j3` must be `3`, not `0j3`).
             "|" | "mod" => match left_val {
-                None => self.scalar1(
-                    right_val,
-                    |x| match x.numeric_cmp(&KapNumber::Long(0), false) {
-                        Ok(std::cmp::Ordering::Less) => x.neg(),
-                        _ => x.clone(),
-                    },
-                    "|",
-                ),
+                None => self.scalar1(right_val, |x| x.abs_val(), "|"),
                 Some(_) => self.num2(left_val, right_val, |a, b| a.modulo(b), "|"),
             },
             "*" | "⋆" => match left_val {
@@ -5055,10 +5052,13 @@ impl Engine {
         self.build_nested(&flat, &dims)
     }
 
-    /// Shape of an array value (scalars have empty shape).
+    /// Shape of an array value. `Str` counts as rank-1 (Kotlin strings are
+    /// char arrays: `⍴"abc"` → `⟨3⟩`), so take/drop/under-overlay see the
+    /// character width instead of bailing on a "scalar" string.
     fn value_dims(v: &APLValue) -> Vec<usize> {
         match v {
             APLValue::Array(arr) => arr.dimensions.clone(),
+            APLValue::Str(s) => vec![s.chars().count()],
             _ => vec![],
         }
     }
@@ -10666,19 +10666,32 @@ impl Engine {
     }
 
     /// Parse the left argument of `↑`/`↓` into a vector of (signed) axis counts.
-    /// Plain-integer path kept for the structural-under specs (which never
-    /// see `null` — a nil count there degrades the wrapper to unsupported).
+    /// `Nil` (`null`) elements mean "this axis whole" (Kotlin drop.kt:50 —
+    /// `if (s is APLNilValue) bDimensions[i]`, shared by take and drop), so
+    /// they resolve against the RIGHT arg's shape here: `None` becomes `Some(n)`
+    /// with n = that axis's size. Callers without shape context (structural-
+    /// under specs) see plain integers and never observe the difference.
     fn count_vector(&self, v: AplRef<APLValue>) -> Result<Vec<i64>, AplError> {
+        self.count_vector_shaped(&v, &[])
+    }
+
+    /// `count_vector` with `Nil`-element resolution against `shape`: a `null`
+    /// element on axis `i` yields `shape[i]` ("whole axis"); axes past the
+    /// shape keep `0` (matches take_or_drop_opt's None⇒whole downstream, but
+    /// as a plain integer for callers that can't carry options).
+    fn count_vector_shaped(&self, v: &AplRef<APLValue>, shape: &[usize]) -> Result<Vec<i64>, AplError> {
         match v.as_ref() {
             APLValue::Number(KapNumber::Long(n)) => Ok(vec![*n]),
+            APLValue::Nil => Ok(vec![shape.first().copied().unwrap_or(0) as i64]),
             APLValue::Array(a) => {
                 if a.dimensions.len() > 1 {
                     return Err(AplError::runtime("↑/↓: Left argument to drop must be a scalar or 1-dimensional array".into()));
                 }
                 let mut out = Vec::with_capacity(a.element_count());
-                for e in a.elements() {
+                for (i, e) in a.elements().into_iter().enumerate() {
                     match e.as_ref() {
                         APLValue::Number(KapNumber::Long(n)) => out.push(*n),
+                        APLValue::Nil => out.push(shape.get(i).copied().unwrap_or(0) as i64),
                         _ => return Err(AplError::runtime("↑/↓ counts must be integers".into())),
                     }
                 }
@@ -14884,6 +14897,9 @@ impl Engine {
         // original argument instead of applying an inverse (drop.kt:84/:351). A
         // dyadic left arg supplies the take/drop COUNT (Kotlin's 2-arg
         // evalWithStructuralUnder2Arg, under_take_drop_spec_axis).
+        // NOTE: spec is read BEFORE `a` is evaluated, with an empty shape —
+        // a `null` count element then resolves to 0 and is repaired below
+        // once src_dims are known (Kotlin drop.kt:50 resolves against B).
         if let Some((is_take, counts)) = self.under_take_drop_spec(wrapper, env)? {
             let left_for_wrapper = if self.take_drop_wants_left(wrapper) {
                 left.clone()
@@ -14895,6 +14911,12 @@ impl Engine {
             if src_dims.is_empty() {
                 return Err(unsupported());
             }
+            // Repair `null`-element counts ("whole axis"): re-read the spec
+            // with the true shape. Only bound-train wrappers can carry them.
+            let counts = match self.under_take_drop_spec_shaped(wrapper, env, &src_dims)? {
+                Some((_, c)) => c,
+                None => counts,
+            };
             let rank = src_dims.len();
             let wa = self.eval_apply(wrapper, &left_for_wrapper, right, env)?;
             // Re-derive bwa against the wrapper's actual result (handles dyadic count).
@@ -15146,6 +15168,46 @@ impl Engine {
             }
         }
 
+        // MODULUS family (`|`, Kotlin ModAPLFunctionImpl.
+        // evalWithStructuralUnder1Arg, math_functions.kt:1105): NOT an
+        // inverse — `|x` is not invertible (sign lost). Rule: mod =
+        // eval1Arg(a); inner = base(mod); sign = ×(a) (monadic sign);
+        // result = inner × sign. E.g. `⌊⍢| (2 4.3 3.9)` → ⌊(2 4.3 3.9) =
+        // (2 4 3), × = (1 1 1) → (2 4 3) ✓; negatives flip back.
+        // Cell-wise (Kotlin maps over the array: baseFn/mod/sign all apply
+        // per ELEMENT, so a ragged multi-arg strand works — each cell flows
+        // mod → base → ×sign independently).
+        if let Instr::Symbol { name, namespace: None } = wrapper {
+            if name == "|" {
+                let a = self.eval_instr(right, env)?.force(self)?;
+                // Cell-wise over the TOP-LEVEL strand elements (Kotlin maps
+                // over the array's elements; each element is itself an array
+                // here — `a.elements()`, one level, NOT the deep cell ravel).
+                let cells: Vec<AplRef<APLValue>> = match a.as_ref() {
+                    APLValue::Array(xa) => xa.elements(),
+                    other => vec![Rc::new(other.clone())],
+                };
+                let a_dims = Self::value_dims(&a);
+                let mut out = Vec::with_capacity(cells.len());
+                for c in &cells {
+                    let wa = self.eval_apply(wrapper, &None, &Box::new(Instr::Value(c.clone())), env)?;
+                    let bwa = self.eval_apply(base, &None, &Box::new(Instr::Value(wa)), env)?;
+                    let sign_op = Instr::Symbol { name: "×".to_string(), namespace: None };
+                    let sign = self.eval_apply(&sign_op, &None, &Box::new(Instr::Value(c.clone())), env)?;
+                    let mul = Instr::Symbol { name: "×".to_string(), namespace: None };
+                    out.push(self.eval_apply(
+                        &mul,
+                        &Some(Box::new(Instr::Value(bwa))),
+                        &Box::new(Instr::Value(sign)),
+                        env,
+                    )?);
+                }
+                if a_dims.is_empty() {
+                    return Ok(out.into_iter().next().unwrap_or(a));
+                }
+                return self.build_nested(&out, &a_dims);
+            }
+        }
         // INVERSE family: res = wrapper⁻¹(res'). Reuse the port's generic inverse
         // machinery (the same evalInverse* dispatch the `˝` adverb uses), which
         // covers the math/⍉/⍨ wrappers that call inversibleStructuralUnder1Arg.
@@ -15635,6 +15697,19 @@ impl Engine {
         wrapper: &Instr,
         env: &AplRef<Environment>,
     ) -> Result<Option<(bool, Vec<i64>)>, AplError> {
+        self.under_take_drop_spec_shaped(wrapper, env, &[])
+    }
+
+    /// `under_take_drop_spec` with the right-arg SHAPE for `null`-element
+    /// resolution ("whole axis", Kotlin drop.kt:50 — `(1 null↑)` on a 2×2
+    /// selects [1, 2]). Callers that already evaluated `a` pass its dims so
+    /// a second eval is unnecessary.
+    fn under_take_drop_spec_shaped(
+        &self,
+        wrapper: &Instr,
+        env: &AplRef<Environment>,
+        shape: &[usize],
+    ) -> Result<Option<(bool, Vec<i64>)>, AplError> {
         // Unwrap a parenthesised left-bind train `Train[value, fn]` — this is how
         // `(10↓)` and `(¯1↑)` parse (the value binds as the fn's left argument).
         match wrapper {
@@ -15675,9 +15750,11 @@ impl Engine {
                     "↓" => false,
                     _ => return Ok(None),
                 };
-                // The bound left value is the count vector.
+                // The bound left value is the count vector. Resolve `null`
+                // elements against the caller's shape ("whole axis",
+                // Kotlin drop.kt:50) so `(1 null↑)` selects [1, n].
                 let v = self.eval_instr(&funcs[0], env)?.force(self)?;
-                match self.count_vector(v) {
+                match self.count_vector_shaped(&v, shape) {
                     Ok(counts) => Ok(Some((is_take, counts))),
                     Err(_) => Ok(None),
                 }
@@ -16445,6 +16522,10 @@ impl Engine {
     fn flat_elements(&self, v: &AplRef<APLValue>) -> Vec<AplRef<APLValue>> {
         match v.as_ref() {
             APLValue::Array(a) => a.elements(),
+            // Strings are char arrays: expose the characters (matches
+            // `value_dims` treating Str as rank-1; needed by take/drop/under
+            // overlays on string args).
+            APLValue::Str(s) => s.chars().map(|c| Rc::new(APLValue::Char(c))).collect(),
             other => vec![Rc::new(other.clone())],
         }
     }
@@ -17139,6 +17220,9 @@ impl Engine {
                 for e in a.elements() {
                     match e.as_ref() {
                         APLValue::Number(x) => out.push(Rc::new(APLValue::Number(f(x)))),
+                        // Rank-0 boxes penetrate (disclose/map/re-enclose) BEFORE
+                        // the generic nested rule — a box is a scalar cell, not
+                        // a sub-array to map over.
                         APLValue::Array(inner) if inner.dimensions.is_empty() => {
                             let disclosed = inner
                                 .elements()
@@ -17150,6 +17234,14 @@ impl Engine {
                                 vec![],
                                 ArrayData::Nested(vec![r]),
                             )))));
+                        }
+                        // Nested arrays recurse cell-wise (Kotlin
+                        // GenericArraySum1Arg.valueAt: non-scalar cells map
+                        // to GenericArraySum1Arg(fn, cell)). Without this,
+                        // `| (2 4.3 3.9) (…)`-style nested strands die with
+                        // "| requires numbers".
+                        APLValue::Array(_) => {
+                            out.push(self.scalar1_impl(e.clone(), f, sym)?);
                         }
                         _ => return Err(AplError::runtime(format!("{} requires numbers", sym))),
                     }
@@ -17252,6 +17344,12 @@ impl Engine {
                 let mut out = Vec::with_capacity(a.element_count());
                 for e in a.elements() {
                     match e.as_ref() {
+                        // Nested cells recurse (Kotlin GenericArraySum1Arg
+                        // maps non-scalar cells element-wise — same rule as
+                        // scalar1_impl; `⌊ (2 4.3 3.9) (…)` floors per cell).
+                        APLValue::Array(_) => {
+                            out.push(self.ceil_floor_monadic(e.clone(), ceil, sym)?);
+                        }
                         APLValue::Number(x) => {
                             if x.is_complex() {
                                 return Err(AplError::runtime(if ceil {
