@@ -9945,6 +9945,20 @@ impl Engine {
                                 env,
                             );
                         }
+                        // `√` under commute (Kotlin SqrtAPLFunction.evalInverse2ArgA
+                        // → Log: `y √ v = a` solves `y⍟v = a` ⇒ `y = a⍟v`
+                        // (oracle: `2 √⍨˝ 5` → 2⍟5). Feed (a ⍟ v):
+                        // `log_op` dyadic with left=a-instr, right=v-instr.
+                        if name == "√" {
+                            let log_op =
+                                Instr::Symbol { name: "⍟".to_string(), namespace: None };
+                            return self.eval_apply(
+                                &log_op,
+                                &Some(right.clone()),
+                                &v,
+                                env,
+                            );
+                        }
                         let new_op = match name.as_str() {
                             // `y + v = a` ⇒ y = a - v
                             "+" => Instr::Symbol { name: "-".into(), namespace: None },

@@ -929,6 +929,8 @@ impl KapNumber {
     }
 
     /// Logarithm. Monadic `⍟ x` = natural log; dyadic `a ⍟ b` = log base b of a.
+    /// Kotlin LogAPLFunctionImpl.combine2Arg (math_functions.kt:1472): if EITHER
+    /// side is negative the result is complex (`y.toComplex().log(x)`), never NaN.
     pub fn log(&self, base: &KapNumber) -> KapNumber {
         use KapNumber::*;
         match (self, base) {
@@ -937,6 +939,21 @@ impl KapNumber {
                 let z = (*r, *i);
                 let (mag, arg) = (babs(z), barg(z));
                 Complex(mag.ln(), arg)
+            }
+            (a, b) if a.as_double() < 0.0 || b.as_double() < 0.0 => {
+                // Complex log: log_b(a) = ln(a)/ln(b) in complex arithmetic.
+                let (ar, ai) = a.as_complex();
+                let (br, bi) = b.as_complex();
+                let (lmag, larg) = (babs((ar, ai)), barg((ar, ai)));
+                let (rmag, rarg) = (babs((br, bi)), barg((br, bi)));
+                let (ln_ar, ln_ai) = (lmag.ln(), larg);
+                let (ln_br, ln_bi) = (rmag.ln(), rarg);
+                // (ln_ar + i ln_ai) / (ln_br + i ln_bi)
+                let denom = ln_br * ln_br + ln_bi * ln_bi;
+                Complex(
+                    (ln_ar * ln_br + ln_ai * ln_bi) / denom,
+                    (ln_ai * ln_br - ln_ar * ln_bi) / denom,
+                )
             }
             (a, b) => Double(a.as_double().ln() / b.as_double().ln()),
         }
