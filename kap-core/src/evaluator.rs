@@ -1641,30 +1641,51 @@ impl Engine {
                     // definition time (e.g. `foo ⇐ ×-` would run `×(-)` and fail). Component
                     // primitives (×, -, ⊢, ⊣, …) resolve at apply time via `eval_apply`'s
                     // `fn_name` dispatch, which is ambivalent (monadic vs dyadic).
+                    //
+                    // EXCEPTION — a 2-train with a value-SYMBOL head (`a ⇐ x+` with
+                    // `x←10`): Kotlin `LeftAssignedFunction` snapshots the bound
+                    // left arg when the ⇐ statement runs (`UpdateLocalFunctionInstruction`
+                    // evaluates `AssignmentInstruction(ref, leftArgs)` in the DEFINITION
+                    // frame — so the full leftBindWithLeftVariable program gives `(11 16)`).
+                    // Mirror that: evaluate JUST the head now and freeze it into
+                    // Instr::Value (a bare `⍺`/`⍵` head is NOT frozen — params don't
+                    // exist at def time; those stay lazy via train_head_is_bound).
                     Instr::Derived { .. } | Instr::Train { .. } | Instr::ValueOp { .. } => {
-                        Rc::new(APLValue::UserFn {
-                            params: vec![],
-                            split: 0,
-                            body: Rc::new(*value.clone()),
-                            env: env.clone(),
-                        })
-                    }
-                    // A Train with the left-bind shape `[value, fn]` (e.g. `10 (÷«⊢»⊣)`)
-                    // is a callable function: calling it MONADICALLY binds the value as ⍺
-                    // (Kotlin LeftAssignedFunction). The existing apply_train left-bind arm
-                    // handles this — store the Train as the body so apply_user_fn routes
-                    // through eval_apply → apply_train. Storing a delegation `Apply{train, ⍺, ⍵}`
-                    // here is wrong: the outer call's monadic `a 20` would route to
-                    // dyadic-call (1 arg ⍵ passed, ⍺ unbound) and either error or use the
-                    // Train as a left-hand (e.g. `÷«⊢»⊣ 20` → which treats `÷«⊢»⊣` as the
-                    // dyadic function, 20 as both ⍺ and ⍵, yielding `20÷20 ⊢ 20⊣20 = 1`).
-                    Instr::Train { funcs, .. } if funcs.len() == 2 && Self::is_value(&funcs[0]) => {
-                        Rc::new(APLValue::UserFn {
-                            params: vec![],
-                            split: 0,
-                            body: Rc::new(*value.clone()),
-                            env: env.clone(),
-                        })
+                        match value.as_ref() {
+                            // EXCEPTION — a 2-train with a VALUE-bound symbol head
+                            // (`a ⇐ x+` with `x←10`): freeze the head now (see above).
+                            // A head that resolves to a FUNCTION (`a ⇐ ÷⌈` — atop
+                            // of two primitives; `f ⇐ -*`) must NOT be touched:
+                            // evaluating a bare primitive errors, and a user-fn
+                            // head means genuine atop. Only freeze when the head
+                            // lookup yields a non-function value.
+                            Instr::Train { funcs, .. }
+                                if funcs.len() == 2
+                                    && matches!(&funcs[0], Instr::Symbol { name, namespace }
+                                        if name != "⍺" && name != "⍵" && Self::symbol_head_is_value(name, namespace, env))
+                                    && !Self::is_value(&funcs[0]) =>
+                            {
+                                let frozen = self.eval_instr(&funcs[0], env)?.force(self)?;
+                                let mut new_funcs = funcs.clone();
+                                new_funcs[0] = Instr::Value(frozen);
+                                Rc::new(APLValue::UserFn {
+                                    params: vec![],
+                                    split: 0,
+                                    body: Rc::new(Instr::Train {
+                                        funcs: new_funcs,
+                                        reverse: false,
+                                        compose: false,
+                                    }),
+                                    env: env.clone(),
+                                })
+                            }
+                            _ => Rc::new(APLValue::UserFn {
+                                params: vec![],
+                                split: 0,
+                                body: Rc::new(*value.clone()),
+                                env: env.clone(),
+                            }),
+                        }
                     }
                     // A general Train (atop, fork, or single fn) is itself a function.
                     // Store the Train as the body; apply_user_fn dispatches through
@@ -5097,7 +5118,7 @@ impl Engine {
                 // monadically with itself on both sides. (The earlier separate
                 // "mixed atop" arm computed gy=A+(D y) and fed it to both sides of
                 // +; that was wrong and is removed.)
-                if funcs.len() == 2 && Self::is_value(&funcs[0]) {
+                if funcs.len() == 2 && (Self::is_value(&funcs[0]) || self.train_head_is_bound(&funcs[0], env)) {
                     return self.eval_apply(
                         &funcs[1],
                         &Some(Box::new(funcs[0].clone())),
@@ -5192,7 +5213,7 @@ impl Engine {
                     }
                     2 => {
                         let (a, b) = (&funcs[0], &funcs[1]);
-                        if Self::is_value(a) {
+                        if Self::is_value(a) || self.train_head_is_bound(a, env) {
                             // LeftAssignedFunction.eval2Arg (Kotlin functions.kt:640)
                             // throws LeftAssigned2ArgException — a 2-train [value, fn]
                             // binds value as ⍺, and dyadic calls are forbidden.
@@ -9142,16 +9163,50 @@ impl Engine {
         })
     }
 
+    /// Whether a ⇐-RHS train head symbol denotes a VALUE (freeze at def time)
+    /// rather than a function (leave as atop): true iff the name is not a
+    /// primitive, not `⍺`/`⍵`, and its def-time lookup yields a non-function
+    /// value (`x←10`). Unbound names stay lazy (they may bind later); bound
+    /// function values (user fns, ⇐-registered names) stay atop.
+    fn symbol_head_is_value(name: &str, namespace: &Option<String>, env: &AplRef<Environment>) -> bool {
+        if Self::is_primitive_name(name) || namespace.is_some() {
+            return false;
+        }
+        match env.lookup(name, &None) {
+            Some(v) => !matches!(v.as_ref(), APLValue::UserFn { .. } | APLValue::UserOp { .. }),
+            None => false,
+        }
+    }
+
     /// A 2-train head that is NOT a function denotes a bound value: a variable
-    /// symbol (`(n-)˝` with `n←5`), a dynamic ref to a value. Known function
-    /// names, primitives, trains and derived functions stay on the atop path.
+    /// symbol (`(n-)˝` with `n←5`), a dynamic ref to a value, or a VALUE binding
+    /// such as `⍺`/`⍵` (Kotlin `lookupFunction` returns null for locals, so
+    /// `(⍺+)` is a left-bind, not atop — oracle `3 {(⍺+) ⍵} 4` → `7`). Known
+    /// function names, primitives, trains and derived functions stay on the
+    /// atop path. A *value-shaped* lookup hit (Number/Array/Str/Char/Null …)
+    /// means value even if `function_defs` also contains the name (shadowing).
     fn train_head_is_bound(&self, e: &Instr, env: &AplRef<Environment>) -> bool {
         match e {
-            Instr::Symbol { name, .. } => {
+            Instr::Symbol { name, namespace } => {
                 if Self::is_primitive_name(name) {
                     return false;
                 }
-                !env.function_names().iter().any(|f| f == name)
+                if namespace.is_some() {
+                    // Namespaced lookups never hit lexical value bindings; fall
+                    // back to the function-defs gate.
+                    return !env.function_names().iter().any(|f| f == name);
+                }
+                match env.lookup(name, &None) {
+                    // A lexical/namespace hit holding a non-function value (⍺/⍵
+                    // params, ←-bound locals) is a VALUE head.
+                    Some(v) if !matches!(v.as_ref(), APLValue::UserFn { .. } | APLValue::UserOp { .. }) => true,
+                    // No binding at all: Kotlin `lookupFunction` → null →
+                    // `makeVariableRef` → value (e.g. the `(2+x)` strand case).
+                    None => true,
+                    // Bound to a function value: atop, unless function_defs
+                    // disagrees (kept for the ⇐-registered path).
+                    Some(_) => !env.function_names().iter().any(|f| f == name),
+                }
             }
             Instr::DynamicRef { name, .. } => {
                 if Self::is_primitive_name(name) {
