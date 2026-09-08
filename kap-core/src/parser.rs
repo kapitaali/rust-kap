@@ -1013,7 +1013,7 @@ impl<'a> Parser<'a> {
                     // (parser.kt:970). Operators are consumed only inside parseOperator,
                     // bound to a function BEFORE any data operand (`data ⌸ fn`).
                     //
-                    // DUAL-NATURE EXCEPTION: `/ ⌿ \ ⍀` are registered in Kotlin as BOTH
+                    // DUAL-NATURE EXCEPTION: `/ ⌿ \\ ⍀ ⫽` are registered in Kotlin as BOTH
                     // a native function (SelectElements/Expand — value-left replicate/
                     // compress/expand) AND a native operator (reduce/scan — function-left).
                     // When a VALUE operand precedes them in the accumulator the name is the
@@ -1023,7 +1023,7 @@ impl<'a> Parser<'a> {
                     // FUNCTION left operand binds first (e.g. `+/`). Without this exception
                     // `1 0 1 / 1 2 3` wrongly hits the "Operator without left function"
                     // guard. `known_ops` is left intact so `+/` still binds as reduce.
-                    let is_dual_nature = matches!(name.as_str(), "/" | "⌿" | "\\" | "⍀");
+                    let is_dual_nature = matches!(name.as_str(), "/" | "⌿" | "\\" | "⍀" | "⫽");
                     if !is_dual_nature
                         && namespace.is_none()
                         && (Self::is_adverb(&name) || self.known_ops.iter().any(|n| n == &name))
@@ -1382,7 +1382,7 @@ impl<'a> Parser<'a> {
                             //   `⌿` reduce-first — same path as `/` (adverb-level)
                             //   `⌷` squad — lookup.kt:59 (AccessFromIndex axis branch)
                             //   `⊆` partition — disclose.kt (PartitionedEnclose computeAxis)
-                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖" | "↑" | "↓" | "labels" | "hasLabels" | "⊂" | "⊃" | "⌷" | "⊆" | "∊" | "/" | "\\" | "⌿" | "∧" | "∨")
+                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖" | "↑" | "↓" | "labels" | "hasLabels" | "⊂" | "⊃" | "⌷" | "⊆" | "∊" | "/" | "\\" | "⌿" | "⫽" | "∧" | "∨")
                     );
                     if axis_ok {
                         self.advance();
@@ -3853,7 +3853,7 @@ impl<'a> Parser<'a> {
             name,
             "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"
                 | "↑" | "↓" | "⊂" | "⌷" | "reveal" | "disclose"
-                | "+" | "-" | "*" | "×" | "÷" | "/" | "⌿" | "\\" | "⍀" | "=" | "≠" | "<" | ">"
+                | "+" | "-" | "*" | "×" | "÷" | "/" | "⌿" | "⫽" | "\\" | "⍀" | "=" | "≠" | "<" | ">"
                 | "≤" | "≥" | "," | "⍪" | "⌈" | "⌊" | "|" | "⍟" | "∧" | "∨" | "⍸" | "⍒" | "⍲" | "⍱" | "∼"
                 | "⊢" | "⊣" | "≡" | "⍓" | "∪" | "∩" | "!" | "…" | "⍷" | "cmp" | "⋆" | "√" | "⍮" | "pair"
                 | "⊆" | "⊇" | "→" | "≬" | "toList" | "fromList" | "toBoolean" | "⫇" | "group" | "%"
@@ -3906,6 +3906,26 @@ impl<'a> Parser<'a> {
     /// value (e.g. `f ⇐ ⌸` errors, but `f ⇐ /` is valid).
     fn is_pure_adverb(name: &str) -> bool {
         matches!(name, "¨" | "each" | "⍨" | "commute" | "∵" | "bitwise" | "⌸" | "key" | "⌻" | "˝" | "inverse" | "⍰" | "∥")
+    }
+
+    /// Two-arg NATIVE operators: take a right FUNCTION operand (Kotlin
+    /// `APLOperatorTwoArg` — `combineFunction(fn0, fn1)`). Used by
+    /// parse_fork_tine to decide whether an adverb inside a `«»` tine takes
+    /// its operand inside the tine (`/` `⌻`…) or completes it (`⍨` `¨`…).
+    /// Covers the native two-arg ops (reduce `/`, outer-join `⌻`, key `⌸`,
+    /// rank `⍤`…); user-defined 2-arg ops come from `known_ops2` at the call
+    /// site instead.
+    fn is_two_arg_operator(name: &str) -> bool {
+        matches!(
+            name,
+            "/" | "reduce"
+                | "⌻"
+                | "⌸" | "key"
+                | "⍤"
+                | "⍣"
+                | "⍢"
+                | "∘" | "⍛" | "∙" | "⍥"
+        )
     }
 
     /// Fold the *value-right-arg* operators `⍢` (structural-under) and `⍣` (power)
@@ -4849,18 +4869,66 @@ impl<'a> Parser<'a> {
     /// because `⍥` is an operator, not a function. `parse_function_atom` already
     /// handles a LEADING operator (`⍥⊂`), so we only add the non-leading case.
     fn parse_fork_tine(&mut self) -> Result<Instr, AplError> {
-        let atom = self.parse_function_atom()?;
+        let mut cur = self.parse_function_atom()?;
         // Bind a non-leading OverToken (`⍥`) into OverOp, mirroring the operator
         // loop in bind_operators_kotlin. `,⍥⊂` → OverOp{`,`, `⊂`}.
         if matches!(self.peek().map(|t| &t.token), Some(Token::OverToken)) {
             self.advance(); // consume ⍥
             let right = self.parse_function_atom()?;
-            return Ok(Instr::OverOp {
-                left_fn: Box::new(atom),
+            cur = Instr::OverOp {
+                left_fn: Box::new(cur),
                 right_fn: Box::new(right),
-            });
+            };
         }
-        Ok(atom)
+        // Bind trailing adverbs (`⫽⍨`, `+¨`): Kotlin's parseOperator loop keeps
+        // binding operators onto the middle/right tine, so a derived middle
+        // like `⫽⍨` in `⊣«⫽⍨»∊` is one tine, not `⫽` + stray `⍨`. Plain
+        // functions are NOT absorbed (they belong to the outer expression).
+        // The `«»` fork's OWN `»` closer terminates the middle tine (Kotlin
+        // parseExprToplevel(RightForkToken) ends the middle at the closer).
+        // TINE-SHAPE rule (Kotlin parseOperator: middle = parseExprToplevel —
+        // a bare function/derived chain, NOT parseFunctionForOperatorRightArg):
+        // one-arg operators (`⍨`/`¨` — CommuteOp is APLOperatorOneArg) bind
+        // postfix (`⊣«⫽⍨»∊` keeps `⫽⍨`; `⊣«×»…` keeps bare `×`). Anything
+        // else — a following FUNCTION (the `(…)` group in `(+/=⌻)`) or a
+        // two-arg operator (`/` `⌻`…) — belongs OUTSIDE the tine: Kotlin's
+        // middle-tine parse ends at the value/`)`/`»`, and the operator binds
+        // to the whole fork via the outer parseOperator loop. (A two-arg op
+        // operand here would wrongly swallow the fork's right tine as in
+        // `⊣«×»(+/=⌻)/…` → `×»`-operand → ⍬; and `1 (×«+»5) 2` must error
+        // `Right argument is not a function`, which needs the `5` OUTSIDE.)
+        loop {
+            if matches!(self.peek().map(|t| &t.token), Some(Token::RightForkToken)) {
+                break;
+            }
+            let adv = match self.peek().map(|t| &t.token) {
+                Some(Token::Literal(LiteralValue::Symbol { name, namespace }))
+                    if namespace.is_none() && Self::is_adverb(name) =>
+                {
+                    name.clone()
+                }
+                _ => break,
+            };
+            // A two-arg operator needs a RIGHT FUNCTION operand
+            // (parseFunctionForOperatorRightArg shape) — inside a fork tine
+            // the next token is `»`/`)`/a value, never a bare function, so
+            // the tine ends here and the operator binds outside (Kotlin: middle
+            // tine is parseExprToplevel, operators apply to the whole fork).
+            if Self::is_two_arg_operator(&adv) || self.known_ops.iter().any(|n| n == &adv) {
+                break;
+            }
+            self.advance(); // consume adverb
+            cur = Instr::Derived {
+                func: Box::new(cur),
+                op: Box::new(Instr::Symbol { name: adv.clone(), namespace: None }),
+            };
+            // `⍨`/`¨`-class one-arg operators complete the tine: what follows
+            // (`»`, another fn) belongs to the outer fork/expression.
+            if matches!(adv.as_str(), "⍨" | "commute" | "¨" | "each") {
+                break;
+            }
+        }
+        Ok(cur)
     }
 
     fn parse_function_expr_continuation_impl(

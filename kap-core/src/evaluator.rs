@@ -2644,7 +2644,7 @@ impl Engine {
                 // the implementation is identical except the default axis
                 // changes from last to first, but the explicit `[axis]`
                 // overrides the default.
-                "/" | "⌿" => {
+                "/" | "⌿" | "⫽" => {
                     let left_v = match left_v {
                         Some(l) => l,
                         None => {
@@ -2655,6 +2655,22 @@ impl Engine {
                         }
                     };
                     return self.select_elements_axis(left_v, right_v, axis_as_long);
+                }
+                // `A \\[k] B` / `A ⍀[k] B` explicit-axis expand (Kotlin
+                // `ExpandFunctionImpl` axis arm, expand.kt:32): the axis
+                // replaces the last/first-axis default. Dyadic-only like `/`.
+                "\\" | "⍀" => {
+                    let left_v = match left_v {
+                        Some(l) => Some(l),
+                        None => {
+                            return Err(AplError::runtime(format!(
+                                "{}: Function does not support axis specifier",
+                                fn_name
+                            )))
+                        }
+                    };
+                    let last_axis = fn_name == "\\";
+                    return self.expand_axis(left_v, right_v, Some(axis_as_long), last_axis);
                 }
                 // T1.1: `∊[limit]` enlist-with-limit (Kotlin
                 // `MemberFunctionImpl.eval1Arg` axis arm, member.kt:95-103).
@@ -2911,28 +2927,40 @@ impl Engine {
                 _ => return Err(AplError::runtime("adverb must be a symbol".into())),
             };
             // `f[axis]/` etc.: the fn operand carries an explicit axis (parsed as
-            // AxisApplied). Extract the axis value and thread it into reduce/scan.
-            // The tuple keeps `func` borrowed from the same Box either way.
-            let adv_explicit_axis: Option<usize> = match func.as_ref() {
-                Instr::AxisApplied { axis, .. } => {
-                    let av = self.eval_instr(axis, env)?.force(self)?;
-                    let a = match av.as_ref() {
-                        APLValue::Number(n) => n
-                            .as_long()
-                            .map_err(|e| AplError::runtime(e))
-                            .and_then(|v| {
-                                if v < 0 {
-                                    Err(AplError::runtime("axis must be non-negative".into()))
-                                } else {
-                                    Ok(v as usize)
-                                }
-                            })?,
-                        _ => return Err(AplError::runtime("axis must be an integer".into())),
-                    };
-                    Some(a)
-                }
-                _ => None,
-            };
+            // AxisApplied). TWO shapes reach here and must be distinguished
+            // (Kotlin parseOperator wraps `f[axis]` in AxisValAssignedFunctionDirect
+            // BEFORE combining with the operator, so the axis ALWAYS lives on
+            // the FUNCTION — but its MEANING differs):
+            // - `(+/[k])-style`: func = AxisApplied{Derived{…}, k} — axis on a
+            //   DERIVED fn means the reduce's OWN axis (handled by the top-level
+            //   AxisApplied arm, which unwraps to the Derived and threads k as
+            //   adv_explicit_axis). If it arrives HERE, thread it the same way.
+            // - `+[k]/`-style: func = AxisApplied{Symbol(+), k} — axis on a
+            //   SCALAR fn means functionAxis for each fold STEP (Kotlin threads
+            //   it into eval2Arg per step, math_functions.kt:505); the reduce
+            //   itself runs on its DEFAULT axis. Pass None as the reduce axis
+            //   and keep the AxisApplied step fn (adverb_reduce rebuilds it).
+            let (step_func, adv_explicit_axis): (std::borrow::Cow<'_, Instr>, Option<usize>) =
+                match func.as_ref() {
+                    Instr::AxisApplied { func: inner, axis } if matches!(inner.as_ref(), Instr::Derived { .. }) => {
+                        let av = self.eval_instr(axis, env)?.force(self)?;
+                        let a = match av.as_ref() {
+                            APLValue::Number(n) => n
+                                .as_long()
+                                .map_err(|e| AplError::runtime(e))
+                                .and_then(|v| {
+                                    if v < 0 {
+                                        Err(AplError::runtime("axis must be non-negative".into()))
+                                    } else {
+                                        Ok(v as usize)
+                                    }
+                                })?,
+                            _ => return Err(AplError::runtime("axis must be an integer".into())),
+                        };
+                        (std::borrow::Cow::Borrowed(inner.as_ref()), Some(a))
+                    }
+                    _ => (std::borrow::Cow::Borrowed(func.as_ref()), None),
+                };
             return match adv_name.as_str() {
                 // DUAL-NATURE (engine.kt:334-335 register `\`/`⍀` as native
                 // FUNCTIONS, :492-493 as operators): when the func operand is
@@ -2952,10 +2980,10 @@ impl Engine {
                     let r = self.eval_instr(right, env)?.force(self)?;
                     self.expand(l, r, false)
                 }
-                "/" | "reduce" => self.adverb_reduce(func, left, right, env, true, adv_explicit_axis),
-                "\\" | "scan" => self.adverb_scan(func, left, right, env, true, adv_explicit_axis),
-                "⌿" => self.adverb_reduce(func, left, right, env, false, adv_explicit_axis),
-                "⍀" => self.adverb_scan(func, left, right, env, false, adv_explicit_axis),
+                "/" | "reduce" => self.adverb_reduce(&step_func, left, right, env, true, adv_explicit_axis),
+                "\\" | "scan" => self.adverb_scan(&step_func, left, right, env, true, adv_explicit_axis),
+                "⌿" => self.adverb_reduce(&step_func, left, right, env, false, adv_explicit_axis),
+                "⍀" => self.adverb_scan(&step_func, left, right, env, false, adv_explicit_axis),
                 // `˝` inverse (Kotlin InverseFnOp, op.kt:298 + engine.kt:500): derives
                 // the INVERSE of fn. Per-builtin semantics (evalInverse* methods):
                 // ⌽˝/⊖˝ monadic = forward reverse; dyadic = NEGATED shifts;
@@ -4093,7 +4121,7 @@ impl Engine {
                     self.num2(left_val, right_val, |a, b| a.div(b), "÷")
                 }
             },
-            // DUAL-NATURE `/ ⌿ \ ⍀`: Kotlin registers each as BOTH a native function
+            // DUAL-NATURE `/ ⌿ ⫽ \\ ⍀`: Kotlin registers each as BOTH a native function
             // (value-left select/expand) AND a native operator (reduce/scan). The
             // operator half is handled by the adverb-reduce/scan path; here we only
             // reach the FUNCTION half when a VALUE left arg precedes the name (the
@@ -4101,8 +4129,8 @@ impl Engine {
             // select (replicate/compress), `\ ⍀` expand, last vs first axis per the
             // name. Monadic form is invalid (Kotlin: "Function cannot be called with
             // one argument").
-            "/" | "⌿" | "\\" | "⍀" => {
-                let last_axis = matches!(name.as_str(), "/" | "\\");
+            "/" | "⌿" | "⫽" | "\\" | "⍀" => {
+                let last_axis = matches!(name.as_str(), "/" | "⫽" | "\\");
                 let is_expand = matches!(name.as_str(), "\\" | "⍀");
                 match left_val {
                     None => Err(AplError::runtime(format!(
@@ -7063,6 +7091,20 @@ impl Engine {
         };
         let rl = rank_of(&left);
         let rr = rank_of(&right_val);
+        // Scalar+scalar with axis: Kotlin NEVER validates the axis here.
+        // `defaultReduceLongToLong` threads `functionAxis` into
+        // `eval2ArgLongToLongWithAxis`, and `MathCombineAPLFunction`'s
+        // override is `combine2ArgLongToLong(a, b)` — the axis is IGNORED.
+        // This is the `+[1]/` fold-step shape (scalar acc + scalar cell),
+        // so route it to plain scalar combine regardless of the axis value.
+        if rl == 0 && rr == 0 {
+            if let (APLValue::Number(a), APLValue::Number(b)) =
+                (left.as_ref(), right_val.as_ref())
+            {
+                let res = self.apply_op(name, a, b)?;
+                return Ok(Rc::new(APLValue::Number(res)));
+            }
+        }
         // Rank-1 side = the vector; the other side = the base. Scalars (rank 0)
         // are NOT vectors (Kotlin: only the scalar+scalar case short-circuits;
         // scalar+array with axis errors "A or B has to be rank 1" — oracle-verified).
@@ -7072,15 +7114,14 @@ impl Engine {
         }
         let (vec_val, base_val, vec_side) = match (rl == 1, rr == 1) {
             (true, true) => {
-                // Both rank-1: axis must be 0 (Kotlin: `if (axisInt == 0)` else
-                // IllegalAxisException against the 1-dim shape).
-                if axis != 0 {
-                    return Err(AplError::runtime(format!(
-                        "{}: Axis {} is not valid. Expected: 1",
-                        name, axis
-                    )));
-                }
-                // Plain element-wise combine (lengths must match — num2_impl errors).
+                // Both rank-1: PLAIN element-wise combine (lengths must match —
+                // num2_impl errors). The axis is IGNORED here, not validated:
+                // Kotlin's axis branch is only reached from the
+                // rank-mismatch path (`aDimensions.size == 1` XOR
+                // `bDimensions.size == 1`); when BOTH sides are rank-1 the
+                // call falls to plain makeCellSumFunction2Args — which is why
+                // `+[1]/` fold steps (scalar acc + scalar cell) succeed while
+                // the old code errored `Axis 1 is not valid. Expected: 1`.
                 // `apply_op` maps the scalar op; wrap in the KapNumber closure num2 wants.
                 return self.num2(
                     Some(left.clone()),
@@ -13233,6 +13274,45 @@ impl Engine {
         // Derived{AxisApplied{+,k},/} reaching adverb_reduce directly is the
         // LEGACY shape — treat it the same way: reduce on the DEFAULT axis,
         // fold steps call plain `+`. Strip the wrapper for the steps.
+        // KEEP the original for the fold steps: `+[k]/` (axis on the SCALAR
+        // fn, not on a Derived) threads the axis as `functionAxis` into each
+        // step (math_functions.kt:505 axis branch → num2_axis). The lane loop
+        // below rebuilds the AxisApplied step fn from this — EXCEPT the axis
+        // is validated against the ENCLOSED rank-1 data first: Kotlin's
+        // AxisValAssignedFunctionDirect wraps the reduce fn, whose eval1Arg
+        // runs ensureValidAxis against the ENCLOSED arg (rank 1), so
+        // `+[2]/` on 4 nested cells errors `Axis 2 is not valid. Expected: 1`
+        // (kind:fails rows nestedScalarReduce4/B4) instead of folding.
+        // Scope: ONLY AxisApplied{scalar-symbol} (functionAxis shape). A
+        // Derived inner (`(+/[k])-style`) carries the REDUCE's own axis and
+        // must NOT be validated here (it is threaded as adv_explicit_axis).
+        let enclosed_rank: usize = {
+            let d = self.eval_instr(right, env)?.force(self)?;
+            d.dimensions().len()
+        };
+        if let Instr::AxisApplied { func: inner, axis } = fn_instr {
+            if matches!(inner.as_ref(), Instr::Symbol { .. }) {
+                let av = self.eval_instr(axis, env)?.force(self)?;
+                if let APLValue::Number(n) = av.as_ref() {
+                    if let Ok(k) = n.as_long() {
+                        if k < 0 || (k as usize) >= enclosed_rank.max(1) {
+                            return Err(AplError::runtime(format!(
+                                "Axis {} is not valid. Expected: {}",
+                                k,
+                                enclosed_rank.max(1)
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        let step_instr: Instr = match fn_instr {
+            Instr::AxisApplied { func, axis } => Instr::AxisApplied {
+                func: func.clone(),
+                axis: axis.clone(),
+            },
+            other => other.clone(),
+        };
         let fn_instr: &Instr = match fn_instr {
             Instr::AxisApplied { func, .. } => func,
             other => other,
@@ -13404,13 +13484,18 @@ impl Engine {
                 ri += 1;
             }
             // Fold the fiber along `axis` (k = 0..axis_len).
+            // `+[k]/`-style FUNCTION axis (Kotlin threads the AxisApplied fn's
+            // axis as `functionAxis` into each fold step): route each step
+            // through the saved AxisApplied step fn (which dispatches to
+            // num2_axis) instead of the stripped inner symbol. Non-axis fns
+            // pass through unchanged (step_instr == fn clone).
             let mut coords = fixed.clone();
             coords[axis] = 0;
             let mut acc = elems[flat_of(&coords)].clone();
             for k in 1..axis_len {
                 coords[axis] = k;
                 let v = &elems[flat_of(&coords)];
-                acc = self.apply_fn_instr(fn_instr, Some(&acc), v, env)?;
+                acc = self.apply_fn_instr(&step_instr, Some(&acc), v, env)?;
             }
             out.push(acc);
         }
@@ -17209,7 +17294,12 @@ impl Engine {
         }
         // Build an index map: for each output position along axis, which B position
         // does it read from (-1 = fill with 0).
-        // Positive counts consume B elements sequentially; zero/negative emit fills.
+        // Positive counts consume B elements sequentially — EXCEPT when the
+        // axis has size 1 (Kotlin expand.kt:44 `if (dimensionAlongAxis > 1)`):
+        // then the single cell is reused for every positive count (`0 2 2 \
+        // 3 1⍴…` → row `0 100 100 100 100`, not an OOB walk off the end).
+        // Zero/negative counts emit fills.
+        let dim_along = b_dims.get(axis).copied().unwrap_or(0);
         let mut b_for_out: Vec<isize> = Vec::with_capacity(counts.len());
         let mut bi = 0usize;
         for &c in counts {
@@ -17217,7 +17307,9 @@ impl Engine {
                 for _ in 0..c {
                     b_for_out.push(bi as isize);
                 }
-                bi += 1;
+                if dim_along > 1 {
+                    bi += 1;
+                }
             } else {
                 let fills = if c == 0 { 1 } else { (-c) as usize };
                 for _ in 0..fills {
@@ -17362,6 +17454,19 @@ impl Engine {
         right_val: AplRef<APLValue>,
         last_axis: bool,
     ) -> Result<AplRef<APLValue>, AplError> {
+        self.expand_axis(left_val, right_val, None, last_axis)
+    }
+
+    /// `A \\[k] B` / `A ⍀[k] B` explicit-axis expand (Kotlin `ExpandFunctionImpl`
+    /// `axis != null` arm, expand.kt:32): the axis replaces the last/first-axis
+    /// default and is validated by `ensureValidAxis` against B's rank.
+    fn expand_axis(
+        &self,
+        left_val: Option<AplRef<APLValue>>,
+        right_val: AplRef<APLValue>,
+        explicit_axis: Option<usize>,
+        last_axis: bool,
+    ) -> Result<AplRef<APLValue>, AplError> {
         let l = left_val.ok_or_else(|| AplError::runtime("\\ needs two args".into()))?;
         let counts: Vec<i64> = Self::collect_ints(l.force(self)?, "\\")?;
         let b = right_val.force(self)?;
@@ -17382,10 +17487,19 @@ impl Engine {
                 labels: None,
             }))));
         }
-        let axis = if last_axis {
-            b_dims.len().wrapping_sub(1)
-        } else {
-            0
+        let axis = match explicit_axis {
+            Some(k) => {
+                if k >= b_dims.len() {
+                    return Err(AplError::runtime(format!(
+                        "Axis {} is not valid. Expected: {}",
+                        k,
+                        b_dims.len()
+                    )));
+                }
+                k
+            }
+            None if last_axis => b_dims.len().wrapping_sub(1),
+            None => 0,
         };
         let dim_along = b_dims.get(axis).copied().unwrap_or(0);
         // Selected (positive) entries consume one B major-cell each.
@@ -17627,6 +17741,9 @@ impl Engine {
         let elems_b: Vec<AplRef<APLValue>> = match right_val.as_ref() {
             APLValue::Array(b) => b.elements(),
             APLValue::List(b) => b.elements(),
+            // A string right arg iterates per-char (Kotlin `b.iterateMembers`:
+            // `"abc" ∊ @b` checks each char, it does not compare whole strings).
+            APLValue::Str(s) => s.chars().map(|c| Rc::new(APLValue::Char(c))).collect(),
             other => vec![Rc::new(other.clone())],
         };
         let contains = |needle: &APLValue| -> bool {
@@ -17635,6 +17752,17 @@ impl Engine {
         let mut out = Vec::new();
         let mut left_dims: Option<Vec<usize>> = None;
         match a.as_ref() {
+            // A string left arg iterates per-char with the string's shape
+            // (Kotlin: string dims = ⟨len⟩, so `"abcabc" ∊ @c` → 6-vector
+            // `(0 0 1 0 0 1)`, not a scalar `0`).
+            APLValue::Str(s) => {
+                let n = s.chars().count();
+                left_dims = Some(vec![n]);
+                for c in s.chars() {
+                    let hit = if contains(&APLValue::Char(c)) { 1 } else { 0 };
+                    out.push(Rc::new(APLValue::Number(KapNumber::Long(hit))));
+                }
+            }
             APLValue::Array(aa) => {
                 if aa.rank() == 0 {
                     // Rank-0 (e.g. enclosed `(⊂1 2)`) left → scalar result, same
