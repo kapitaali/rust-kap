@@ -13690,7 +13690,19 @@ impl Engine {
         right: &AplRef<APLValue>,
         env: &AplRef<Environment>,
     ) -> Result<AplRef<APLValue>, AplError> {
+        // `map:get`-family natives take their map operand as a VALUE, not an
+        // array element: `a map:get¨ keys` threads the SAME map `a` into every
+        // cell (`flat_elements` → `apl_to_instr` would die with "cannot use a
+        // map as an array element"). Kotlin's each passes the left value through
+        // untouched per cell; route Map/left values via `Instr::Value` directly.
+        // (Covers `map:get`, and any future map-valued left operand, with no
+        // behavior change for numbers/arrays.)
+        let left_is_map = matches!(
+            left.map(|v| v.as_ref()),
+            Some(APLValue::Map(_))
+        );
         let left_instr = match left {
+            Some(v) if left_is_map => Some(Box::new(Instr::Value(v.clone()))),
             Some(v) => Some(Box::new(self.value_to_instr(v)?)),
             None => None,
         };
