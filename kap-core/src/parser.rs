@@ -682,7 +682,14 @@ impl<'a> Parser<'a> {
                             // bind, which `parse_function_expr` does not do). The inner
                             // expression parses to a function-typed Instr; the trailing `)`
                             // terminates it.
-                            let inner = self.parse_value_kotlin()?;
+                            // Push the group's `)` as this parse's close token (as the
+                            // plain `(` arm does): without it the inner accumulator runs
+                            // PAST the `)` and misparses `(λ{a}) (λ{b})` as Apply{λa,λb}
+                            // instead of stranding Array[λa,λb] (`⍞((c≡1)⌷…)` pick).
+                            self.kotlin_close_stack.push(Token::CloseParen);
+                            let inner = self.parse_value_kotlin();
+                            self.kotlin_close_stack.pop();
+                            let inner = inner?;
                             self.expect(Token::CloseParen, "expected ) after ⍞(…)")?;
                             return self.finish_fn_call(inner, &mut left_args, &mut lists);
                         }
