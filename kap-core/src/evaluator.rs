@@ -215,6 +215,13 @@ impl Environment {
         // Return only names defined via `⇐` (function definition), NOT `←`
         // (value assignment). A `←`-bound lambda stores a `UserFn` but is a
         // VALUE, so `a 5` must strand to `⟨function 5⟩`, not apply. See PROBLEM.md (A2).
+        // PLUS all `UserFn`-valued names in the namespace table (Kotlin registers
+        // `∇`-defined fns engine-globally, visible across `use()` file boundaries:
+        // `use("…use-test.kap")` defines `foo:a` (a tradfn `∇ a (x)`) in ns `foo`,
+        // and the LATER statement `foo:a 100` must parse `foo:a` as applicable
+        // (Kotlin `lookupFunction` → engine.getFunction). The registry's
+        // `collect_function_names` sees them; the per-scope `function_defs` set
+        // does not (it lives on the file's throwaway anchor scope).
         let mut names = Vec::new();
         let mut cur: Option<&Environment> = Some(self);
         while let Some(env) = cur {
@@ -225,6 +232,7 @@ impl Environment {
             }
             cur = env.parent.as_deref();
         }
+        self.ns_registry.collect_function_names(&mut names);
         names
     }
 
@@ -4119,18 +4127,98 @@ impl Engine {
             // symbol for export. These are runtime directives (in-memory only; `use`
             // file-loading is deferred per the roadmap).
             "namespace" => {
-                let name = match right_val.as_ref() {
-                    APLValue::Str(s) => s.clone(),
-                    APLValue::Symbol { name, .. } => name.clone(),
-                    other => {
-                        return Err(AplError::runtime(format!(
-                            "namespace requires a name, got: {}",
-                            other.format_value()
-                        )))
+                // Kotlin `processNamespace()` (parser.kt:1105) is a STRUCTURAL
+                // statement, not a fn call: `namespace("foo")` consumes only the
+                // parenthesised name and yields Empty, so a trailing value on the
+                // SAME line (`namespace("foo") 'bar` — changeNamespace) is a
+                // separate expression evaluated AFTER the switch. The port's
+                // parser strands both into one Apply (right = Array["foo",'bar]),
+                // so split here: the first element names the namespace, the rest
+                // is the trailing value returned after the switch.
+                let (name, trailing): (String, Option<AplRef<APLValue>>) =
+                    match right_val.as_ref() {
+                        APLValue::Str(s) => (s.clone(), None),
+                        APLValue::Symbol { name, .. } => (name.clone(), None),
+                        APLValue::Array(a) | APLValue::List(a)
+                            if a.element_count() >= 1 =>
+                        {
+                            let es = a.elements();
+                            let n = match es[0].as_ref() {
+                                APLValue::Str(s) => s.clone(),
+                                APLValue::Symbol { name, .. } => name.clone(),
+                                other => {
+                                    return Err(AplError::runtime(format!(
+                                        "namespace requires a name, got: {}",
+                                        other.format_value()
+                                    )))
+                                }
+                            };
+                            let rest = &es[1..];
+                            let t = if rest.is_empty() {
+                                None
+                            } else if rest.len() == 1 {
+                                Some(rest[0].clone())
+                            } else {
+                                Some(Rc::new(APLValue::Array(Rc::new(
+                                    KapArray::new(
+                                        vec![rest.len()],
+                                        ArrayData::Nested(rest.to_vec()),
+                                    ),
+                                ))))
+                            };
+                            (n, t)
+                        }
+                        other => {
+                            return Err(AplError::runtime(format!(
+                                "namespace requires a name, got: {}",
+                                other.format_value()
+                            )))
+                        }
+                    };
+                env.ns_registry.current.replace(Some(name.clone()));
+                match trailing {
+                    None => Ok(Rc::new(APLValue::Null)),
+                    Some(v) => {
+                        // Bare symbols in the trailing value were interned BEFORE
+                        // the switch (the port evals args first); Kotlin interns
+                        // them AFTER (parser.kt:1005 continues the loop), so stamp
+                        // namespace-less symbols with the new namespace:
+                        // `namespace("foo") 'bar` → `foo:bar` (oracle-verified).
+                        // Explicitly-qualified (`'aa:bb`) and keyword symbols keep
+                        // their own namespace.
+                        match v.as_ref() {
+                            APLValue::Symbol { name: sn, namespace: None } => {
+                                Ok(Rc::new(APLValue::Symbol {
+                                    name: sn.clone(),
+                                    namespace: Some(name),
+                                }))
+                            }
+                            APLValue::Array(a) => {
+                                let stamped: Vec<AplRef<APLValue>> = a
+                                    .elements()
+                                    .iter()
+                                    .map(|e| match e.as_ref() {
+                                        APLValue::Symbol {
+                                            name: sn,
+                                            namespace: None,
+                                        } => Rc::new(APLValue::Symbol {
+                                            name: sn.clone(),
+                                            namespace: Some(name.clone()),
+                                        }),
+                                        _ => e.clone(),
+                                    })
+                                    .collect();
+                                Ok(Rc::new(APLValue::Array(Rc::new(
+                                    KapArray::new(
+                                        vec![stamped.len()],
+                                        ArrayData::Nested(stamped),
+                                    ),
+                                ))))
+                            }
+                            _ => Ok(v),
+                        }
                     }
-                };
-                env.ns_registry.current.replace(Some(name));
-                Ok(Rc::new(APLValue::Null))
+                }
             }
             "import" => {
                 let name = match right_val.as_ref() {
@@ -20800,9 +20888,18 @@ impl Engine {
             dirs.push(repo.join("kap-stdlib").join("std"));
         }
 
-        let path = dirs
+        // Kotlin `resolveLibraryFile` (engine.kt:699) joins the FULL requested
+        // relative path onto each library search dir (`"${path}/${requestedFile}"`)
+        // — `test-data/use-test.kap` resolves under the `array/` module dir when
+        // the suite runs there. The old code joined only the BASENAME, so any
+        // `test-data/…` include could never resolve. Try the full relative name
+        // first, then the basename (stdlib `use("…")` calls pass bare names).
+        let candidates: Vec<std::path::PathBuf> = dirs
             .iter()
-            .map(|d| d.join(&basename))
+            .flat_map(|d| [d.join(name), d.join(&basename)])
+            .collect();
+        let path = candidates
+            .into_iter()
             .find(|p| p.exists())
             .ok_or_else(|| {
                 AplError::runtime(format!("use: library file not found: {}", name))

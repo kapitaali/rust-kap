@@ -120,6 +120,12 @@ fn classify_with_timeout(c: &Case) -> Outcome {
         .stack_size(64 * 1024 * 1024)
         .spawn(move || {
             let engine = Engine::new();
+            for candidate in [
+                concat!(env!("CARGO_MANIFEST_DIR"), "/../../array"),
+                concat!(env!("CARGO_MANIFEST_DIR"), "/../array"),
+            ] {
+                engine.set_lib_paths(&[candidate]);
+            }
             let o =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| classify(&engine, &c)))
                     .unwrap_or(Outcome::Unsupported);
@@ -142,6 +148,17 @@ fn run_kotlin_conformance() {
     let cases = load_cases();
     assert!(!cases.is_empty(), "no extracted test cases found");
     let engine = Engine::new();
+    // Mirror Kotlin's suite CWD: `APLTest.makeEngine` adds `standard-lib` and the
+    // JVM suite runs with CWD = the `array/` module dir, so `test-data/…` and
+    // `standard-lib.kap` includes resolve there. Point the port's `use()` search
+    // at the same dirs when present (engine.kt:699 `resolveLibraryFile` joins the
+    // full relative name onto each search dir).
+    for candidate in [
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../array"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../array"),
+    ] {
+        engine.set_lib_paths(&[candidate]);
+    }
 
     // Silence per-case panic output. Some reference cases trigger engine panics
     // (e.g. arithmetic overflow, division-by-zero); `classify` catches them via

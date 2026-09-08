@@ -800,17 +800,25 @@ impl NamespaceRegistry {
             .push(imported.to_string());
     }
     /// Resolve a *bare* (namespace-less) name in `current_ns`, honoring `import` fallbacks
-    /// then the default namespace (Kotlin `defaultNamespaceFallback`).
+    /// then the default namespace (Kotlin `findSymbolInImportsOrIntern`, engine.kt:570:
+    /// first the current namespace's own symbols, then EXPORTED symbols of imported
+    /// namespaces, else intern in current). Only `declare(:export …)`-marked names are
+    /// visible through imports (tokeniser.kt:123-128: `findSymbol(name, false)`);
+    /// unexported names stay invisible (NamespaceTest `unexportedSymbolsShouldNotBeVisible`
+    /// is `kind:fails`). Falls back to the default namespace, then `kap`.
     pub fn resolve_bare(&self, name: &str) -> Option<AplRef<APLValue>> {
         let cur = self.current_ns();
         if let Some(v) = self.ns_lookup(&cur, name) {
             return Some(v);
         }
-        // Walk imported namespaces (in import order).
+        // Walk imported namespaces (in import order): only EXPORTED names show
+        // through (Kotlin `findSymbol(name, false)` on the imported ns).
         if let Some(imps) = self.imports.borrow().get(&cur).cloned() {
             for imp in imps {
-                if let Some(v) = self.ns_lookup(&imp, name) {
-                    return Some(v);
+                if self.is_exported(&imp, name) {
+                    if let Some(v) = self.ns_lookup(&imp, name) {
+                        return Some(v);
+                    }
                 }
             }
         }
@@ -837,10 +845,23 @@ impl NamespaceRegistry {
     /// `function_names()` so a user-defined function is recognized as applicable after a
     /// separate `∇`/`⇐` statement).
     pub fn collect_function_names(&self, out: &mut Vec<String>) {
-        for m in self.symbols.borrow().values() {
+        for (ns, m) in self.symbols.borrow().iter() {
             for (name, val) in m.iter() {
-                if matches!(val.as_ref(), APLValue::UserFn { .. }) && !out.contains(name) {
-                    out.push(name.clone());
+                if matches!(val.as_ref(), APLValue::UserFn { .. }) {
+                    // Qualified form (`foo:a`): Kotlin registers `∇`-defined fns
+                    // engine-globally under their defining namespace, and later
+                    // statements resolve them via `lookupFunction` → `getFunction`.
+                    let qual = format!("{}:{}", ns, name);
+                    if !out.contains(&qual) {
+                        out.push(qual);
+                    }
+                    // Bare form only when the fn lives in the default namespace
+                    // (bare `a` elsewhere resolves per-current-ns at parse time;
+                    // see `is_known_fn`'s current-ns check). Unconditional bare
+                    // pushes would misparse value strands as applications.
+                    if ns == &Self::default_ns() && !out.contains(name) {
+                        out.push(name.clone());
+                    }
                 }
             }
         }
