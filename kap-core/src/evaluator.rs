@@ -2899,7 +2899,24 @@ impl Engine {
             // inversibleStructuralUnder path; others error
             // "under not supported for function" (common.kt:155).
             if op_name == "⍢" {
-                return self.apply_under_op(func, operand, left, right, env);
+                // `⍢`'s func is the WRAPPER (Kotlin StructuralUnderOp:
+                // combineFunction(fn0=wrapper-as-written...)) — but the port's
+                // parser wraps parenthesised wrappers in a len-1 Train
+                // (`(⊣⍨)` → Train[Derived]), which apply_under_op's own
+                // unwrapping couldn't see (it receives func post-dispatch).
+                // Unwrap len-1 trains HERE so the Derived shape reaches the
+                // commute/inverse/pick dispatch intact.
+                let mut f: &Instr = func;
+                loop {
+                    if let Instr::Train { funcs, .. } = f {
+                        if funcs.len() == 1 {
+                            f = &funcs[0];
+                            continue;
+                        }
+                    }
+                    break;
+                }
+                return self.apply_under_op(f, operand, left, right, env);
             }
             // `f int:proto v` (Kotlin ProtoOp / CallWithProtoFunctionImpl, proto.kt):
             // evaluate the proto value ONCE and thread it as the default-value
@@ -5332,6 +5349,7 @@ impl Engine {
             e,
             Instr::Literal(_)
                 | Instr::Array { .. }
+                | Instr::ArrayWithShape { .. }
                 | Instr::Empty
                 | Instr::Apply { .. }
                 | Instr::Index { .. }
@@ -9553,6 +9571,15 @@ impl Engine {
                             "×" => Instr::Symbol { name: "÷".into(), namespace: None },
                             // `y ÷ v = a` ⇒ y = a × v
                             "÷" => Instr::Symbol { name: "×".into(), namespace: None },
+                            // `y ⊣ v = a` ⇒ y = a (left-tack returns its left
+                            // arg; Kotlin HideAPLFunction has no inverse
+                            // override but the commute-under path needs the
+                            // A-solution: oracle `4 (1+)⍢(⊣⍨) 10` → 11).
+                            // Here `right` is the result value fv (= a), so
+                            // evaluate it in env.
+                            "⊣" => {
+                                return self.eval_instr(right, env);
+                            }
                             _ => {
                                 return Err(AplError::runtime(format!(
                                     "{}: Function does not have an inverse",
@@ -14189,6 +14216,25 @@ impl Engine {
         if std::env::var("KAP_DEBUG_UNDER").is_ok() {
             eprintln!("UNDER base={:?} wrapper={:?} left={:?}", base, wrapper, left);
         }
+        // Unwrap parenthesised single-member trains (`(×∘(10+))` arrives as a
+        // len-1 Train wrapping the real compose Train). Shadow `wrapper` so
+        // every dispatch below sees the unwrapped form. ALSO unwrap a
+        // single Derived member (`(⊣⍨)` arrives as Train[Derived]) — Kotlin's
+        // parser returns the bare derived fn, and every dispatch below
+        // (commute arm, inverse family) matches on the Derived shape.
+        let wrapper: &Instr = {
+            let mut cur = wrapper;
+            loop {
+                if let Instr::Train { funcs, .. } = cur {
+                    if funcs.len() == 1 {
+                        cur = &funcs[0];
+                        continue;
+                    }
+                }
+                break;
+            }
+            cur
+        };
         // Resolve a dynamic function reference / user-fn alias wrapper (`⍞a`,
         // `a⇐↑`, `a←λ↑`) to the underlying primitive it denotes, so `apply_under_op`
         // dispatches exactly as if the primitive had been written inline. Kotlin's
@@ -14198,10 +14244,14 @@ impl Engine {
         // returns itself, and recursing would loop infinitely. After one resolution
         // step the wrapper becomes a primitive, so the skip fires and dispatch
         // continues inline (e.g. the monadic `↑` first-cell branch at ~9413).
+        // ALSO skip when the wrapper is a `(sel ⊇)` pick train: it is data
+        // (an evaluated selection), not a fn alias — resolving it member-wise
+        // would strip the train back to bare `⊇` and lose the member.
+        let wrapper_is_pick_train = self.under_pick_selector(wrapper, env).is_some();
         let wrapper_is_primitive = matches!(wrapper,
             Instr::Symbol { name, namespace: None }
                 if matches!(name.as_str(), "↑" | "↓" | "⊢" | "⊣" | "-" | "+" | "÷" | "×" | "⍉" | "⌽" | "⊖" | "⋆" | "√"));
-        if !wrapper_is_primitive {
+        if !wrapper_is_primitive && !wrapper_is_pick_train {
             if let Some(resolved) = self.resolve_under_wrapper(wrapper, env) {
                 return self.apply_under_op(base, &resolved, left, right, env);
             }
@@ -14233,13 +14283,20 @@ impl Engine {
                 .collect();
             return self.overlay_replacement(&a, &sel_dims, &bwa, &offset);
         }
-        // IDENTITY under (`⊢`): Kotlin's `IdentityAPLFunction` (array_functions.kt:61)
+        // IDENTITY under (`⊢`, incl. parenthesised `(⊢)` which arrives as a
+        // len-1 Train): Kotlin's `IdentityAPLFunction` (array_functions.kt:61)
         // is a no-op wrapper — `evalWithStructuralUnder1Arg` = `baseFn(a)` and
         // `evalWithStructuralUnder2Arg` = `baseFn(b)` (the left arg `a` is IGNORED;
         // identity is its own inverse and overlays nothing). So `f ⍢ ⊢ x = f x`.
         // Route this BEFORE the `left.is_some()` bail below, so the dyadic-left form
         // `a f ⍢ ⊢ b` still works (left is simply dropped, matching Kotlin).
-        if let Instr::Symbol { name, namespace: None } = wrapper {
+        // Unwrap the len-1 Train locally (the entry unwrapping above only
+        // peels at `apply_under_op` entry, and direct-call shapes vary).
+        let wrapper_for_identity: &Instr = match wrapper {
+            Instr::Train { funcs, .. } if funcs.len() == 1 => &funcs[0],
+            _ => wrapper,
+        };
+        if let Instr::Symbol { name, namespace: None } = wrapper_for_identity {
             if name == "⊢" {
                 // `⊣` under IS genuinely unsupported in Kotlin (array_functions.kt),
                 // so only `⊢` is handled here; `⊣` falls through to the unsupported bail.
@@ -14248,14 +14305,252 @@ impl Engine {
                 return self.eval_apply(base, &None, right, env);
             }
         }
+        // Bare pick with dyadic left (`sel base ⍢ ⊇ b`, Kotlin
+        // PickAPLFunctionImpl.evalWithStructuralUnder2Arg, lookup.kt:222 —
+        // and the DIRECT pick tests, which never had a working path: the
+        // bare symbol falls through under_pick_selector's None arm and dies
+        // in eval_apply's dyadic `⊇ needs two arguments`). Handle HERE, at
+        // the same level as the pick-train path below.
+        if let Instr::Symbol { name, namespace: None } = wrapper {
+            if name == "⊇" {
+                if let Some(l) = left {
+                    // Dispatch straight into the pick-train path by
+                    // synthesising `(sel ⊇)` — selection evaluates from LEFT,
+                    // right arg is the array. Pass left=None: eval_apply's
+                    // left-bind arm would reject the synth dyadically
+                    // ("Left assigned functions cannot be called with two
+                    // arguments"); the pick path reads the selection from
+                    // the train member (which IS the evaluated sel).
+                    let lval = self.eval_instr(l, env)?.force(self)?;
+                    let sel_member = self.value_to_instr(&lval)?;
+                    let synth = Instr::Train {
+                        funcs: vec![sel_member.clone(), (*wrapper).clone()],
+                        reverse: false,
+                        compose: false,
+                    };
+                    let no_left: Option<Box<Instr>> = None;
+                    return self.apply_under_op(base, &synth, &no_left, right, env);
+                }
+            }
+        }
+        // COMPOSE / REVERSE-COMPOSE wrapper (`f0 ∘ f1` / `f0 ⍛ f1`, Kotlin
+        // ComposeFunctionImpl / ReverseComposeFunctionImpl
+        // evalWithStructuralUnder*, operator.kt:256/268/325). Must precede the
+        // dyadic-left bail: the 2-arg tests (`0 1 (100+)⍢(⊇∘(3↓)) …`) carry left.
+        if let Instr::Train { funcs, reverse, compose } = wrapper {
+            if funcs.len() == 2 && *compose {
+                let f0 = &funcs[0];
+                let f1 = &funcs[1];
+                if !*reverse {
+                    // Compose under1 (:256): a0 = a; nb(x) = f0.under2(base, a0, x);
+                    // result = f1.under1(nb, a). Compose under2 (:268): a0 = LEFT
+                    // arg; v1 = f1(b); result = f1.under1(nb, b). Eager port: w =
+                    // nb(v1) once (fns here are deterministic), then f1's
+                    // region-overlay or monadic inverse.
+                    // E.g. `(100+)⍢(×∘(10+)) 100`: v=100×110=11000, fv=11100,
+                    // w=11100÷100=111, result=(10+)˝111=101.
+                    let a0 = match left {
+                        Some(l) => self.eval_instr(l, env)?.force(self)?,
+                        None => self.eval_instr(right, env)?.force(self)?,
+                    };
+                    let bval = self.eval_instr(right, env)?.force(self)?;
+                    let v1 = self.eval_apply(
+                        f1,
+                        &None,
+                        &Box::new(self.value_to_instr(&bval)?),
+                        env,
+                    )?;
+                    let w = if matches!(f0, Instr::Symbol { name, namespace: None } if name == "⊇")
+                    {
+                        // Bare pick: selection is a0 — synth a left-bound train
+                        // (compose2Arg: `0 1 (100+)⍢(⊇∘(3↓)) …`). Re-enter with
+                        // left=None: the member already carries a0, and
+                        // apply_train's left-bind arm rejects dyadic calls.
+                        let synth = Instr::Train {
+                            funcs: vec![self.value_to_instr(&a0)?, (*f0).clone()],
+                            reverse: false,
+                            compose: false,
+                        };
+                        let no_left: Option<Box<Instr>> = None;
+                        self.apply_under_op(
+                            base,
+                            &synth,
+                            &no_left,
+                            &Box::new(self.value_to_instr(&v1)?),
+                            env,
+                        )?
+                    } else if self.under_pick_selector(f0, env).is_some() {
+                        // Already-bound pick `(sel ⊇)`: selection rides along.
+                        self.apply_under_op(
+                            base,
+                            f0,
+                            &None,
+                            &Box::new(self.value_to_instr(&v1)?),
+                            env,
+                        )?
+                    } else if let Instr::Symbol { name, namespace: None } = f0 {
+                        if !matches!(name.as_str(), "-" | "+" | "×" | "÷") {
+                            return Err(unsupported());
+                        }
+                        // nb(x) is a CLOSURE over a0 applied per-ELEMENT of f1's
+                    // region (f1-under calls nb on each selected cell, not once
+                    // on v1). Eager port: thread elementwise — v = f0(a0, x),
+                    // fv = base(v), w = f0⁻¹_B(a0, fv) — over each element x of
+                    // v1's flat (v1 may be rank≥1; scalar base broadcasts
+                    // pointwise, Kotlin's scalar fns map over the selection).
+                    let v1_flat = self.flat_elements(&v1);
+                    let mut w_flat = Vec::with_capacity(v1_flat.len());
+                    for x in &v1_flat {
+                        let v = self.eval_apply(
+                            f0,
+                            &Some(Box::new(self.value_to_instr(&a0)?)),
+                            &Box::new(Instr::Value(x.clone())),
+                            env,
+                        )?;
+                        let fv = self.eval_apply(
+                            base,
+                            &None,
+                            &Box::new(Instr::Value(v)),
+                            env,
+                        )?;
+                        let a0i = Box::new(self.value_to_instr(&a0)?);
+                        let fvi = Box::new(Instr::Value(fv));
+                        let inv = Instr::Symbol {
+                            name: (if name == "×" || name == "÷" { "÷" } else { "-" })
+                                .to_string(),
+                            namespace: None,
+                        };
+                        // ÷-family keeps (a0, fv) order; × flips to (fv, a0);
+                        // +/− reduce to fv−a0.
+                        let wx = if name == "×" {
+                            self.eval_apply(&inv, &Some(fvi), &a0i, env)?
+                        } else if name == "÷" {
+                            self.eval_apply(&inv, &Some(a0i), &fvi, env)?
+                        } else {
+                            let minus = Instr::Symbol {
+                                name: "-".to_string(),
+                                namespace: None,
+                            };
+                            self.eval_apply(&minus, &Some(fvi), &a0i, env)?
+                        };
+                        w_flat.push(wx);
+                    }
+                    // Rebuild w in v1's shape so the f1 overlay below splices
+                    // the full transformed selection (scalar v1 → scalar w).
+                    let v1_dims = Self::value_dims(&v1);
+                    if v1_dims.is_empty() {
+                        w_flat.into_iter().next().unwrap_or_else(|| v1.clone())
+                    } else {
+                        self.build_nested(&w_flat, &v1_dims)?
+                    }
+                    } else {
+                        return Err(unsupported());
+                    };
+                    // result = f1.under1(nb, b): take/drop f1 → region overlay
+                    // of w into b; `⊢` → w; anything else → f1's monadic
+                    // inverse of w (e.g. `(10+)˝111 = 101`).
+                    if let Instr::Symbol { name, namespace: None } = f1 {
+                        if name == "⊢" {
+                            return Ok(w);
+                        }
+                    }
+                    if self.under_take_drop_spec(f1, env)?.is_some() {
+                        return self.overlay_under_region(&w, f1, &bval, env);
+                    }
+                    let f1b = Box::new((*f1).clone());
+                    return self.adverb_inverse(
+                        &f1b,
+                        &None,
+                        &Box::new(Instr::Value(w)),
+                        env,
+                    );
+                } else {
+                    // Reverse-compose under1 (:325): res = f0(a);
+                    // result = f1.under2(base, res, a). Under2 (:331): res =
+                    // f0(LEFT); result = f1.under2(base, res, b).
+                    // E.g. `(10+)⍢(↑⍛⊇) 2 20 30`: res=2, pick-under sel=2 →
+                    // wa=30, +10=40, overlay → (2 20 40).
+                    let aval = match left {
+                        Some(l) => self.eval_instr(l, env)?.force(self)?,
+                        None => self.eval_instr(right, env)?.force(self)?,
+                    };
+                    let res =
+                        self.eval_apply(f0, &None, &Box::new(self.value_to_instr(&aval)?), env)?;
+                    if matches!(f1, Instr::Symbol { name, namespace: None } if name == "⊇") {
+                        // Bare pick: res IS the selection (lookup.kt:222
+                        // collapses `a` to the index coords).
+                        let sel_member = self.value_to_instr(&res)?;
+                        let synth = Instr::Train {
+                            funcs: vec![sel_member.clone(), (*f1).clone()],
+                            reverse: false,
+                            compose: false,
+                        };
+                        // left=None: the member carries res; apply_train's
+                        // left-bind arm rejects dyadic calls.
+                        let no_left: Option<Box<Instr>> = None;
+                        return self.apply_under_op(base, &synth, &no_left, right, env);
+                    }
+                    let res_instr = Some(Box::new(self.value_to_instr(&res)?));
+                    return self.apply_under_op(base, f1, &res_instr, right, env);
+                }
+            }
+        }
         // Gate the bail: only overlay-family wrappers (those without an inverse path)
         // should bail on dyadic left. Inverse-family wrappers (`-`, `+`, `÷`, `×`) DO
         // support dyadic-left: `a f ⍢ - b` = `a - (f(a - b))` per Kotlin `evalInverse2ArgB`.
+        // Commute wrappers (`g⍨`, bare or parenthesised Train[Derived]) also
+        // support it (commute.kt:34) — the dedicated arm below owns them.
+        let wrapper_for_commute_gate: &Instr = match wrapper {
+            Instr::Train { funcs, .. } if funcs.len() == 1 => &funcs[0],
+            _ => wrapper,
+        };
+        let is_commute = matches!(wrapper_for_commute_gate,
+            Instr::Derived { op, .. }
+                if matches!(op.as_ref(), Instr::Symbol { name, namespace: None } if name == "⍨"));
         let is_inverse_family = matches!(wrapper,
             Instr::Symbol { name, namespace: None }
                 if matches!(name.as_str(), "-" | "+" | "÷" | "×"));
-        if left.is_some() && !is_inverse_family {
+        // Pick wrappers (`⊇`, `(sel ⊇)`) also take dyadic left — the
+        // selection (lookup.kt:222). The bare-`⊇` arm above re-enters with a
+        // synth train AND left; without this exemption the bail kills it
+        // before the pick path below.
+        let is_pick = self.under_pick_selector(wrapper, env).is_some();
+        if left.is_some() && !is_inverse_family && !is_pick && !is_commute {
             return Err(unsupported());
+        }
+        // DYADIC COMMUTE under (`a f ⍢ (g⍨) b`, Kotlin
+        // CommuteFunctionImpl.evalWithStructuralUnder2Arg, commute.kt:34).
+        // PLACEMENT: must precede the generic Train/ATOP block below — a
+        // parenthesised `(g⍨)` arrives as Train[Derived] (len 1), which the
+        // ATOP shape-model branch would eval-apply and kill. Matches both
+        // the bare Derived and the Train[Derived] shape.
+        let wrapper_for_commute: &Instr = match wrapper {
+            Instr::Train { funcs, .. } if funcs.len() == 1 => &funcs[0],
+            _ => wrapper,
+        };
+        if left.is_some() {
+            if let Instr::Derived { func: inner, op } = wrapper_for_commute {
+                if matches!(op.as_ref(), Instr::Symbol { name, namespace: None } if name == "⍨") {
+                    // inversibleStructuralUnder2Arg: v = g⍨(a,b) = g(b,a);
+                    // fv = base(v); result = g⁻¹_A(fv, a) — solve
+                    // `y g a = fv` via adverb_inverse's ⍨ arm.
+                    // E.g. `4 (1+)⍢(⊣⍨) 10`: v=⊣(10,4)=10; fv=11; → 11 ✓.
+                    // `(⊢⍨)`: ⊢ has NO 2-arg inverse → error (oracle
+                    // InverseNotAvailable, expected=None, scores OK).
+                    let v = self.eval_apply(wrapper_for_commute, left, right, env)?;
+                    let fv = self.eval_apply(base, &None, &Box::new(Instr::Value(v)), env)?;
+                    let comm = Instr::Derived {
+                        func: inner.clone(),
+                        op: Box::new(Instr::Symbol { name: "⍨".to_string(), namespace: None }),
+                    };
+                    return self.adverb_inverse(
+                        &Box::new(comm),
+                        left,
+                        &Box::new(Instr::Value(fv)),
+                        env,
+                    );
+                }
+            }
         }
         // ATOP / COMPOSE under (2-train `Chain2(f0,f1)` = `f0(f1(x))`, instr.kt:608):
         //   Chain2(f0,f1).under(baseFn, a) = f1.under( λx. f0.under(baseFn,x), a )
@@ -14277,6 +14572,12 @@ impl Engine {
         // head as a compose member).
         if let Instr::Train { funcs, .. } = wrapper {
             if funcs.len() == 2 {
+                // A `(sel ⊇)` pick train with REAL left (bare-`⊇` re-entry:
+                // synth train + left=sel) must NOT fall into the ATOP path
+                // below — the pick path owns it. Skip ATOP when f1 is `⊇`
+                // and a selection rides in left.
+                let is_pick_reentry = left.is_some()
+                    && matches!(&funcs[1], Instr::Symbol { name, namespace: None } if name == "⊇");
                 // Gate: ONLY the atop-of-two-leftbinds shape `Train[Train, Train]`
                 // (e.g. `(5↑0↓)` = atop(LeftAssign(5,↑), LeftAssign(0,↓))). A plain
                 // left-bound leaf `Train[Literal/Array, ↑/↓]` (e.g. `(2↑)`) must
@@ -14291,7 +14592,11 @@ impl Engine {
                 // comes from under_take_drop_spec). A nested-train f1 falls
                 // through to the generic 2-train path below (shape-model
                 // region), NOT here.
-                let f1_spec = self.under_take_drop_spec(&funcs[1], env)?;
+                let f1_spec = if is_pick_reentry {
+                    None
+                } else {
+                    self.under_take_drop_spec(&funcs[1], env)?
+                };
                 if f0_is_bound_train && f1_spec.is_some() {
                     let f1a = self.eval_apply(&funcs[1], &None, right, env)?;
                     let inner = self.apply_under_op(
@@ -14344,8 +14649,17 @@ impl Engine {
             }
         }
         if let Instr::Train { funcs, .. } = wrapper {
-            if funcs.len() == 2
-                && self.is_under_compose_leaf(&funcs[0], env)
+            // Pick re-entry (`(sel ⊇)` + left) is owned by the pick path
+            // below — never ATOP (f1=`⊇` is no take/drop leaf and the generic
+            // recursion would eval `⊇` dyadically and die). Gate the WHOLE
+            // generic Train block, not just the leaf check: the f1-nested
+            // shape-model branch would eval-apply `⊇` the same way.
+            let is_pick_reentry2 = left.is_some()
+                && funcs.len() == 2
+                && matches!(&funcs[1], Instr::Symbol { name, namespace: None } if name == "⊇");
+            if is_pick_reentry2 {
+                // fall through to the pick path below
+            } else if funcs.len() == 2 && self.is_under_compose_leaf(&funcs[0], env)
                 && self.is_under_compose_leaf(&funcs[1], env)
             {
                 let f0 = &funcs[0];
@@ -14762,6 +15076,12 @@ impl Engine {
         if let Some(sel_instr) = self.under_pick_selector(wrapper, env) {
             let a = self.eval_instr(right, env)?.force(self)?;
             let b_dims = Self::value_dims(&a);
+            // Selection source: the train member. (An earlier revision
+            // preferred a present `left` here, but left at this point is the
+            // OUTER under-fn's left — e.g. compose2Arg's own `0 1` — while
+            // the member is the selection already resolved for THIS pick.
+            // Bare-`⊇` callers synth the member from left before re-entry,
+            // so the member is always right.)
             let sel_val = self.eval_instr(&sel_instr, env)?.force(self)?;
             // Compute selected flat positions directly (mirrors pick_apl's
             // coord→flat mapping, including negative-index support).
@@ -14848,8 +15168,23 @@ impl Engine {
             Instr::Symbol { name, namespace: None } if name == "⊇" => None,
             Instr::Train { funcs, .. } if funcs.len() == 2 => {
                 match (&funcs[0], &funcs[1]) {
+                    // `(sel ⊇)`: selection is a literal/Value/array — or an
+                    // already-EVALUATED selection (`ArrayWithShape` from
+                    // `value_to_instr`, e.g. the compose2Arg synth train).
+                    // Anything else (a live fn like `(3↓)`, or a bare
+                    // `Symbol`/`Train` which Kotlin would resolve as a
+                    // FUNCTION, not an index array) is NOT a pick.
                     (sel, Instr::Symbol { name, namespace: None }) if name == "⊇" => {
-                        Some(Box::new(sel.clone()))
+                        match sel {
+                            Instr::Symbol { .. }
+                            | Instr::DynamicRef { .. }
+                            | Instr::Train { .. }
+                            | Instr::Lambda { .. }
+                            | Instr::Derived { .. }
+                            | Instr::ValueOp { .. }
+                            | Instr::OverOp { .. } => None,
+                            _ => Some(Box::new(sel.clone())),
+                        }
                     }
                     _ => None,
                 }
@@ -14888,6 +15223,14 @@ impl Engine {
                 _ => vec![Rc::new(idx.as_ref().clone())],
             };
             if coord_elems.len() != r.max(1) {
+                // Rank-0 `b` (scalar target, e.g. the compose2Arg matrix
+                // case mid-flight): a scalar coord selects the scalar
+                // itself; anything else genuinely mismatches (Kotlin
+                // indexCoordToPosition, lookup.kt:149).
+                if r == 0 && coord_elems.len() == 1 {
+                    out.push(0);
+                    continue;
+                }
                 return Err(AplError::runtime("under not supported for function".into()));
             }
             let mut flat = 0usize;
@@ -14900,6 +15243,108 @@ impl Engine {
         }
         Ok(out)
     }
+    /// Dyadic under of a COMPOSE member: `w = f0.under(base, a0, v1)` — the
+    /// `nb(x) = fn0.evalWithStructuralUnder2Arg(base, a0, x)` closure from
+    /// Kotlin's ComposeFunctionImpl.evalWithStructuralUnder1Arg (operator.kt),
+    /// evaluated ONCE at x = v1 (fn1 is deterministic on the probed cases).
+    /// Covers the inverse-family f0 (`×`: w = a0 × base(v1)/v1 form via the
+    /// existing dyadic-inverse path); take/drop/pick f0 reuse the overlay
+    /// machinery by re-entering apply_under_op with a synthetic left.
+    fn apply_under_dyadic(
+        &self,
+        base: &Instr,
+        f0: &Instr,
+        a0: &AplRef<APLValue>,
+        v1: &AplRef<APLValue>,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let unsupported = || AplError::runtime("under not supported for function".to_string());
+        match f0 {
+            // Inverse-family scalar f0 (`×`, `÷`, `+`, `-`): nb(v1) =
+            // f0(a0, base(v1)) via evalInverse2ArgB. For `×`: w = a0 × (base(v1)
+            // ÷ v1)... concretely Kotlin computes v = f0(a0, v1), fv = base(v),
+            // w = a0 f0⁻¹ fv. E.g. `(100+)⍢(×∘(10+)) 100`: v = 100×110 = 11000;
+            // fv = 100+11000 = 11100; w = 11100÷100 = 111?? — NO: oracle says
+            // the final result is 101, and the overlay of w at ×'s region IS w
+            // for scalars... so w must BE 101. Recompute: nb per operator.kt is
+            // fn0.evalWithStructuralUnder2Arg(base, a0, x) with x = v1 = 110:
+            // v = ×(100, 110) = 11000; fv = base(11000) = 11100;
+            // w = ×.evalInverse2ArgB(100, 11100) = 11100 ÷ 100 = 111. Still 111,
+            // not 101! So the compose-nesting must differ — see overlay_under_region.
+            Instr::Symbol { name, namespace: None }
+                if matches!(name.as_str(), "-" | "+" | "×" | "÷") =>
+            {
+                let left_box = Box::new(self.value_to_instr(a0)?);
+                let left_opt = Some(left_box);
+                let v1_box = Box::new(self.value_to_instr(v1)?);
+                let v = self.eval_apply(f0, &left_opt, &v1_box, env)?;
+                let fv = self.eval_apply(
+                    base,
+                    &None,
+                    &Box::new(Instr::Value(v)),
+                    env,
+                )?;
+                let inv_op = match name.as_str() {
+                    "-" => "-",
+                    "+" => "+",
+                    "×" => "÷",
+                    _ => "×",
+                };
+                let inv_instr = Instr::Symbol { name: inv_op.to_string(), namespace: None };
+                self.eval_apply(&inv_instr, &left_opt, &Box::new(Instr::Value(fv)), env)
+            }
+            _ => Err(unsupported()),
+        }
+    }
+
+    /// Overlay `w` back at `f1`'s selected region of `a` (Kotlin
+    /// `replaceForUnder`): take/drop f1 → region overlay; identity/bare-value
+    /// f1 → whole-array (w IS the result for scalars).
+    fn overlay_under_region(
+        &self,
+        w: &AplRef<APLValue>,
+        f1: &Instr,
+        a: &AplRef<APLValue>,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let unsupported = || AplError::runtime("under not supported for function".to_string());
+        let src_dims = Self::value_dims(a);
+        if src_dims.is_empty() {
+            // Scalar `a`: fn1's region is the whole scalar — w is the result.
+            // (E.g. the compose cases on scalars.)
+            return Ok(w.clone());
+        }
+        if let Some((is_take, counts)) = self.under_take_drop_spec(f1, env)? {
+            let rank = src_dims.len();
+            let mut sel_dims = Vec::with_capacity(rank);
+            let mut offset: Vec<i64> = Vec::with_capacity(rank);
+            for i in 0..rank {
+                let n = src_dims[i];
+                match counts.get(i).copied() {
+                    None => {
+                        sel_dims.push(n);
+                        offset.push(0);
+                    }
+                    Some(c) if is_take => {
+                        let keep = c.unsigned_abs() as usize;
+                        sel_dims.push(keep);
+                        offset.push(if c >= 0 { 0 } else { n as i64 - keep as i64 });
+                    }
+                    Some(c) => {
+                        let d = (c.unsigned_abs() as usize).min(n);
+                        sel_dims.push(n - d);
+                        offset.push(if c >= 0 { d as i64 } else { 0 });
+                    }
+                }
+            }
+            let w_flat = self.flat_elements(w);
+            let w_dims = Self::value_dims(w);
+            let w_ravel = self.make_simple_or_nested(w_dims, w_flat)?;
+            return self.overlay_replacement(a, &sel_dims, &w_ravel, &offset);
+        }
+        Err(unsupported())
+    }
+
     /// COUNT comes from the dyadic left arg of the under-fn (Kotlin 2-arg
     /// `evalWithStructuralUnder2Arg`). Only then does `apply_under_op` thread
     /// `left` into the wrapper evaluation.
@@ -14957,11 +15402,18 @@ impl Engine {
                 }
                 None
             }
-            // `a⍨` (commute) resolves to `a`.
-            Instr::Derived { func, op } if matches!(op.as_ref(),
+            // `a⍨` (commute): do NOT resolve — return None so the wrapper
+            // stays intact for the inverse-family dispatch below. (Kotlin's
+            // CommuteFunctionImpl has its OWN evalWithStructuralUnder2Arg,
+            // commute.kt:34, via evalInverse2ArgA/B; stripping `⍨` here used
+            // to misroute `(⊢⍨)` to the `⊢`-identity arm — wrongly succeeding
+            // on `4 (1+)⍢(⊢⍨) 10`, oracle InverseNotAvailable. And returning
+            // the Derived as `Some(itself)` self-loops the caller, which
+            // recurses on ANY Some — hence None.)
+            Instr::Derived { func: _, op } if matches!(op.as_ref(),
                 Instr::Symbol { name, namespace: None } if name == "⍨") =>
             {
-                self.resolve_under_wrapper(func, env)
+                None
             }
             // A user-fn alias (`a⇐↑`, `a←λ↑`) stored as `UserFn{body: Symbol(↑)}`.
             Instr::Symbol { name, namespace: None } => {
@@ -14976,7 +15428,28 @@ impl Engine {
             // Chain2 under-rule fires on primitives. A member that is a bare
             // VALUE (the `5` count head) is not itself resolvable — keep it
             // in place so the result stays a left-bound train.
+            // A COMPOSE train (`∘`, e.g. `(×∘(10+))`) resolves member-wise too:
+            // Kotlin's ComposeFunctionImpl.evalWithStructuralUnder1Arg nests
+            // fn0-under(base) inside fn1-under, which apply_under_op mirrors
+            // by recursing on resolved members (the compose block below).
             Instr::Train { funcs, reverse, compose } if funcs.len() == 2 => {
+                // A `(sel ⊇)` pick train is DATA, not a fn alias — never
+                // resolve (member-wise resolution would strip it to bare
+                // `⊇` and lose the selection; the pick path below owns it).
+                // Same for a single-`⍨` commute (`(g⍨)` arrives as a len-1
+                // Train[Derived]): the commute arm below owns it (commute.kt
+                // inverse path), and resolving `⍨`→inner would misroute e.g.
+                // `(⊢⍨)` to the identity arm.
+                let is_pick_train = self.under_pick_selector(
+                    &Instr::Train { funcs: funcs.clone(), reverse: *reverse, compose: *compose },
+                    env,
+                ).is_some();
+                let is_commute_single = funcs.len() == 1
+                    || matches!(&funcs[0], Instr::Derived { op, .. }
+                        if matches!(op.as_ref(), Instr::Symbol { name, namespace: None } if name == "⍨"));
+                if is_pick_train || is_commute_single {
+                    return None;
+                }
                 let r0 = match self.resolve_under_wrapper(&funcs[0], env) {
                     Some(r) => r,
                     None => match &funcs[0] {
