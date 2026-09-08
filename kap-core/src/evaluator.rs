@@ -3886,7 +3886,7 @@ impl Engine {
             "regex:find" => self.regex_find(left_val, right_val),
             "regex:finderror" => self.regex_finderror(left_val, right_val),
             "regex:findall" => self.regex_findall(left_val, right_val),
-            "regex:replace" => self.regex_replace(left_val, right_val),
+            "regex:replace" => self.regex_replace(left_val, right_val, env),
             "regex:split" => self.regex_split(left_val, right_val),
             "regex:compile" => self.regex_compile(left_val, right_val),
             // `int:intern` (dyadic): `"ns" int:intern "name"` -> Symbol{name, ns}.
@@ -8213,10 +8213,20 @@ impl Engine {
         &self,
         left_val: Option<AplRef<APLValue>>,
         right_val: AplRef<APLValue>,
+        env: &AplRef<Environment>,
     ) -> Result<AplRef<APLValue>, AplError> {
         let (re, _) = self.regex_compiled(left_val, right_val.clone())?;
         // Right arg is an `(subject; replacement)` pair (Kotlin `b.listify()`).
         let pair = right_val.force(self)?;
+        enum Repl {
+            Str(String),
+            Lambda {
+                params: Vec<String>,
+                split: usize,
+                body: AplRef<Instr>,
+                fenv: AplRef<Environment>,
+            },
+        }
         let (subject, replacement) = match pair.as_ref() {
             APLValue::Array(a) | APLValue::List(a) if a.element_count() == 2 => {
                 let es = a.elements();
@@ -8230,7 +8240,13 @@ impl Engine {
                     }
                 };
                 let repl = match es[1].as_ref() {
-                    APLValue::Str(s) => s.clone(),
+                    APLValue::Str(s) => Repl::Str(s.clone()),
+                    APLValue::UserFn { params, split, body, env: fenv } => Repl::Lambda {
+                        params: params.clone(),
+                        split: *split,
+                        body: body.clone(),
+                        fenv: fenv.clone(),
+                    },
                     other => {
                         return Err(AplError::runtime(format!(
                             "regex:replace replacement must be a string, got: {}",
@@ -8248,7 +8264,60 @@ impl Engine {
             }
         };
         // Kotlin's `Regex.replace` replaces ALL matches (like `replace_all`).
-        let out = re.replace_all(&subject, replacement.as_str()).into_owned();
+        // With a string replacement: direct. With a lambda (regexp.kt
+        // `replacementArg is LambdaValue`): each match's groups vector
+        // (`makeAPLValueFromGroups` = `[whole, g1, ...]`) is passed as `⍵`;
+        // the result must be a string (else `Return value from lambda function
+        // was not a string`). Lambda fns are stored as UserFn (see block
+        // above); eval each match's replacement in a literal-arg scope via
+        // `apply_user_fn`'s `Instr::Literal` path — but `apply_user_fn` takes
+        // `right: &Box<Instr>`, so wrap the groups value in a literal Instr.
+        let out = match replacement {
+            Repl::Str(s) => re.replace_all(&subject, s.as_str()).into_owned(),
+            Repl::Lambda { params, split, body, fenv } => {
+                let mut result = String::new();
+                let mut last_end = 0;
+                for caps in re.captures_iter(&subject) {
+                    let m = caps.get(0).expect("captures_iter always yields group 0");
+                    result.push_str(&subject[last_end..m.start()]);
+                    last_end = m.end();
+                    let mut elems: Vec<AplRef<APLValue>> = Vec::with_capacity(caps.len());
+                    for i in 0..caps.len() {
+                        let s = caps
+                            .get(i)
+                            .map(|g| g.as_str().to_string())
+                            .unwrap_or_default();
+                        elems.push(Rc::new(APLValue::Str(s)));
+                    }
+                    let groups = Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        vec![elems.len()],
+                        ArrayData::Nested(elems),
+                    ))));
+                    let lit: Box<Instr> = Box::new(self.apl_to_instr(&groups)?);
+                    let rv = self.apply_user_fn(
+                        &params,
+                        split,
+                        body.as_ref(),
+                        &None,
+                        &lit,
+                        env,
+                        &fenv,
+                        None,
+                    )?;
+                    match rv.force(self)?.as_ref() {
+                        APLValue::Str(s) => result.push_str(s),
+                        other => {
+                            return Err(AplError::runtime(format!(
+                                "Return value from lambda function was not a string. Got: {}",
+                                other.format_value()
+                            )))
+                        }
+                    }
+                }
+                result.push_str(&subject[last_end..]);
+                result
+            }
+        };
         Ok(Rc::new(APLValue::Str(out)))
     }
 
@@ -8280,13 +8349,98 @@ impl Engine {
     /// `regex:compile` validates the pattern; on success it returns the pattern string
     /// (Kotlin returns a RegexpMatcherValue, which our string form can feed back as a
     /// left arg). A bad pattern errors (covers the `kind: "fails"` compile cases).
+    /// Dyadic form (`flags regex:compile pat`, regexp.kt `CreateRegexpFunctionImpl`):
+    /// left is a single keyword-namespace symbol or a rank<=1 array of them
+    /// (`:ignoreCase` → `RegexOption.IGNORE_CASE`, `:multiLine` → `MULTILINE`);
+    /// anything else errors exactly like Kotlin (`Unknown regexp flag:`, `Regexp flag
+    /// must be a symbol`, `Regexp flags must be a single symbol or a one-dimensional
+    /// array`). Flags are embedded as an inline prefix (`(?i)`/`(?m)` — the exact
+    /// semantics of Kotlin's RegexOptions), so the returned string feeds back through
+    /// `regex_compiled` transparently for `match`/`find`/`replace`/etc.
     fn regex_compile(
         &self,
         left_val: Option<AplRef<APLValue>>,
         right_val: AplRef<APLValue>,
     ) -> Result<AplRef<APLValue>, AplError> {
-        let (_, pat) = self.regex_compiled(left_val, right_val)?;
-        Ok(Rc::new(APLValue::Str(pat)))
+        let flags = match left_val {
+            None => None,
+            Some(l) => {
+                let fv = l.force(self)?;
+                let mut case_insensitive = false;
+                let mut multi_line = false;
+                let flag_of = |v: &APLValue,
+                               case_insensitive: &mut bool,
+                               multi_line: &mut bool|
+                 -> Result<(), AplError> {
+                    match v {
+                        APLValue::Symbol { name, namespace }
+                            if namespace.as_deref() == Some("keyword") =>
+                        {
+                            match name.as_str() {
+                                "ignoreCase" => *case_insensitive = true,
+                                "multiLine" => *multi_line = true,
+                                _ => {
+                                    return Err(AplError::runtime(format!(
+                                        "Unknown regexp flag: {}",
+                                        name
+                                    )))
+                                }
+                            }
+                            Ok(())
+                        }
+                        APLValue::Symbol { name, .. } => Err(AplError::runtime(format!(
+                            "Unknown regexp flag: {}",
+                            name
+                        ))),
+                        _ => Err(AplError::runtime("Regexp flag must be a symbol".into())),
+                    }
+                };
+                match fv.as_ref() {
+                    APLValue::Symbol { .. } => {
+                        flag_of(&fv, &mut case_insensitive, &mut multi_line)?
+                    }
+                    APLValue::Array(a) | APLValue::List(a) => {
+                        let rank = a.dimensions.len();
+                        if rank == 0 {
+                            flag_of(&fv, &mut case_insensitive, &mut multi_line)?;
+                        } else if rank == 1 {
+                            for e in a.elements() {
+                                flag_of(&e, &mut case_insensitive, &mut multi_line)?;
+                            }
+                        } else {
+                            return Err(AplError::runtime(
+                                "Regexp flags must be a single symbol or a one-dimensional array"
+                                    .into(),
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(AplError::runtime(
+                            "Regexp flag must be a symbol".into(),
+                        ))
+                    }
+                }
+                Some((case_insensitive, multi_line))
+            }
+        };
+        let (_, pat) = self.regex_compiled(None, right_val)?;
+        let out = match flags {
+            None | Some((false, false)) => pat,
+            Some((ci, ml)) => {
+                let mut prefix = String::from("(?");
+                if ci {
+                    prefix.push('i');
+                }
+                if ml {
+                    prefix.push('m');
+                }
+                prefix.push(')');
+                format!("{}{}", prefix, pat)
+            }
+        };
+        regex::Regex::new(&out)
+            .map_err(|e| AplError::runtime(format!("invalid regex pattern: {}", e)))?;
+        Ok(Rc::new(APLValue::Str(out)))
     }
 
     fn shape(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
