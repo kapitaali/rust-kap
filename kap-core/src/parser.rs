@@ -6734,8 +6734,12 @@ impl<'a> Parser<'a> {
                 }
                 SyntaxRule::Optional { inner } => {
                     if self.optional_matches(inner) {
-                        for r in inner {
-                            self.apply_optional_rule(r)?;
+                        // Clone the rules: `apply_optional_rule` needs `&mut
+                        // self` + `&mut bindings`, which cannot borrow `m`
+                        // (also behind `self`) at the same time.
+                        let owned = inner.clone();
+                        for r in &owned {
+                            self.apply_optional_rule(r, &mut bindings)?;
                         }
                     }
                 }
@@ -6796,8 +6800,15 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Apply a single optional inner rule, consuming its tokens (bindings are discarded).
-    fn apply_optional_rule(&mut self, rule: &SyntaxRule) -> Result<(), AplError> {
+    /// Apply a single optional inner rule, consuming its tokens and pushing any
+    /// variable binding (Kotlin `OptionalSyntaxRule.processRule` binds via the
+    /// same `syntaxRuleBindings` list as top-level rules — e.g. `optionalTest0`
+    /// `foo (1) (2)` must bind `b`, not just skip `(2)`).
+    fn apply_optional_rule(
+        &mut self,
+        rule: &SyntaxRule,
+        bindings: &mut Vec<(String, Box<Instr>)>,
+    ) -> Result<(), AplError> {
         match rule {
             SyntaxRule::Constant { name } => {
                 // Consume the literal name (the head match was already verified
@@ -6824,35 +6835,89 @@ impl<'a> Parser<'a> {
                     ))),
                 }
             }
-            SyntaxRule::Function { var } | SyntaxRule::NFunction { var } => {
+            SyntaxRule::Function { var } => {
                 self.skip_newlines();
                 if matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenBrace)) {
                     self.advance(); // consume the opening `{` (parse_block assumes it is gone)
                 }
-                let _ = self.parse_block()?;
-                let _ = var;
+                let body = self.parse_block()?;
+                bindings.push((
+                    var.clone(),
+                    Box::new(Instr::Lambda { params: vec![], body: Box::new(body) }),
+                ));
                 Ok(())
             }
-            SyntaxRule::Value { var } | SyntaxRule::ExprFunction { var } | SyntaxRule::NExprFunction { var } => {
+            SyntaxRule::NFunction { var } => {
+                self.skip_newlines();
+                if matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenBrace)) {
+                    self.advance(); // consume the opening `{` (parse_block assumes it is gone)
+                }
+                let body = self.parse_block()?;
+                bindings.push((var.clone(), Box::new(Instr::NonBoundFn { body: Box::new(body) })));
+                Ok(())
+            }
+            SyntaxRule::Value { var } => {
                 self.skip_newlines();
                 if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenParen)) {
                     return Err(self.err(&format!("expected '(' in optional :value rule '{}'", var)));
                 }
                 self.advance();
-                let _ = self.parse_expr()?;
+                let inner = self.parse_expr()?;
                 self.skip_newlines();
                 if !matches!(self.peek(), Some(t) if matches!(t.token, Token::CloseParen)) {
                     return Err(self.err(&format!("expected ')' in optional :value rule '{}'", var)));
                 }
                 self.advance();
+                bindings.push((var.clone(), Box::new(inner)));
+                Ok(())
+            }
+            SyntaxRule::ExprFunction { var } => {
+                self.skip_newlines();
+                if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenParen)) {
+                    return Err(self.err(&format!("expected '(' in optional :exprfunction rule '{}'", var)));
+                }
+                self.advance();
+                let inner = self.parse_expr()?;
+                self.skip_newlines();
+                if !matches!(self.peek(), Some(t) if matches!(t.token, Token::CloseParen)) {
+                    return Err(self.err(&format!("expected ')' in optional :exprfunction rule '{}'", var)));
+                }
+                self.advance();
+                bindings.push((
+                    var.clone(),
+                    Box::new(Instr::Lambda {
+                        params: vec![],
+                        body: Box::new(Instr::Block { body: vec![inner] }),
+                    }),
+                ));
+                Ok(())
+            }
+            SyntaxRule::NExprFunction { var } => {
+                self.skip_newlines();
+                if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenParen)) {
+                    return Err(self.err(&format!("expected '(' in optional :nexprfunction rule '{}'", var)));
+                }
+                self.advance();
+                let inner = self.parse_expr()?;
+                self.skip_newlines();
+                if !matches!(self.peek(), Some(t) if matches!(t.token, Token::CloseParen)) {
+                    return Err(self.err(&format!("expected ')' in optional :nexprfunction rule '{}'", var)));
+                }
+                self.advance();
+                bindings.push((var.clone(), Box::new(Instr::NonBoundFn { body: Box::new(inner) })));
                 Ok(())
             }
             SyntaxRule::String { var } => {
                 self.skip_newlines();
                 match self.peek() {
                     Some(t) => match &t.token {
-                        Token::Literal(LiteralValue::Str(_)) => {
+                        Token::Literal(LiteralValue::Str(s)) => {
+                            let s = s.clone();
                             self.advance();
+                            bindings.push((
+                                var.clone(),
+                                Box::new(Instr::Literal(LiteralValue::Str(s))),
+                            ));
                             Ok(())
                         }
                         _ => Err(self.err(&format!("expected string in optional :string '{}'", var))),
@@ -7000,8 +7065,11 @@ impl<'a> Parser<'a> {
                 }
                 SyntaxRule::Optional { inner } => {
                     if self.optional_matches(inner) {
-                        for r in inner {
-                            self.apply_optional_rule(r)?;
+                        // Clone: `apply_optional_rule` needs `&mut self` +
+                        // `&mut bindings` while `inner` borrows `sub`.
+                        let owned = inner.clone();
+                        for r in &owned {
+                            self.apply_optional_rule(r, &mut bindings)?;
                         }
                     }
                 }
