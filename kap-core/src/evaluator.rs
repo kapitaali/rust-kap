@@ -1690,6 +1690,17 @@ impl Engine {
                     // A general Train (atop, fork, or single fn) is itself a function.
                     // Store the Train as the body; apply_user_fn dispatches through
                     // eval_apply → apply_train with the *call's* data arguments.
+                    // An axis-applied function (`abc ⇐ +[1]`, Kotlin
+                    // `AxisValAssignedFunctionDirect`) is likewise a function
+                    // value — store it directly. (The catch-all `_` arm below
+                    // would wrap it in an `⍺ <rhs> ⍵` delegation, and `⍺` is
+                    // unbound on monadic/each calls → "undefined symbol: ⍺".)
+                    Instr::AxisApplied { .. } => Rc::new(APLValue::UserFn {
+                        params: vec![],
+                        split: 0,
+                        body: Rc::new(*value.clone()),
+                        env: env.clone(),
+                    }),
                     Instr::Train { .. } | Instr::Derived { .. } | Instr::ValueOp { .. } => {
                         Rc::new(APLValue::UserFn {
                             params: vec![],
@@ -5434,7 +5445,7 @@ impl Engine {
         // catches it here and returns `v`. If it escapes uncaught (top level), `eval_string_in_env`
         // converts it to the Real-Kap message "Call to return without a function call".
         let result = match body {
-            Instr::Derived { .. } | Instr::Train { .. } | Instr::ValueOp { .. } | Instr::Symbol { .. } | Instr::DynamicRef { .. } => {
+            Instr::Derived { .. } | Instr::Train { .. } | Instr::ValueOp { .. } | Instr::AxisApplied { .. } | Instr::Symbol { .. } | Instr::DynamicRef { .. } => {
                 child.fn_body_depth.set(child.fn_body_depth.get() + 1);
                 let r = self.eval_apply(body, left, right, &child);
                 child.fn_body_depth.set(child.fn_body_depth.get() - 1);
@@ -7014,69 +7025,124 @@ impl Engine {
         name: &str,
         axis: usize,
     ) -> Result<AplRef<APLValue>, AplError> {
+        // Kotlin `MathCombineAPLFunction.eval2Arg` with axis (math_functions.kt:485):
+        // scalar+scalar short-circuits BEFORE axis handling (handled by the caller);
+        // otherwise EXACTLY ONE side must be rank-1 (a bare scalar counts as
+        // rank-0 → error unless the caller already short-circuited). The rank-1
+        // side is reshaped to align with the other side's axis (transpose: move
+        // OTHER[axis] last, stretch the vector across it) and the plain
+        // element-wise combine runs. Error texts mirror Kotlin:
+        // - neither side rank-1 → "When specifying an axis, A or B has to be rank 1"
+        // - bad axis → "Axis {k} is not valid. Expected: {rank}" (IllegalAxisException)
+        // - length mismatch → "Dimensions of A does not match dimensions of B across axis {k}"
         let left = left_val
             .ok_or_else(|| AplError::runtime(format!("{}[axis] needs two arguments", name)))?;
-        let la = match left.as_ref() {
-            APLValue::Array(a) if a.dimensions.len() == 1 => {
-                let mut v = Vec::with_capacity(a.element_count());
-                for e in a.elements() {
-                    match e.as_ref() {
-                        APLValue::Number(n) => v.push(n.clone()),
-                        _ => return Err(AplError::runtime(
-                            "axis-combine left operand must be a numeric vector".into(),
-                        )),
-                    }
-                }
-                v
+        let rank_of = |v: &AplRef<APLValue>| -> usize {
+            match v.as_ref() {
+                APLValue::Array(a) => a.dimensions.len(),
+                _ => 0,
             }
+        };
+        let rl = rank_of(&left);
+        let rr = rank_of(&right_val);
+        // Rank-1 side = the vector; the other side = the base. Scalars (rank 0)
+        // are NOT vectors (Kotlin: only the scalar+scalar case short-circuits;
+        // scalar+array with axis errors "A or B has to be rank 1" — oracle-verified).
+        enum Side {
+            Left,
+            Right,
+        }
+        let (vec_val, base_val, vec_side) = match (rl == 1, rr == 1) {
+            (true, true) => {
+                // Both rank-1: axis must be 0 (Kotlin: `if (axisInt == 0)` else
+                // IllegalAxisException against the 1-dim shape).
+                if axis != 0 {
+                    return Err(AplError::runtime(format!(
+                        "{}: Axis {} is not valid. Expected: 1",
+                        name, axis
+                    )));
+                }
+                // Plain element-wise combine (lengths must match — num2_impl errors).
+                // `apply_op` maps the scalar op; wrap in the KapNumber closure num2 wants.
+                return self.num2(
+                    Some(left.clone()),
+                    right_val.clone(),
+                    |a, b| {
+                        // Only + - × ÷ * reach num2_axis; fall back to add (unreachable).
+                        match name {
+                            "-" => a.sub(b),
+                            "×" | "*" => a.mul(b),
+                            "÷" | "/" => a.div(b),
+                            _ => a.add(b),
+                        }
+                    },
+                    name,
+                );
+            }
+            (true, false) => (left.clone(), right_val.clone(), Side::Left),
+            (false, true) => (right_val.clone(), left.clone(), Side::Right),
+            (false, false) => {
+                return Err(AplError::runtime(
+                    "When specifying an axis, A or B has to be rank 1".into(),
+                ))
+            }
+        };
+        let vec_len = match vec_val.as_ref() {
+            APLValue::Array(a) => a.element_count(),
+            _ => unreachable!(),
+        };
+        let base_dims: Vec<usize> = match base_val.as_ref() {
+            APLValue::Array(a) => a.dimensions.clone(),
             _ => {
                 return Err(AplError::runtime(
                     "When specifying an axis, A or B has to be rank 1".into(),
                 ))
             }
         };
-        let arr = match right_val.as_ref() {
+        if axis >= base_dims.len() {
+            return Err(AplError::runtime(format!(
+                "{}: Axis {} is not valid. Expected: {}",
+                name,
+                axis,
+                base_dims.len()
+            )));
+        }
+        if vec_len != base_dims[axis] {
+            return Err(AplError::runtime(format!(
+                "{}: Dimensions of A does not match dimensions of B across axis {}",
+                name, axis
+            )));
+        }
+        // Align the vector with OTHER[axis] via transpose: move OTHER's axis
+        // last, stretch the vector across it, combine, transpose back. Reuse
+        // the existing `transpose` + broadcast `num2` machinery: build the
+        // permuted base, run plain num2 (which broadcasts the vector along the
+        // LAST axis after we reshape the vector to (…,1,…,len)), then invert.
+        // Simpler equivalent: index arithmetic directly on the flat ravel.
+        let arr = match base_val.as_ref() {
             APLValue::Array(a) => a,
-            APLValue::Number(_) => {
-                // B is a scalar: treat as 1-D of size 1 along axis 0; broadcast left[0].
-                let out = match right_val.as_ref() {
-                    APLValue::Number(y) => {
-                        let l0 = la.first().cloned().unwrap_or_else(|| y.clone());
-                        self.apply_op(name, &l0, y)?
-                    }
-                    _ => unreachable!(),
-                };
-                return Ok(Rc::new(APLValue::Number(out)));
-            }
-            _ => {
-                return Err(AplError::runtime(
-                    "axis-combine right operand must be a numeric array".into(),
-                ))
-            }
+            _ => unreachable!(),
         };
         let dims = arr.dimensions.clone();
-        if axis >= dims.len() {
-            return Err(AplError::runtime(format!(
-                "axis {} out of range for array of rank {}",
-                axis,
-                dims.len()
-            )));
-        }
-        if la.len() != dims[axis] {
-            return Err(AplError::runtime(format!(
-                "axis-combine: left vector length {} does not match axis {} size {}",
-                la.len(),
-                axis,
-                dims[axis]
-            )));
-        }
-        // Strides for unravelling a flat index into coordinates.
         let mut strides = vec![1usize; dims.len()];
         for i in (0..dims.len().saturating_sub(1)).rev() {
             strides[i] = strides[i + 1] * dims[i + 1];
         }
         let elems = arr.elements();
         let total = arr.element_count();
+        let vec_elems: Vec<KapNumber> = match vec_val.as_ref() {
+            APLValue::Array(a) => a
+                .elements()
+                .iter()
+                .map(|e| match e.as_ref() {
+                    APLValue::Number(n) => Ok(n.clone()),
+                    _ => Err(AplError::runtime(
+                        "axis-combine vector operand must be numeric".into(),
+                    )),
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            _ => unreachable!(),
+        };
         let mut out = Vec::with_capacity(total);
         for i in 0..total {
             let coord_axis = (i / strides[axis]) % dims[axis];
@@ -7085,7 +7151,7 @@ impl Engine {
                     APLValue::Number(n) => n,
                     _ => {
                         return Err(AplError::runtime(
-                            "axis-combine right operand must be numeric".into(),
+                            "axis-combine array operand must be numeric".into(),
                         ))
                     }
                 },
@@ -7095,7 +7161,11 @@ impl Engine {
                     ))
                 }
             };
-            let res = self.apply_op(name, &la[coord_axis], right_elem)?;
+            let (x, y) = match vec_side {
+                Side::Left => (&vec_elems[coord_axis], right_elem),
+                Side::Right => (right_elem, &vec_elems[coord_axis]),
+            };
+            let res = self.apply_op(name, x, y)?;
             out.push(Rc::new(APLValue::Number(res)));
         }
         Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
