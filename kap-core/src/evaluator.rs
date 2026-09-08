@@ -1207,10 +1207,18 @@ impl Engine {
                 self.apply_user_op(op, left_fn, right_fn, right_value, &None, &Box::new(Instr::Empty), env)
             }
             Instr::Array { elements } => {
-                let mut vals = Vec::with_capacity(elements.len());
-                for e in elements {
-                    vals.push(self.eval_instr(e, env)?);
+                // Kotlin `Literal1DArray.evalWithContext` (instr.kt:263) evaluates
+                // members RIGHT-to-left (`for (i in (size-1) downTo 0)`) while
+                // storing them in order — so in `b ((b←2)+10)` the assignment
+                // runs before the bare `b` reads it (oracle `(2 12)`), and in
+                // `((d←5)+100) d` the trailing `d` reads the OLD value (oracle
+                // `(105 0)`). Evaluate reversed, store in order.
+                let mut slots: Vec<Option<AplRef<APLValue>>> = vec![None; elements.len()];
+                for (i, e) in elements.iter().enumerate().rev() {
+                    slots[i] = Some(self.eval_instr(e, env)?);
                 }
+                let vals: Vec<AplRef<APLValue>> =
+                    slots.into_iter().map(|s| s.unwrap()).collect();
                 // P1-M4 (common.kt:173): a strand whose LAST member is an unbound
                 // primitive (`c +`) is Kotlin's "fn with leftArgs and no right arg"
                 // case, which errors `No arguments specified for function` (oracle-
@@ -1241,14 +1249,11 @@ impl Engine {
                 )))))
             }
             Instr::List { elements } => {
-                // A `;`-separated list literal `(1;2;3)`. Evaluates to an
-                // APLValue::List — distinct from a space-stranded array. A Kap
-                // List is a RANK-0 scalar (Kotlin `APLList : APLSingleValue`,
-                // `dimensions = emptyDimensions()`), so its shape is `⍬`, its tally
-                // `≢` is 1, and `+/` of a list returns the list itself (unreduced).
-                // STORAGE stays rank-1 (`vec![len]`) so KapArray's element_count()/
-                // elements() invariants hold; the rank-0 semantics are enforced in
-                // `APLValue::dimensions()`/`rank()` (lib.rs) which special-case List.
+                // `;`-separated list literal `(1;2;3)` → APLValue::List (rank-0
+                // scalar per Kotlin `APLList : APLSingleValue`; rank-0 enforced in
+                // `APLValue::dimensions()`/`rank()` in lib.rs). Eval order is
+                // LEFT-to-right (`forEach`, instr.kt:68) — unlike strands
+                // (`Literal1DArray` runs right-to-left).
                 let mut vals = Vec::with_capacity(elements.len());
                 for e in elements {
                     vals.push(self.eval_instr(e, env)?);
