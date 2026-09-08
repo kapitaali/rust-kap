@@ -833,6 +833,10 @@ impl Engine {
                         self.sim(left_fn)?;
                         self.sim(right_fn)
                     }
+                    Instr::Obverse { left_fn, right_fn } => {
+                        self.sim(left_fn)?;
+                        self.sim(right_fn)
+                    }
                     Instr::InnerProduct { left_fn, right_fn } => {
                         if let Some(l) = left_fn {
                             self.sim(l)?;
@@ -1410,6 +1414,18 @@ impl Engine {
                 &Box::new(Instr::Empty),
                 env,
             ),
+            // `Obverse` operator `f ⍫ g` (Kotlin ObverseFunctionImpl, op.kt:304):
+            // a bare occurrence routes through eval_apply like the neighbouring
+            // `Over` arm so its guard produces the proper arity error.
+            Instr::Obverse { left_fn, right_fn } => self.eval_apply(
+                &Instr::Obverse {
+                    left_fn: left_fn.clone(),
+                    right_fn: right_fn.clone(),
+                },
+                &None,
+                &Box::new(Instr::Empty),
+                env,
+            ),
             // `Over` operator `f ⍥ g` (Kotlin OverDerivedFunction, operator.kt:383):
             //   monadic `(f⍥g) y`   = `f(g(y))`
             //   dyadic  `x (f⍥g) y` = `f(g(x), g(y))`
@@ -1695,7 +1711,13 @@ impl Engine {
                     // value — store it directly. (The catch-all `_` arm below
                     // would wrap it in an `⍺ <rhs> ⍵` delegation, and `⍺` is
                     // unbound on monadic/each calls → "undefined symbol: ⍺".)
-                    Instr::AxisApplied { .. } => Rc::new(APLValue::UserFn {
+                    // Same for derived-operator values (`OverOp`/`InnerProduct`/
+                    // `Obverse` — e.g. `bar ⇐ foo⍫{…}`; the delegation would
+                    // break every monadic call the same way.)
+                    Instr::AxisApplied { .. }
+                    | Instr::OverOp { .. }
+                    | Instr::InnerProduct { .. }
+                    | Instr::Obverse { .. } => Rc::new(APLValue::UserFn {
                         params: vec![],
                         split: 0,
                         body: Rc::new(*value.clone()),
@@ -3186,6 +3208,12 @@ impl Engine {
                     );
                 }
             }
+        }
+        // --- `Obverse` operator `f ⍫ g` (Kotlin ObverseFunctionImpl, op.kt:304) ---
+        //   forward  `(f⍫g) y`   = `f(y)`;   `x (f⍫g) y` = `x f y`
+        //   (the INVERSE `(f⍫g)˝` applies `g` — handled in `adverb_inverse`).
+        if let Instr::Obverse { left_fn, right_fn } = fn_expr {
+            return self.eval_apply(left_fn.as_ref(), left, right, env);
         }
         // --- User-defined / native operators called with explicit data args ---
         // e.g. `10 +foo 2` parses as `Apply{fn: OpCall{op:foo, left_fn:+}, left:10, right:2}`.
@@ -5583,7 +5611,7 @@ impl Engine {
         // catches it here and returns `v`. If it escapes uncaught (top level), `eval_string_in_env`
         // converts it to the Real-Kap message "Call to return without a function call".
         let result = match body {
-            Instr::Derived { .. } | Instr::Train { .. } | Instr::ValueOp { .. } | Instr::AxisApplied { .. } | Instr::Symbol { .. } | Instr::DynamicRef { .. } => {
+            Instr::Derived { .. } | Instr::Train { .. } | Instr::ValueOp { .. } | Instr::AxisApplied { .. } | Instr::Symbol { .. } | Instr::DynamicRef { .. } | Instr::OverOp { .. } | Instr::InnerProduct { .. } | Instr::Obverse { .. } => {
                 child.fn_body_depth.set(child.fn_body_depth.get() + 1);
                 let r = self.eval_apply(body, left, right, &child);
                 child.fn_body_depth.set(child.fn_body_depth.get() - 1);
@@ -9495,12 +9523,48 @@ impl Engine {
             }
             _ => None,
         };
+        // `bar` (a user fn whose body is an `Obverse` value, e.g.
+        // `bar ⇐ foo⍫{…}`): when the leaf-name pass above yielded None AND
+        // the name resolves to a UserFn with an Obverse body, use the BODY
+        // (an owned `Instr`, not a leaf name) so `(bar˝ …)` reaches the
+        // Obverse inverse arm below (Kotlin ObverseFunctionImpl.
+        // evalInverse1Arg/2ArgB → fn1). Separate `let` (not a second
+        // `Symbol` match arm — the first arm already claims that pattern).
+        let resolved_owned: Option<Box<Instr>> = match resolved_owned {
+            Some(b) => Some(b),
+            None => match func.as_ref() {
+                Instr::Symbol { name, namespace: None } => match env.lookup(name, &None) {
+                    Some(v) => match v.as_ref() {
+                        APLValue::UserFn { body, .. }
+                            if matches!(body.as_ref(), Instr::Obverse { .. }) =>
+                        {
+                            Some(Box::new(body.as_ref().clone()))
+                        }
+                        _ => None,
+                    },
+                    None => None,
+                },
+                _ => None,
+            },
+        };
         let func: &Box<Instr> = match &resolved_owned {
             Some(b) => b,
             None => func,
         };
         let (fname, _inv_axis) = match func.as_ref() {
             Instr::Symbol { name, .. } => (name.clone(), None),
+            // `(f⍫g)˝` (Kotlin ObverseFunctionImpl.evalInverse1Arg/2ArgB →
+            // fn1, op.kt:304): the inverse applies the RIGHT function with
+            // the SAME valence: monadic `(f⍫g)˝ y` = `g(y)`; dyadic
+            // `x (f⍫g)˝ y` = `x g y` (evalInverse2ArgB receives the bound
+            // `x` as `left`). The oracle `dyadicObverse` row confirms the
+            // dyadic path (`10 bar˝ 20` → 1220 = `(100×10)+(200+20)`).
+            // (`10 bar⍨˝ 20` — commute-UNDER-inverse — is a different shape:
+            // the `⍨` arm below owns it and errors, matching the oracle's
+            // InverseNotAvailable.)
+            Instr::Obverse { right_fn, .. } => {
+                return self.eval_apply(right_fn.as_ref(), left, right, env);
+            }
             // An axis-applied function (`⌽[0]˝`, i.e. `(f[k])˝`) keeps its axis:
             // Kotlin binds ˝ to the AxisValAssignedFunctionDirect and evalInverse
             // threads the axis through. Unwrap to the inner fn name.

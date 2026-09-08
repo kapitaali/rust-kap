@@ -332,7 +332,7 @@ impl<'a> Parser<'a> {
                 Instr::Symbol { name, namespace: None } => {
                     Self::is_primitive_op(name) || self.known_functions.iter().any(|f| f == name)
                 }
-                Instr::Train { .. } | Instr::OverOp { .. } => true,
+                Instr::Train { .. } | Instr::OverOp { .. } | Instr::Obverse { .. } => true,
                 // An operand-less 2-arg `OpCall` carries its own precise error
                 // (raised at eval, mirroring Kotlin `UserDefinedOperatorTwoArg`);
                 // a COMPLETE `OpCall` (FnCall/ValueCall shape) is still a bare
@@ -1330,6 +1330,21 @@ impl<'a> Parser<'a> {
                         self.skip_newlines();
                         let r = self.parse_function_atom()?;
                         cur = Instr::OverOp {
+                            left_fn: Box::new(cur),
+                            right_fn: Box::new(r),
+                        };
+                        continue;
+                    }
+                    // Obverse `f ⍫ g` (Kotlin ObverseOp, engine.kt:503 /
+                    // op.kt:304): 2-arg operator, SINGLE function right operand
+                    // (op.kt:31) — mirrors the `⍥` arm directly above. This is
+                    // the bind_operators_kotlin path (`bar 10` call shapes);
+                    // the ⇐-RHS fn-expr path has its own arm (~5015).
+                    Some(Token::ObverseToken) => {
+                        self.advance();
+                        self.skip_newlines();
+                        let r = self.parse_function_atom()?;
+                        cur = Instr::Obverse {
                             left_fn: Box::new(cur),
                             right_fn: Box::new(r),
                         };
@@ -2430,6 +2445,7 @@ impl<'a> Parser<'a> {
                 | Instr::Symbol { .. }
                 | Instr::Derived { .. }
                 | Instr::Block { .. }
+                | Instr::Obverse { .. }
         ) {
             return Err(self.err(&format!("'{} ⇐' requires a function on the right", name)));
         }
@@ -4880,6 +4896,16 @@ impl<'a> Parser<'a> {
                 right_fn: Box::new(right),
             };
         }
+        // Bind a non-leading ObverseToken (`⍫`) into Obverse, mirroring the
+        // `⍥` tine arm directly above. `,⍫⊂` → Obverse{`,`, `⊂`}.
+        if matches!(self.peek().map(|t| &t.token), Some(Token::ObverseToken)) {
+            self.advance(); // consume ⍫
+            let right = self.parse_function_atom()?;
+            cur = Instr::Obverse {
+                left_fn: Box::new(cur),
+                right_fn: Box::new(right),
+            };
+        }
         // Bind trailing adverbs (`⫽⍨`, `+¨`): Kotlin's parseOperator loop keeps
         // binding operators onto the middle/right tine, so a derived middle
         // like `⫽⍨` in `⊣«⫽⍨»∊` is one tine, not `⫽` + stray `⍨`. Plain
@@ -5014,6 +5040,18 @@ impl<'a> Parser<'a> {
                     }
                     let right = self.parse_function_atom()?;
                     return Ok(Instr::Train { funcs: vec![left, right], reverse: false, compose: true });
+                }
+                // Obverse `f ⍫ g` (Kotlin ObverseOp, engine.kt:503): 2-arg
+                // operator, SINGLE function right operand (op.kt:31) — mirrors
+                // the `∘` arm directly above (oracle rows monadicObverse/
+                // dyadicObverse: `bar ⇐ foo⍫{…}`).
+                Token::ObverseToken => {
+                    self.advance();
+                    let right = self.parse_function_atom()?;
+                    return Ok(Instr::Obverse {
+                        left_fn: Box::new(left),
+                        right_fn: Box::new(right),
+                    });
                 }
                 Token::ReverseComposeToken => {
                     self.advance();
@@ -5578,6 +5616,13 @@ impl<'a> Parser<'a> {
                     right_fn: Box::new(r),
                 })
             }
+            Token::ObverseToken => {
+                // Leading obverse `⍫ g` (Obverse, Kotlin ObverseOp): a leading
+                // `⍫` with no left operand is an error in Real Kap — mirrors
+                // the `⍥` arm directly above (`⍥⊂ 1 2 3` → "Operator without
+                // left function: ⍥", Kotlin parser.kt:967-971).
+                return Err(self.err("Operator without left function: ⍫"));
+            }
             Token::ComposeToken => {
                 // `∘∙f` — the OUTER product surface form (Kotlin NullFunction left
                 // operand of OuterInnerJoinOp, engine.kt:489). `∘` alone is also a
@@ -5778,6 +5823,8 @@ impl<'a> Parser<'a> {
                 | Instr::AxisApplied { .. }
                 // `Over` operator `f ⍥ g` (OverOp) is a derived function value.
                 | Instr::OverOp { .. }
+                // `Obverse` operator `f ⍫ g` (Obverse) is a derived function value.
+                | Instr::Obverse { .. }
                 // `object.member` (MemberDeref) is a function-shaped postfix, like `Index`.
                 | Instr::MemberDeref { .. }
                 // P1-M7: a `{…}` block IS a function value (Kotlin OpenFnDef →
@@ -5986,6 +6033,12 @@ impl<'a> Parser<'a> {
             // bind_operators_kotlin / parse_fork_tine, never here.
             Token::OverToken => {
                 return Err(self.err("Operator without left function: ⍥"));
+            }
+            // Leading obverse `⍫` (Obverse, Kotlin ObverseOp): a leading `⍫`
+            // with no left operand is an error in Real Kap — mirrors the `⍥`
+            // arm directly above (Kotlin parser.kt:967-971).
+            Token::ObverseToken => {
+                return Err(self.err("Operator without left function: ⍫"));
             }
             Token::Literal(LiteralValue::Symbol { name, namespace }) => {
                 let name = name.clone();

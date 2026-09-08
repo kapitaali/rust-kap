@@ -162,6 +162,12 @@ pub enum Instr {
     ///   dyadic  `x (f⍥g) y` = `f(g(x), g(y))`
     /// `⍥` is NOT compose (`∘`): compare oracle `3 +⍥× 4` = 2 vs `3 +∘× 4` = 4.
     OverOp { left_fn: Box<Instr>, right_fn: Box<Instr> },
+    /// `Obverse` operator `f ⍫ g` (Kotlin `ObverseOp` / `ObverseFunction`,
+    /// op.kt:304, engine.kt:503). A 2-arg operator producing a derived function:
+    ///   forward  `(f⍫g) y`   = `f(y)`;   `x (f⍫g) y` = `x f y`
+    ///   inverse  `(f⍫g)˝ y`  = `g(y)`;   `x (f⍫g)˝ y` = `x g y`
+    /// (ObverseFunctionImpl: eval1Arg/2Arg → fn0, evalInverse1Arg/2ArgB → fn1.)
+    Obverse { left_fn: Box<Instr>, right_fn: Box<Instr> },
     /// A function with an explicit axis specifier: `f[axis]` (e.g. `+[0]`). Mirrors
     /// Kotlin's `AxisValAssignedFunctionDirect`, created by `parseOperator` when a
     /// `[axis]` follows the function. `eval_apply` unwraps it and threads the axis into

@@ -57,6 +57,7 @@ pub enum Token {
     ComposeToken,   // ∘  (atop / compose: f ∘ g)
     ReverseComposeToken, // ⍛  (reverse compose: f ⍛ g)
     OverToken,      // ⍥  (over operator: f ⍥ g — Kotlin OverOp; NOT compose)
+    ObverseToken,   // ⍫  (obverse operator: f ⍫ g — Kotlin ObverseOp/ObverseFunction)
     DynassignToken, // ⇐
     ColonSym,      // :  (guarded expression: cond : truthy ⋄ falsy)
     AndToken,    // and

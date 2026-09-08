@@ -182,6 +182,16 @@ pub fn tokenise(src: &str) -> Vec<SpannedToken> {
             col += 1;
             continue;
         }
+        // `⍫` (Obverse, U+236B) is a dedicated operator token (Kotlin `ObverseOp`,
+        // op.kt:304 / engine.kt:503), not a plain symbol name — same reason as
+        // `⍥` above. Without this, `bar ⇐ foo⍫{…}` parses the RHS as bare `foo`
+        // and dies "No arguments specified for function".
+        if c == '⍫' {
+            out.push(SpannedToken { token: Token::ObverseToken, line: start_line, col: start_col });
+            i += 1;
+            col += 1;
+            continue;
+        }
         // APL glyphs that are not ASCII (e.g. ⍳ ⊃ ≢ ⍴ ⌽ etc.) are single-char
         // function/operator *names* in Kap. Emit each as its own Symbol token.
         // Exception: `⎕` (U+2395, the quad), which begins a *multi-char* name such
