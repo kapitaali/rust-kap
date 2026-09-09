@@ -353,6 +353,7 @@ fn single_char_token(c: char) -> Option<Token> {
         '∘' => Token::ComposeToken,
         '⍛' => Token::ReverseComposeToken,
         '.' => Token::MemberDereferenceToken,
+        '⍠' => Token::MethodCallToken,
         '⟦' => Token::FunctionCallOpenParen,
         '⟧' => Token::FunctionCallCloseParen,
         _ => return None,
