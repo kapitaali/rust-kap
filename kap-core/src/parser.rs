@@ -4229,7 +4229,20 @@ impl<'a> Parser<'a> {
             let r = self.parse_paren_value_leading();
             r
         } else {
-            self.try_parse_train()
+            // Bare-symbol-led groups (e.g. `(z↑)`, `(n-)`): try the fn-train
+            // first; on failure run the value accumulator. Kotlin makes no
+            // fn/value distinction here — `parseExpr` strands values and
+            // left-binds fns in one loop — so a value-led group like `(z↑)`
+            // is a left-bind Train[z, ↑], and `(n-)` a left-bind for `˝`.
+            // Fn-trains like `(f g)` still win whenever they parse.
+            let save = self.pos;
+            match self.try_parse_train() {
+                Some(t) => Some(t),
+                None => {
+                    self.pos = save;
+                    self.parse_paren_value_leading()
+                }
+            }
         }
     }
 
@@ -4519,6 +4532,81 @@ impl<'a> Parser<'a> {
                                 self.advance();
                             }
                             left_args.push(Instr::Empty);
+                            continue;
+                        }
+                        ParenHolder::Malformed => return ParenHolder::Malformed,
+                    }
+                }
+                // `⍞name` dynamic function reference: function-shaped (Kotlin
+                // routes DynamicRef through processFn, parser.kt:969), so it
+                // takes the SAME continuation as the symbol-fn arm above —
+                // recurse for the right side, combine per parser.kt:457–491.
+                // Without this, `⍞x` strands as a VALUE atom and a group like
+                // `(a0×a1×a2 ⍞x a3)` mis-folds (CustomFunctionTest +foo row).
+                Some(Token::ApplyToken) => {
+                    let f0 = match self.parse_function_atom() {
+                        Ok(a) => a,
+                        Err(_) => return ParenHolder::Malformed,
+                    };
+                    let f = match self.bind_operators_kotlin(f0.clone()) {
+                        Ok(f) => f,
+                        Err(_) => self.fold_trailing_adverb(f0),
+                    };
+                    // Recurse for everything after the function (Kotlin parseValue at :457).
+                    match self.parse_paren_accum() {
+                        ParenHolder::Empty => {
+                            // parser.kt:458–463: left-bind when left args present.
+                            return if left_args.is_empty() {
+                                ParenHolder::Fn(f)
+                            } else {
+                                let v = strand_instrs(left_args);
+                                ParenHolder::Fn(Instr::Train {
+                                    funcs: vec![v, f],
+                                    reverse: false,
+                                    compose: false,
+                                })
+                            };
+                        }
+                        ParenHolder::Fn(g) => {
+                            // parser.kt:479–491: Chain2 (atop) — with left-bind when
+                            // leading values exist.
+                            return if left_args.is_empty() {
+                                ParenHolder::Fn(Instr::Train {
+                                    funcs: vec![f, g],
+                                    reverse: false,
+                                    compose: false,
+                                })
+                            } else {
+                                let v = strand_instrs(left_args);
+                                ParenHolder::Fn(Instr::Train {
+                                    funcs: vec![
+                                        Instr::Train { funcs: vec![v, f], reverse: false, compose: false },
+                                        g,
+                                    ],
+                                    reverse: false,
+                                    compose: false,
+                                })
+                            };
+                        }
+                        ParenHolder::Value(v) => {
+                            // parser.kt:465–477: dyadic/monadic APPLICATION — the result is
+                            // a VALUE instruction; push and KEEP LOOPING (more tokens may
+                            // follow inside the group).
+                            let app = if left_args.is_empty() {
+                                Instr::Apply {
+                                    fn_expr: Box::new(f),
+                                    left: None,
+                                    right: Box::new(v),
+                                }
+                            } else {
+                                let l = strand_instrs(std::mem::take(&mut left_args));
+                                Instr::Apply {
+                                    fn_expr: Box::new(f),
+                                    left: Some(Box::new(l)),
+                                    right: Box::new(v),
+                                }
+                            };
+                            left_args.push(app);
                             continue;
                         }
                         ParenHolder::Malformed => return ParenHolder::Malformed,
