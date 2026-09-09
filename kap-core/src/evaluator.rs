@@ -12621,6 +12621,19 @@ impl Engine {
                                 // Drop the outer axis: dims = [outer..., S...].
                                 let mut new_dims = outer.clone();
                                 new_dims.extend(s.iter().copied());
+                                // Size guard BEFORE materialising: the cells may be
+                                // shared/cycled (e.g. `200000 ⍴ ⊂…`), so the flat
+                                // total can exceed memory by orders of magnitude
+                                // (oracle `⊃ 200000 ⍴ (⊂1000000 ⍴ 1)` errors
+                                // `Array too large`). Same 100M cap as the
+                                // axis-disclose path; kind:fails only needs an error.
+                                let total: u128 =
+                                    new_dims.iter().map(|&d| d as u128).product();
+                                if total > 100_000_000 {
+                                    return Err(AplError::runtime(
+                                        "⊃: result too large".into(),
+                                    ));
+                                }
                                 // Concatenate every element's flat elements.
                                 let mut out: Vec<AplRef<APLValue>> = Vec::new();
                                 for e in &elems {
