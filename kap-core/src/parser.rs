@@ -1460,12 +1460,18 @@ impl<'a> Parser<'a> {
                     _ => {}
                 }
             }
-            // parseAxis (:1321): `f[axis]` wraps into AxisApplied.
+            // parseAxis (:1321): `f[axis]` wraps into AxisApplied. Bare symbols
+            // use the axis-aware allowlist below; a `(⊃ int:proto v)` group
+            // (a ValueOp wrapping disclose) also binds `[axis]` — Kotlin
+            // applies parseAxis to any derived fn, and
+            // `(⊃ int:proto 1000)[2] …` is the DiscloseTest axis-proto row.
             if let Some(t) = self.peek() {
                 if matches!(t.token, Token::OpenBracket) {
-                    let axis_ok = matches!(
-                        &cur,
-                        Instr::Symbol { name, .. }
+                    let axis_ok = match &cur {
+                        Instr::ValueOp { func, .. } => matches!(func.as_ref(),
+                            Instr::Symbol { name, .. }
+                                if name.as_str() == "⊃" || name.as_str() == "first"),
+                        Instr::Symbol { name, .. } =>
                             // `↑`/`↓` are axis-aware in Kotlin too (TakeAPLFunctionImpl /
                             // DropAPLFunctionImpl extend plain `APLFunction`, not
                             // `NoAxisAPLFunction`, and their eval2Arg has an explicit
@@ -1484,8 +1490,9 @@ impl<'a> Parser<'a> {
                             //   `⌿` reduce-first — same path as `/` (adverb-level)
                             //   `⌷` squad — lookup.kt:59 (AccessFromIndex axis branch)
                             //   `⊆` partition — disclose.kt (PartitionedEnclose computeAxis)
-                            if matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖" | "↑" | "↓" | "labels" | "hasLabels" | "⊂" | "⊃" | "⌷" | "⊆" | "∊" | "/" | "\\" | "⌿" | "⫽" | "∧" | "∨")
-                    );
+                            matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖" | "↑" | "↓" | "labels" | "hasLabels" | "⊂" | "⊃" | "⌷" | "⊆" | "∊" | "/" | "⌿" | "⫽" | "∧" | "∨") || name == &char::from(92u8).to_string(),
+                        _ => false,
+                    };
                     if axis_ok {
                         self.advance();
                         let axis = self.parse_apply()?;

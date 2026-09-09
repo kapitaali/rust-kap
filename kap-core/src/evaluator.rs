@@ -2339,6 +2339,24 @@ impl Engine {
             // handled BEFORE the scalar-axis extraction below: the axis may be
             // a rank-1 vector (`⊃[1 2] x`), and its length pads against the
             // disclosed-new-axis count (Kotlin `makeAxisIntArray`), not 1.
+            // `(⊃ int:proto v)[axis]` (axis-disclose with a custom fill — Kotlin
+            // `DiscloseAPLFunctionImpl.eval1ArgWithProto`, disclose.kt:417):
+            // the parser binds `[axis]` onto the ValueOp group (parseAxis).
+            if let Instr::ValueOp { func: inner, op_name, operand } = &**func {
+                let inner_is_disclose = matches!(inner.as_ref(),
+                    Instr::Symbol { name, .. } if name.as_str() == "⊃" || name.as_str() == "first");
+                if inner_is_disclose && op_name == "int:proto" {
+                    if left.is_some() {
+                        return Err(AplError::runtime(
+                            "⊃: axis specifier is only supported on monadic disclose".into(),
+                        ));
+                    }
+                    let axis_spec = self.disclose_axis_spec(&axis_val)?;
+                    let right_v = self.eval_instr(right, env)?.force(self)?;
+                    let proto = self.eval_instr(operand, env)?.force(self)?;
+                    return self.reveal_axis(&right_v, &axis_spec, &proto);
+                }
+            }
             if let Instr::Symbol { ref name, .. } = **func {
                 if name.as_str() == "⊃" || name.as_str() == "first" {
                     if left.is_some() {
@@ -2346,34 +2364,10 @@ impl Engine {
                             "⊃: axis specifier is only supported on monadic disclose".into(),
                         ));
                     }
-                    let axis_spec: Vec<i64> = match axis_val.as_ref() {
-                        APLValue::Number(n) => {
-                            vec![n.as_long().map_err(|e| AplError::runtime(e))?]
-                        }
-                        APLValue::Array(a) if a.dimensions.len() <= 1 => {
-                            let mut v = Vec::with_capacity(a.element_count());
-                            for e in a.elements() {
-                                match e.as_ref() {
-                                    APLValue::Number(x) => v.push(
-                                        x.as_long().map_err(|e| AplError::runtime(e))?,
-                                    ),
-                                    _ => {
-                                        return Err(AplError::runtime(
-                                            "⊃: axis must be integers".into(),
-                                        ))
-                                    }
-                                }
-                            }
-                            v
-                        }
-                        _ => {
-                            return Err(AplError::runtime(
-                                "⊃: Axis specifier must be a scalar or a rank-1 array".into(),
-                            ))
-                        }
-                    };
+                    let axis_spec = self.disclose_axis_spec(&axis_val)?;
                     let right_v = self.eval_instr(right, env)?.force(self)?;
-                    return self.reveal_axis(&right_v, &axis_spec);
+                    let zero = Rc::new(APLValue::Number(KapNumber::Long(0)));
+                    return self.reveal_axis(&right_v, &axis_spec, &zero);
                 }
                 // `⊂[axes]` multi-axis enclose (Kotlin `EncloseAPLFunctionImpl`,
                 // disclose.kt:147): a rank-1 axis vector with != 1 elements
@@ -4945,10 +4939,43 @@ impl Engine {
     /// disclosed rank — the trailing values default to `last + i` (mirrors
     /// `makeAxisIntArray` in Kotlin). Scalar input: rank 0; only `axis == 0`
     /// is valid; result is the scalar itself (no new rank).
+    /// Parse a `⊃` axis specifier (scalar or rank ≤ 1 int array) — shared by
+    /// the plain and `int:proto` AxisApplied paths (Kotlin `makeAxisIntArray`
+    /// shape check; padding/validation stays in `reveal_axis`).
+    fn disclose_axis_spec(&self, axis_val: &AplRef<APLValue>) -> Result<Vec<i64>, AplError> {
+        match axis_val.as_ref() {
+            APLValue::Number(n) => {
+                Ok(vec![n.as_long().map_err(|e| AplError::runtime(e))?])
+            }
+            APLValue::Array(a) if a.dimensions.len() <= 1 => {
+                let mut v = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    match e.as_ref() {
+                        APLValue::Number(x) => v.push(
+                            x.as_long().map_err(|e| AplError::runtime(e))?,
+                        ),
+                        _ => {
+                            return Err(AplError::runtime(
+                                "⊃: axis must be integers".into(),
+                            ))
+                        }
+                    }
+                }
+                Ok(v)
+            }
+            _ => {
+                Err(AplError::runtime(
+                    "⊃: Axis specifier must be a scalar or a rank-1 array".into(),
+                ))
+            }
+        }
+    }
+
     fn reveal_axis(
         &self,
         right_val: &AplRef<APLValue>,
         axis_spec: &[i64],
+        fill: &AplRef<APLValue>,
     ) -> Result<AplRef<APLValue>, AplError> {
         let v = right_val.force(self)?;
         // Scalar path: only axis 0 is valid; the disclosed scalar is itself.
@@ -5131,7 +5158,7 @@ impl Engine {
                 inner_flat += coord * inner_stride[k];
             }
             if ragged {
-                out_elems.push(Rc::new(APLValue::Number(KapNumber::Long(0))));
+                out_elems.push(fill.clone());
                 continue;
             }
             // Fetch the inner element.
