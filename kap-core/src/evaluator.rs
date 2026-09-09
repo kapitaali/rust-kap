@@ -7485,14 +7485,17 @@ impl Engine {
         }
         let (vec_val, base_val, vec_side) = match (rl == 1, rr == 1) {
             (true, true) => {
-                // Both rank-1: PLAIN element-wise combine (lengths must match —
-                // num2_impl errors). The axis is IGNORED here, not validated:
-                // Kotlin's axis branch is only reached from the
-                // rank-mismatch path (`aDimensions.size == 1` XOR
-                // `bDimensions.size == 1`); when BOTH sides are rank-1 the
-                // call falls to plain makeCellSumFunction2Args — which is why
-                // `+[1]/` fold steps (scalar acc + scalar cell) succeed while
-                // the old code errored `Axis 1 is not valid. Expected: 1`.
+                // Both rank-1: Kotlin math_functions.kt:541-544 throws
+                // IllegalAxisException unless the axis is 0 (this is where
+                // `+[2]/` fails-rows die — per fold step — NOT via any
+                // enclosed-rank validation at the reduce level). Axis 0 →
+                // plain element-wise combine (lengths must match).
+                if axis != 0 {
+                    return Err(AplError::runtime(format!(
+                        "{}: Axis {} is not valid. Expected: 1",
+                        name, axis
+                    )));
+                }
                 // `apply_op` maps the scalar op; wrap in the KapNumber closure num2 wants.
                 return self.num2(
                     Some(left.clone()),
@@ -13894,13 +13897,13 @@ impl Engine {
         // fold steps call plain `+`. Strip the wrapper for the steps.
         // `+[k]/` (axis on the SCALAR fn, not on a Derived) threads the axis
         // as `functionAxis` into each fold step (math_functions.kt:505
-        // axis branch; reduce.kt fold loop passes it through). The lane loop
-        // below rebuilds the AxisApplied step fn from this — EXCEPT the axis
-        // is validated against the ENCLOSED rank-1 data first: Kotlin's
-        // AxisValAssignedFunctionDirect wraps the reduce fn, whose eval1Arg
-        // runs ensureValidAxis against the ENCLOSED arg (rank 1), so
-        // `+[2]/` on 4 nested cells errors `Axis 2 is not valid. Expected: 1`
-        // (kind:fails rows nestedScalarReduce4/B4) instead of folding.
+        // axis branch; reduce.kt fold loop passes it through). Kotlin does
+        // NO enclosed-rank validation at the reduce level
+        // (AxisValAssignedFunctionDirect just threads the axis through,
+        // functions.kt:685-710): `+[1]/` on a rank-1 nested arg folds fine,
+        // while `+[2]/` dies PER STEP in the both-rank-1 arm of num2_axis
+        // (math_functions.kt:541-544). The lane loop below rebuilds the
+        // AxisApplied step fn from this.
         // Scope: ONLY AxisApplied{scalar-symbol} (functionAxis shape). A
         // Derived inner (`(+/[k])-style`) carries the REDUCE's own axis and
         // must NOT be validated here (it is threaded as adv_explicit_axis).
@@ -13913,29 +13916,6 @@ impl Engine {
         // reject it. Hence: `,`-family inner symbols skip this enclosed
         // check entirely (their per-step axis validation lives in
         // catenate_axis/join_by_axis).
-        let enclosed_rank: usize = {
-            let d = self.eval_instr(right, env)?.force(self)?;
-            d.dimensions().len()
-        };
-        if let Instr::AxisApplied { func: inner, axis } = fn_instr {
-            if let Instr::Symbol { name, .. } = inner.as_ref() {
-                let is_catenate = matches!(name.as_str(), "," | "⍪");
-                if !is_catenate {
-                    let av = self.eval_instr(axis, env)?.force(self)?;
-                    if let APLValue::Number(n) = av.as_ref() {
-                        if let Ok(k) = n.as_long() {
-                            if k < 0 || (k as usize) >= enclosed_rank.max(1) {
-                                return Err(AplError::runtime(format!(
-                                    "Axis {} is not valid. Expected: {}",
-                                    k,
-                                    enclosed_rank.max(1)
-                                )));
-                            }
-                        }
-                    }
-                }
-            }
-        }
         let step_instr: Instr = match fn_instr {
             Instr::AxisApplied { func, axis } => Instr::AxisApplied {
                 func: func.clone(),
@@ -14197,9 +14177,13 @@ impl Engine {
         last_axis: bool,
         explicit_axis: Option<usize>,
     ) -> Result<AplRef<APLValue>, AplError> {
-        // Same as reduce: the axis belongs to the SCAN, strip it from fn.
+        // Same as reduce: the step fn keeps ITS axis. Kotlin ScanResult1Arg
+        // threads fnAxis into each fold step (reduce.kt:404
+        // `fn.eval2Arg(context, leftValue, a.valueAt(index), fnAxis)`), so an
+        // AxisApplied{scalar-fn} wrapper must reach the steps intact (this is
+        // what makes `+[1]⌿` steps axis-aware). Strip anything else as before.
         let fn_instr: &Instr = match fn_instr {
-            Instr::AxisApplied { func, .. } => func,
+            Instr::AxisApplied { func, .. } if !matches!(func.as_ref(), Instr::Symbol { .. }) => func,
             other => other,
         };
         if left.is_some() {
