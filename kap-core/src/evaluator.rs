@@ -17028,7 +17028,7 @@ impl Engine {
                 vec![gidx.len()],
                 ArrayData::Nested(gidx.iter().map(|&i| values[i].clone()).collect()),
             )));
-            let res = self.apply_fn_instr(fn_instr, Some(k), &Rc::new(group_vec), env)?;
+            let res = self.apply_fn_instr(fn_instr, None, &Rc::new(group_vec), env)?;
             rows.push(Rc::new(APLValue::Array(Rc::new(KapArray::new(
                 vec![2],
                 ArrayData::Nested(vec![k.clone(), res]),
