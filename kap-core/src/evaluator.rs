@@ -20560,11 +20560,19 @@ impl Engine {
             match a.as_ref() {
                 APLValue::Number(n) => {
                     let base = n.as_long().map_err(|e| AplError::runtime(e))?;
-                    let base = if base == 0 { 1 } else { base };
-                    let mut w = Vec::with_capacity(l);
-                    for j in 0..l {
-                        let exp = (l - 1 - j) as u32;
-                        w.push(KapNumber::Long(base.pow(exp)));
+                    let base_n = if base == 0 {
+                        KapNumber::Long(1)
+                    } else {
+                        KapNumber::Long(base)
+                    };
+                    // Suffix products via `KapNumber::mul` so overflow promotes
+                    // to BigInt (oracle `16 ⊥ 38-digit` is bigint) — a raw
+                    // `i64::pow` panicked with `multiply with overflow`.
+                    let mut suffix = KapNumber::Long(1);
+                    let mut w = vec![KapNumber::Long(0); l];
+                    for j in (0..l).rev() {
+                        w[j] = suffix.clone();
+                        suffix = suffix.mul(&base_n);
                     }
                     w
                 }
@@ -20759,6 +20767,16 @@ impl Engine {
 
         // Flatten B for iteration; record its shape for the result.
         let b_dims = b.dimensions();
+        // BigInt elements in B (e.g. `8 ⊤ 123…45`): the i64 collect below
+        // would error `does not fit in long`. Route scalar/vector radices to
+        // the exact-BigInt path (rank-2 keeps the old error — no rows there).
+        if a_rank != 2
+            && b.elements().iter().any(|e| {
+                matches!(e.as_ref(), APLValue::Number(KapNumber::BigInt(_)))
+            })
+        {
+            return self.encode_bigint(a_rank, &a, &b, &b_dims);
+        }
         let b_elems: Result<Vec<i64>, AplError> = b
             .elements()
             .iter()
@@ -20859,6 +20877,148 @@ impl Engine {
                     lsbs
                 })
                 .collect();
+            let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(nr * b_total);
+            for di in 0..nr {
+                for col in &per_elem {
+                    out.push(Rc::new(APLValue::Number(KapNumber::Long(col[di]))));
+                }
+            }
+            let mut out_dims = vec![nr];
+            out_dims.extend(b_dims.iter().copied());
+            Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                out_dims,
+                ArrayData::Nested(out),
+            )))))
+        }
+    }
+
+    /// `⊤` with BigInt elements in B (e.g. `8 ⊤ 123…45`,
+    /// `(40⍴10) ⊤ ¯123…90`). Same successive-division algorithm as the i64
+    /// paths — mirroring math-kap.kap `scalarEncode`/`vectorEncode`, which is
+    /// what the oracle runs for these rows via `withStandardLib`: floor
+    /// division digits (`⌊B÷A`), MSB-first. Remainders are `< radix`, so
+    /// emission stays `KapNumber::Long`.
+    fn encode_bigint(
+        &self,
+        a_rank: usize,
+        a: &AplRef<APLValue>,
+        b: &AplRef<APLValue>,
+        b_dims: &[usize],
+    ) -> Result<AplRef<APLValue>, AplError> {
+        use num_bigint::BigInt;
+        let b_big: Vec<BigInt> = b
+            .elements()
+            .iter()
+            .map(|e| match e.as_ref() {
+                APLValue::Number(KapNumber::Long(v)) => Ok(BigInt::from(*v)),
+                APLValue::Number(KapNumber::BigInt(v)) => Ok(v.clone()),
+                // Doubles truncate, like `as_long` in the i64 path.
+                APLValue::Number(KapNumber::Double(v)) => Ok(BigInt::from(*v as i64)),
+                other => Err(AplError::runtime(format!(
+                    "⊤: Non-numeric element in right argument: {}",
+                    other.format_value()
+                ))),
+            })
+            .collect::<Result<Vec<BigInt>, _>>()?;
+        // Floor-divmod by a single-digit i64 radix (mirrors the
+        // `div_euclid`/`rem_euclid` of the i64 paths; the oracle's `⌊B÷A`
+        // agrees for positive radices, which covers every conformance row).
+        fn divmod(v: &BigInt, r: i64) -> Result<(BigInt, i64), AplError> {
+            let rb = BigInt::from(r);
+            let zero = BigInt::from(0);
+            let mut q = v / &rb;
+            let mut rem = v % &rb;
+            if r > 0 {
+                if rem < zero {
+                    rem += &rb;
+                    q -= 1;
+                }
+            } else if rem > zero {
+                rem += &rb;
+                q -= 1;
+            }
+            let rem = num_traits::ToPrimitive::to_i64(&rem).ok_or_else(|| {
+                AplError::runtime("⊤: remainder does not fit in long".into())
+            })?;
+            Ok((q, rem))
+        }
+        let b_total = b_big.len();
+        if a_rank == 0 {
+            // Scalar radix: scalarEncode.
+            let radix = match a.as_ref() {
+                APLValue::Number(n) => n.as_long().map_err(|e| AplError::runtime(e))?,
+                _ => return Err(AplError::runtime("⊤ radix must be an integer".into())),
+            };
+            let radix = if radix == 0 { 1 } else { radix };
+            let zero = BigInt::from(0);
+            let rb = BigInt::from(radix);
+            let mut max_abs = zero.clone();
+            for v in &b_big {
+                let av = if v < &zero { -v } else { v.clone() };
+                if av > max_abs {
+                    max_abs = av;
+                }
+            }
+            let mut v = max_abs;
+            let mut digits = 0usize;
+            while v > zero {
+                v /= &rb;
+                digits += 1;
+            }
+            let digits = digits.max(1);
+            let per_elem: Vec<Vec<i64>> = b_big
+                .iter()
+                .map(|v0| {
+                    let mut v = v0.clone();
+                    let mut lsbs = Vec::with_capacity(digits);
+                    for _ in 0..digits {
+                        let (q, r) = divmod(&v, radix)?;
+                        lsbs.push(r);
+                        v = q;
+                    }
+                    lsbs.reverse();
+                    Ok(lsbs)
+                })
+                .collect::<Result<Vec<Vec<i64>>, AplError>>()?;
+            let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(digits * b_total);
+            for di in 0..digits {
+                for col in &per_elem {
+                    out.push(Rc::new(APLValue::Number(KapNumber::Long(col[di]))));
+                }
+            }
+            let mut out_dims = vec![digits];
+            out_dims.extend(b_dims.iter().copied());
+            Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                out_dims,
+                ArrayData::Nested(out),
+            )))))
+        } else {
+            // Vector radix: vectorEncode over the reversed radices.
+            let aelems = a.elements();
+            let mut radices: Vec<i64> = aelems
+                .iter()
+                .filter_map(|e| match e.as_ref() {
+                    APLValue::Number(n) => n.as_long().ok(),
+                    _ => None,
+                })
+                .collect();
+            radices.reverse();
+            let nr = radices.len();
+            let per_elem: Vec<Vec<i64>> = b_big
+                .iter()
+                .map(|v0| {
+                    let mut v = v0.clone();
+                    let mut lsbs = Vec::with_capacity(nr);
+                    for &r in &radices {
+                        let r = if r == 0 { 1 } else { r };
+                        let (q, rem) = divmod(&v, r)?;
+                        lsbs.push(rem);
+                        v = q;
+                    }
+                    lsbs.reverse();
+                    Ok(lsbs)
+                })
+                .collect::<Result<Vec<Vec<i64>>, AplError>>()?;
             let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(nr * b_total);
             for di in 0..nr {
                 for col in &per_elem {
