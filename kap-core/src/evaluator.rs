@@ -5826,7 +5826,7 @@ impl Engine {
             self.bind_param_group(&child, &params[bind_split..], &right_val);
         }
         // Default `⍵`/`⍺` names (Kap's omega/alpha). `⍵` = right arg; `⍺` = left (if present).
-        child.define("⍵", &None, right_val);
+        child.define("⍵", &None, right_val.clone());
         if let Some(lv) = &left_val {
             child.define("⍺", &None, lv.clone());
         }
@@ -5864,7 +5864,18 @@ impl Engine {
         let result = match body {
             Instr::Derived { .. } | Instr::Train { .. } | Instr::ValueOp { .. } | Instr::AxisApplied { .. } | Instr::Symbol { .. } | Instr::DynamicRef { .. } | Instr::OverOp { .. } | Instr::InnerProduct { .. } | Instr::Obverse { .. } => {
                 child.fn_body_depth.set(child.fn_body_depth.get() + 1);
-                let r = self.eval_apply(body, left, right, &child);
+                // Re-dispatch with the already-evaluated ARG VALUES (`⍵`/`⍺` bound
+                // above), NOT the original `left`/`right` Instrs: those must be read
+                // in the CALLER's scope, and re-evaluating them here would resolve
+                // caller-local names (tradfn params, dfn locals) against this child
+                // scope — missing params (`undefined symbol: v`) and leaking globals
+                // (`∇ f (g) { plus g }` with `g←99` gave 99 instead of 7). Kotlin's
+                // FunctionCall1Arg likewise evaluates the arg once in the caller
+                // context and passes the value to eval1Arg.
+                let rv = Box::new(Instr::Value(right_val.clone()));
+                let lv: Option<Box<Instr>> =
+                    left_val.as_ref().map(|v| Box::new(Instr::Value(v.clone())));
+                let r = self.eval_apply(body, &lv, &rv, &child);
                 child.fn_body_depth.set(child.fn_body_depth.get() - 1);
                 r
             }
