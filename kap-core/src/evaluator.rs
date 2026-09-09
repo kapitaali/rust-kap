@@ -1181,7 +1181,18 @@ impl Engine {
                         "No arguments specified for function".to_string(),
                     ));
                 }
-                let found = bound
+                let found = bound.or_else(|| {
+                    // Namespace constants the port provides natively (mirroring
+                    // stdlib values the oracle loads via `withStandardLib`, e.g.
+                    // math.kap `pi ← 3.14159265358979323846`; oracle
+                    // `use("standard-lib.kap") ⋄ math:pi` → 3.141592653589793).
+                    match (namespace.as_deref(), name.as_str()) {
+                        (Some("math"), "pi") => Some(Rc::new(APLValue::Number(
+                            KapNumber::Double(std::f64::consts::PI),
+                        ))),
+                        _ => None,
+                    }
+                })
                     .ok_or_else(|| AplError::runtime(format!("undefined symbol: {}", name)))?;
                 // B2 (code_analysis_03): an operator is never a first-class value in Real Kap.
                 // Kotlin resolves names function-first, then throws InvalidOperatorArgument for
@@ -3669,6 +3680,42 @@ impl Engine {
                 };
                 Ok(Rc::new(map.keys_array()))
             }
+            "map:appendTo" => {
+                // Dyadic only: `m map:appendTo values` — mirrors stdlib
+                // map.kap `appendTo` (which the oracle runs for these rows
+                // via `withStandardLib`; the port's map fns are native).
+                // `values` is rank-1 with an even count (flat pairs) or
+                // rank-2 with 2 columns (one pair per row); anything else
+                // throws (the `mapAppendWithInvalidDimension` fails-rows).
+                let lv = left_val.ok_or_else(|| {
+                    AplError::runtime("map:appendTo needs two arguments".into())
+                })?;
+                let base = match lv.as_ref() {
+                    APLValue::Map(m) => m.clone(),
+                    _ => return Err(AplError::runtime("map:appendTo: Left argument must be a map".into())),
+                };
+                let pairs = self.map_pairs_from_kv(&right_val).map_err(|_| {
+                    AplError::runtime("map:appendTo: Right argument to map should be either a rank-1 array with an even element count or a rank-2 array with 2 columns".into())
+                })?;
+                let mut map = base;
+                for (k, vnew) in pairs {
+                    // Oracle `(⊃(null≡⍵) ⊇ (⊃⍵) ⍬),⊂v`: missing key starts
+                    // from empty; the new value appends as ONE element.
+                    let mut elems: Vec<AplRef<APLValue>> = match map.lookup(&k) {
+                        None => Vec::new(),
+                        Some(cur) => match cur.as_ref() {
+                            APLValue::Null => Vec::new(),
+                            APLValue::Array(a) => a.elements(),
+                            other => vec![Rc::new(other.clone())],
+                        },
+                    };
+                    elems.push(vnew);
+                    let n = elems.len();
+                    let newval = self.make_simple_or_nested(vec![n], elems)?;
+                    map = map.with_pair(k, newval);
+                }
+                Ok(Rc::new(APLValue::Map(map)))
+            }
             // `int:formatRational` (fmt-rational.kt): dyadic only — `decimals f v`
             // renders rational v with `decimals` decimal places, returning the 2-element
             // array [string, exact-flag]. Monadic call errors with Kotlin text.
@@ -5578,7 +5625,7 @@ impl Engine {
                 | "int:asBigint" | "int:asRational"
                 // Namespaced `map:` natives (builtins/map.kt): admitted via is_known_fn
                 // at parse time; listed here so the eval-time late gate knows them.
-                | "map:with" | "map:get" | "map:remove" | "map:entries" | "map:size" | "map:keys"
+                | "map:with" | "map:get" | "map:remove" | "map:entries" | "map:size" | "map:keys" | "map:appendTo"
                 // `comp` / `collapse` (monadic builtin, div_functions.kt): admitted at
                 // parse time via is_primitive_op; listed here so the eval-time late gate
                 // knows it (two-gate rule).

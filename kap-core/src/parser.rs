@@ -237,7 +237,7 @@ impl<'a> Parser<'a> {
                         || (ns == "map"
                             && matches!(
                                 base,
-                                "with" | "get" | "remove" | "entries" | "size" | "keys"
+                                "with" | "get" | "remove" | "entries" | "size" | "keys" | "appendTo"
                             ))
                 }
                 None => false,
