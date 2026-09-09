@@ -200,7 +200,7 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ExceptionsTest.kt", "test": "multipleTagHandlersSingleDimensionCatch", "kind": "eval", "expr": "{'foo throw 1}catch 'xyz λ{2+⍺} 'test123 λ{3+⍺} 'bar λ{4+⍺} 'foo λ{5+⍺}", "expected": "6"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ExceptionsTest.kt", "test": "unmatchedTag", "kind": "fails", "expr": "{'foo throw 1}catch 1 2 ⍴ 'bar λ{2+⍺}", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ExceptionsTest.kt", "test": "throwWithoutTagHandler", "kind": "fails", "expr": "1 + 'foo throw 2", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ExceptionsTest.kt", "test": "stackTrace", "kind": "eval", "expr": "∇ foo (x) {\n  x[1;2]\n}\n\n∇ bar (y) {\n  foo y\n}\n\nbar 1 2 3 4", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ExceptionsTest.kt", "test": "stackTrace", "kind": "fails", "expr": "∇ foo (x) {\n  x[1;2]\n}\n\n∇ bar (y) {\n  foo y\n}\n\nbar 1 2 3 4", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ExecTest.kt", "test": "execLs", "kind": "eval", "expr": "z ← io2:exec \"/bin/echo\" \"test string\"\ns ← z⍠:stream :stdout\nstring ← @\\0 + io2:read s\nz⍠:waitForExit 0\nstring", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ExpandTest.kt", "test": "simpleExpand1D", "kind": "eval", "expr": "1 0 1 1 \\ 3 4 5", "expected": "(3 0 4 5)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ExpandTest.kt", "test": "expandWithScalar", "kind": "eval", "expr": "1 0 1 1 \\ 2", "expected": "(2 0 2 2)"}
@@ -1052,7 +1052,7 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SymbolTest.kt", "test": "regularSymbolsRenderWithNamespace", "kind": "eval", "expr": "⍕'abcdef", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SymbolTest.kt", "test": "symbolNameTest", "kind": "eval", "expr": "int:symbolName 'foo:test", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SystemParameterTest.kt", "test": "nonexistentParameter", "kind": "fails", "expr": "sysparam 'qwe", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ThrowNativeTest.kt", "test": "testThrowInvalidDimensionsException", "kind": "eval", "expr": "'kap:InvalidDimensionsException int:throwNative \"abcd\"", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ThrowNativeTest.kt", "test": "testThrowInvalidDimensionsException", "kind": "fails", "expr": "'kap:InvalidDimensionsException int:throwNative \"abcd\"", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/TrigFunctionsTest.kt", "test": "logFunctionTest", "kind": "eval", "expr": "⍟1 2 10 1.1 ¯5 1234567 1J2 ¯3J4 3J¯5 ¯101J¯1029", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/TrigFunctionsTest.kt", "test": "logBigintArgument", "kind": "eval", "expr": "⍟int:asBigint 10", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/TrigFunctionsTest.kt", "test": "logRationalArgument", "kind": "eval", "expr": "⍟(7÷6)", "expected": null}
@@ -1455,7 +1455,7 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComplexExpressionsTest.kt", "test": "nestedArrayWithScalarValueFromFn", "kind": "eval", "expr": "∇ foo (x) {1+x} ◊ (foo 1) (foo 6)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComplexExpressionsTest.kt", "test": "nestedArrayWithScalarValueFromExpr", "kind": "eval", "expr": "(1+2) (3+4) (1+5)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComplexExpressionsTest.kt", "test": "doubleNestedArrays", "kind": "eval", "expr": "(⍳3) (10+⍳10)", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComplexExpressionsTest.kt", "test": "functionWithNoIdentityValue", "kind": "eval", "expr": "math:sin/⍬", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComplexExpressionsTest.kt", "test": "functionWithNoIdentityValue", "kind": "fails", "expr": "math:sin/⍬", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComplexExpressionsTest.kt", "test": "closeParenMissing", "kind": "fails", "expr": "(1+2+3", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComplexExpressionsTest.kt", "test": "openParenMissing", "kind": "fails", "expr": "1+2+3)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComplexExpressionsTest.kt", "test": "closeBracketMissing", "kind": "fails", "expr": "1 2 4 5 6 7 +/[", "expected": null}

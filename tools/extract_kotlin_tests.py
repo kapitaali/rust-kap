@@ -218,7 +218,22 @@ def first_expr_in_call(body: str):
 
 
 def detect_fails(body: str):
-    return 'assertFailsWith' in body
+    if 'assertFailsWith' in body:
+        return True
+    # try { parseAPLExpression(...) ... } catch — the test expects evaluation
+    # to throw (e.g. ComplexExpressionsTest.functionWithNoIdentityValue,
+    # ExceptionsTest.stackTrace, ThrowNativeTest). Without this these rows are
+    # misclassified as plain evals and a correct engine error counts against
+    # conformance. `catch` inside the Kap *expression* (e.g. `}catch ...`
+    # handler tests) does not match: the `try` must precede a parse call.
+    for m in re.finditer(r'\btry\b', body):
+        rest = body[m.end():m.end() + 2000]
+        ci = rest.find('catch')
+        if ci == -1:
+            continue
+        if any(c + '(' in rest[:ci] for c in PARSE_CALLS):
+            return True
+    return False
 
 
 def best_effort_expected(body: str):
