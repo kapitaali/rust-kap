@@ -1950,6 +1950,13 @@ impl<'a> Parser<'a> {
             {
                 return Ok(call);
             }
+            // Nested right-arg parse (`list_stop`: Kotlin `processFn` →
+            // `parseValue` never sees `;`, parser.kt:1348): stop WITHOUT
+            // consuming — the caller's list loop owns the separator. Without
+            // this, `5+1+1;6+1+1;7;8` parsed as `5 + List[2, 7, 7, 8]`.
+            if self.list_stop {
+                return Ok(call);
+            }
             if matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator)) {
                 self.advance(); // consume `;` owned by this list level
                 self.skip_newlines();
@@ -2020,6 +2027,11 @@ impl<'a> Parser<'a> {
             {
                 return Ok(call);
             }
+            // Nested right-arg parse (`list_stop`): stop WITHOUT consuming —
+            // the caller's list loop owns the `;` (see the monadic arm above).
+            if self.list_stop {
+                return Ok(call);
+            }
             if matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator)) {
                 self.advance(); // consume `;` owned by this list level
                 self.skip_newlines();
@@ -2051,6 +2063,11 @@ impl<'a> Parser<'a> {
         if lists.is_empty()
             && !matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator))
         {
+            return Ok(call);
+        }
+        // Nested right-arg parse (`list_stop`): stop WITHOUT consuming —
+        // the caller's list loop owns the `;` (see the monadic arm above).
+        if self.list_stop {
             return Ok(call);
         }
         if matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator)) {
