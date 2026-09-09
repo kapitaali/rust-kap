@@ -3941,6 +3941,88 @@ impl Engine {
                     other.format_value()
                 ))),
             },
+            // `s:col` / `s:cols` (Real Kap `util.kap`: `cols ⇐ { ⍉(⊂⍺ ⍳⍨ labels ⍵) ⌷ ⍉⍵ }`,
+            // `col ⇐ ⊂⍛cols`): pick columns of R by last-axis label. `col` takes a
+            // single label (scalar, or a 1-element vector); `cols` takes one label
+            // or a vector of them. Rank-1 R with one match discloses to a scalar.
+            "s:col" => {
+                let lv = left_val.ok_or_else(|| {
+                    AplError::runtime("s:col needs two arguments".into())
+                })?;
+                let title = match lv.as_ref() {
+                    APLValue::Str(s) => s.clone(),
+                    APLValue::Char(c) => c.to_string(),
+                    APLValue::Number(n) => n.to_string(),
+                    APLValue::Array(a) if a.rank() == 1 && a.element_count() == 1 => {
+                        match a.elements().into_iter().next().as_deref() {
+                            Some(APLValue::Str(s)) => s.clone(),
+                            Some(APLValue::Char(c)) => c.to_string(),
+                            Some(APLValue::Number(n)) => n.to_string(),
+                            _ => return Err(AplError::runtime(
+                                "s:col label must be a string, char, or number".into())),
+                        }
+                    }
+                    other => return Err(AplError::runtime(format!(
+                        "s:col label must be a string, char, or number, got: {}",
+                        other.format_value()
+                    ))),
+                };
+                let arr = match right_val.as_ref() {
+                    APLValue::Array(a) => a,
+                    _ => return Err(AplError::runtime("s:col: right argument must be an array".into())),
+                };
+                if arr.rank() == 0 {
+                    return Err(AplError::runtime("s:col: right argument must be an array".into()));
+                }
+                self.extract_column_by_label(arr, &title)
+            }
+            "s:cols" => {
+                let lv = left_val.ok_or_else(|| {
+                    AplError::runtime("s:cols needs two arguments".into())
+                })?;
+                let mut titles: Vec<String> = Vec::new();
+                let mut push_title = |v: &APLValue| -> Result<(), AplError> {
+                    match v {
+                        APLValue::Str(s) => titles.push(s.clone()),
+                        APLValue::Char(c) => titles.push(c.to_string()),
+                        APLValue::Number(n) => titles.push(n.to_string()),
+                        other => return Err(AplError::runtime(format!(
+                            "s:cols labels must be strings, chars, or numbers, got: {}",
+                            other.format_value()
+                        ))),
+                    }
+                    Ok(())
+                };
+                match lv.as_ref() {
+                    APLValue::Array(a) if a.rank() == 1 => {
+                        for e in a.elements() {
+                            push_title(e.as_ref())?;
+                        }
+                    }
+                    other => push_title(other)?,
+                }
+                if titles.is_empty() {
+                    return Err(AplError::runtime("s:cols needs at least one label".into()));
+                }
+                let arr = match right_val.as_ref() {
+                    APLValue::Array(a) => a,
+                    _ => return Err(AplError::runtime("s:cols: right argument must be an array".into())),
+                };
+                if arr.rank() == 0 {
+                    return Err(AplError::runtime("s:cols: right argument must be an array".into()));
+                }
+                if titles.len() == 1 {
+                    return self.extract_column_by_label(arr, &titles[0]);
+                }
+                let mut out = Vec::with_capacity(titles.len());
+                for t in &titles {
+                    out.push(self.extract_column_by_label(arr, t)?);
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![out.len()],
+                    ArrayData::Nested(out),
+                )))))
+            }
             // `regex:*` — regular-expression string utilities (Real Kap RegexpModule).
             // Left arg is the pattern (string); right arg is the subject string (or, for
             // `replace`, an `(subject; replacement)` pair). Mirrors regexp.kt.

@@ -216,7 +216,7 @@ impl<'a> Parser<'a> {
                                 "toCodepoints" | "fromCodepoints" | "toGraphemes" | "toLower"
                                     | "toUpper" | "toNames" | "enc" | "dec"
                             ))
-                        || (ns == "s" && matches!(base, "trimLeft" | "trimRight" | "trim"))
+                        || (ns == "s" && matches!(base, "trimLeft" | "trimRight" | "trim" | "col" | "cols"))
                         || (ns == "int" && matches!(base, "intern" | "symbolName" | "throwNative" | "unwindProtect" | "formatRational" | "libInitialised" | "registerCmd" | "ensureGeneric" | "ensureLong" | "ensureDouble" | "asBigint" | "asRational"))
                         // `int:proto v` is a native VALUE-RIGHT-ARG OPERATOR
                         // (engine.kt:505 registerNativeOperator("proto", ProtoOp(), "int")):
