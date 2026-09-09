@@ -1051,6 +1051,13 @@ pub struct Engine {
     /// by bare trigger name (namespace stripped) — sufficient for the stdlib's usage.
     pub macros:
         std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, crate::ast::SyntaxMacro>>>,
+    /// Engine-registered single-char-exported names (Kotlin engine.kt
+    /// `exportedSingleCharFunctions`, consulted by the lexer via
+    /// `charIsSymbolDelimiter`). Populated by `declare(:singleCharExported "a")`
+    /// (eval persists it here for later inputs; same-input directives register
+    /// inline during lexing). Seeded empty — Kotlin's built-in glyph set needs
+    /// no port equivalent since the lexer already splits non-alphanumerics.
+    pub single_chars: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<char>>>,
 }
 
 impl Engine {

@@ -5,8 +5,24 @@ use crate::token::{LiteralValue, SpannedToken, Token};
 /// Tokenise `src` into a flat list. Errors are emitted as `Token::Error` so the
 /// parser can report them with position (strategy §4.7).
 pub fn tokenise(src: &str) -> Vec<SpannedToken> {
+    tokenise_with(src, &std::collections::HashSet::new())
+}
+
+/// Tokenise with a seed set of engine-registered single-char-exported names
+/// (Kotlin engine.kt `exportedSingleCharFunctions`, consulted by the lexer via
+/// `charIsSymbolDelimiter`). Directives met mid-input
+/// (`declare(:singleCharExported "a")`) register inline as their `)` is lexed,
+/// so earlier tokens (including the directive's own) use the old set while
+/// everything after uses the new one — mirroring Kotlin's streaming tokenizer.
+/// A registered ASCII-alphanumeric char terminates symbol runs (see
+/// `lex_symbol`), so `aaaa` lexes as four `a`s.
+pub fn tokenise_with(
+    src: &str,
+    seed: &std::collections::HashSet<char>,
+) -> Vec<SpannedToken> {
     let chars: Vec<char> = src.chars().collect();
     let mut out = Vec::new();
+    let mut single: std::collections::HashSet<char> = seed.clone();
     let mut i = 0usize;
     let mut line = 1usize;
     let mut col = 1usize;
@@ -127,7 +143,7 @@ pub fn tokenise(src: &str) -> Vec<SpannedToken> {
         // `:` followed by a non-symbol char (space, digit, `(` …) stays `ColonSym`
         // (used by the `cond : a ⋄ b` guard expression).
         if c == ':' && i + 1 < chars.len() && is_symbol_start(chars[i + 1]) {
-            let (raw_name, ni) = lex_symbol(&chars, i + 1);
+            let (raw_name, ni) = lex_symbol(&chars, i + 1, &single);
             let name = if raw_name.is_empty() {
                 chars[i + 1].to_string()
             } else {
@@ -166,9 +182,18 @@ pub fn tokenise(src: &str) -> Vec<SpannedToken> {
         }
         // single-char punctuation / symbols
         if let Some(tok) = single_char_token(c) {
+            let is_close = matches!(tok, Token::CloseParen);
             out.push(SpannedToken { token: tok, line: start_line, col: start_col });
             i += 1;
             col += 1;
+            // A `declare(:singleCharExported "X")` directive registers X as a
+            // symbol delimiter for everything lexed AFTER its `)` (Kotlin
+            // parser.kt:1169 `processSingleCharDeclaration`, engine.kt:577).
+            if is_close {
+                if let Some(ch) = check_single_char_directive(&out) {
+                    single.insert(ch);
+                }
+            }
             continue;
         }
         // `⍥` (Over, U+2365) is a dedicated operator token (Kotlin `OverOp`),
@@ -209,7 +234,7 @@ pub fn tokenise(src: &str) -> Vec<SpannedToken> {
         }
         // symbol name: a run of non-space, non-special chars (letters, digits, _, etc.)
         if is_symbol_start(c) {
-            let (raw_name, ni) = lex_symbol(&chars, i);
+            let (raw_name, ni) = lex_symbol(&chars, i, &single);
             // A lone operator char (e.g. `+`) is accepted by `is_symbol_start` but
             // rejected by `lex_symbol` (non-alphanumeric), yielding an empty name.
             // In that case the symbol *is* just the single char `c`.
@@ -265,6 +290,43 @@ pub fn tokenise(src: &str) -> Vec<SpannedToken> {
     }
     out.push(SpannedToken { token: Token::EndOfFile, line, col });
     out
+}
+
+/// If the token tail (ignoring newlines) completes a
+/// `declare(:singleCharExported "X")` directive, return X's single char for
+/// registration. Multi-char strings register nothing (Kotlin stores the whole
+/// string opaquely in `exportedSingleCharFunctions`, where it can never match
+/// a single char in `charIsSingleCharExported`).
+fn check_single_char_directive(out: &[SpannedToken]) -> Option<char> {
+    let mut it = out
+        .iter()
+        .rev()
+        .filter(|t| !matches!(t.token, Token::Newline));
+    if !matches!(it.next()?.token, Token::CloseParen) {
+        return None;
+    }
+    let s = match &it.next()?.token {
+        Token::Literal(LiteralValue::Str(s)) => s.clone(),
+        _ => return None,
+    };
+    match &it.next()?.token {
+        Token::Literal(LiteralValue::Symbol { name, namespace })
+            if namespace.as_deref() == Some("keyword") && name == "singleCharExported" => {}
+        _ => return None,
+    }
+    if !matches!(it.next()?.token, Token::OpenParen) {
+        return None;
+    }
+    match &it.next()?.token {
+        Token::Literal(LiteralValue::Symbol { name, namespace })
+            if namespace.is_none() && name == "declare" => {}
+        _ => return None,
+    }
+    let mut ch = s.chars();
+    match (ch.next(), ch.next()) {
+        (Some(c), None) => Some(c),
+        _ => None,
+    }
 }
 
 fn single_char_token(c: char) -> Option<Token> {

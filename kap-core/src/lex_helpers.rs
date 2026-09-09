@@ -308,12 +308,23 @@ fn parse_real(s: &str) -> Result<f64, String> {
 }
 
 /// Lex a symbol name run (letters, digits, _, and APL-ish identifier chars that are not
-/// structural). Returns (name, next_index).
-pub fn lex_symbol(chars: &[char], i: usize) -> (String, usize) {
+/// structural). Returns (name, next_index). `stop` holds engine-registered
+/// single-char-exported names (Kotlin engine.kt:577 `charIsSymbolDelimiter`):
+/// a registered char terminates the run (and lexes as its own single-char
+/// symbol via the caller's empty-run fallback), so after
+/// `declare(:singleCharExported "a")`, `aaaa` lexes as four `a`s.
+pub fn lex_symbol(
+    chars: &[char],
+    i: usize,
+    stop: &std::collections::HashSet<char>,
+) -> (String, usize) {
     let mut j = i;
     let mut s = String::new();
     while j < chars.len() {
         let c = chars[j];
+        if stop.contains(&c) {
+            break;
+        }
         if c.is_alphanumeric() || c == '_' || c == ':' || c == '⎕' {
             s.push(c);
             j += 1;

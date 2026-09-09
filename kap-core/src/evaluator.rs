@@ -9,7 +9,7 @@
 
 use crate::array::{ArrayData, AxisLabel, DimensionLabels, KapArray};
 use crate::ast::{SyntaxMacro, Instr, BooleanOpKind};
-use crate::lexer::tokenise;
+use crate::lexer::{tokenise, tokenise_with};
 use crate::number::{bigint_to_kap, popcount_bigint, rational_to_kap, KapNumber};
 use crate::parser;
 use crate::map::KapMap;
@@ -939,7 +939,9 @@ impl Engine {
         // names between statements. This lets a function defined in one statement
         // (`∇ foo ...`) be visible to later statements (`foo 10`), so the parser can tell a
         // value symbol (`a c` strands) from a function symbol (`foo 10` applies).
-        let toks = tokenise(src);
+        // Seed the lexer with engine-registered single-char-exported names
+        // (Kotlin `charIsSymbolDelimiter`); same-input directives register inline.
+        let toks = tokenise_with(src, &self.single_chars.borrow());
         let mut pos = 0;
         let mut last: AplRef<APLValue> = Rc::new(APLValue::Null);
         loop {
@@ -1024,7 +1026,7 @@ impl Engine {
         let mut failed: usize = 0;
         let mut total: usize = 0;
         let mut first_err: Option<String> = None;
-        let toks = tokenise(src);
+        let toks = tokenise_with(src, &self.single_chars.borrow());
         let mut pos = 0;
         let mut last: AplRef<APLValue> = Rc::new(APLValue::Null);
         // HOME-NAMESPACE ANCHOR for this file. All file statements evaluate in a
@@ -13782,9 +13784,10 @@ impl Engine {
     ) -> Result<AplRef<APLValue>, AplError> {
         // Extract symbol names *structurally* from the AST — we must not evaluate
         // `target`, since it may be an unbound name (the whole point of the special
-        // form). Returns (keyword, [names]): `:export` marks exports, `:const` marks
-        // read-only constants (B6 / code_analysis_03).
-        let (kw, names): (String, Vec<String>) = match right {
+        // form). Returns (keyword, [names], target): `:export` marks exports, `:const`
+        // marks read-only constants (B6 / code_analysis_03). The raw target is kept
+        // for `:singleCharExported`, whose operand is a string literal, not a symbol.
+        let (kw, names, target): (String, Vec<String>, Option<Instr>) = match right {
             Instr::Array { elements } => {
                 // elements[0] is the directive keyword symbol; elements[1] is the target.
                 if elements.len() < 2 {
@@ -13794,6 +13797,7 @@ impl Engine {
                     Instr::Symbol { name, .. } => name.clone(),
                     _ => String::new(),
                 };
+                let tgt = elements[1].clone();
                 let extracted = match &elements[1] {
                     Instr::Symbol { name, .. } => vec![name.clone()],
                     Instr::Array { elements: inner } => inner
@@ -13806,15 +13810,49 @@ impl Engine {
                     // Non-symbol operand (e.g. an operator glyph): no-op, like the oracle.
                     _ => vec![],
                 };
-                (keyword, extracted)
+                (keyword, extracted, Some(tgt))
             }
             // Bare `declare(:foo)` with a single (non-paren) argument is unusual; treat
             // any lone Symbol as the target to export.
-            Instr::Symbol { name, .. } => ("export".to_string(), vec![name.clone()]),
-            _ => (String::new(), vec![]),
+            Instr::Symbol { name, .. } => (
+                "export".to_string(),
+                vec![name.clone()],
+                None,
+            ),
+            _ => (String::new(), vec![], None),
         };
         let cur = env.ns_registry.current_ns();
         match kw.as_str() {
+            // `:singleCharExported "a"` (Kotlin parser.kt:1169
+            // `processSingleCharDeclaration` → engine.kt:967
+            // `registerExportedSingleCharFunction`): registers `a` as a symbol
+            // delimiter for later inputs (same-input lexing already registered it
+            // inline at `)`). Only single-char strings register; anything else is
+            // a no-op like the oracle.
+            "singleCharExported" => {
+                fn collect_strs(e: &Instr, out: &mut Vec<String>) {
+                    match e {
+                        Instr::Literal(LiteralValue::Str(s)) => out.push(s.clone()),
+                        Instr::Symbol { name, .. } => out.push(name.clone()),
+                        Instr::Array { elements } => {
+                            for x in elements {
+                                collect_strs(x, out);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                let mut strs = Vec::new();
+                if let Some(t) = &target {
+                    collect_strs(t, &mut strs);
+                }
+                for s in strs {
+                    let mut ch = s.chars();
+                    if let (Some(c), None) = (ch.next(), ch.next()) {
+                        self.single_chars.borrow_mut().insert(c);
+                    }
+                }
+            }
             "const" => {
                 for name in names {
                     env.ns_registry.declare_const(&cur, &name);

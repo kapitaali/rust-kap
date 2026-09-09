@@ -6268,6 +6268,17 @@ impl<'a> Parser<'a> {
                     unreachable!()
                 }
             }
+            Some(Token::Literal(LiteralValue::Str(_))) => {
+                // A string-literal target (`declare(:singleCharExported "a")`,
+                // Kotlin `processSingleCharDeclaration` takes a StringToken).
+                let t = self.peek().unwrap().token.clone();
+                if let Token::Literal(LiteralValue::Str(s)) = t {
+                    self.advance();
+                    Instr::Literal(LiteralValue::Str(s))
+                } else {
+                    unreachable!()
+                }
+            }
             Some(Token::OpenParen) => {
                 self.advance(); // consume (
                 let mut names = Vec::new();
@@ -6284,6 +6295,11 @@ impl<'a> Parser<'a> {
                                     name: name.clone(),
                                     namespace: namespace.clone(),
                                 });
+                                self.advance();
+                            }
+                            // String members (`declare(:singleCharExported ("a" "b"))`).
+                            Token::Literal(LiteralValue::Str(s)) => {
+                                names.push(Instr::Literal(LiteralValue::Str(s.clone())));
                                 self.advance();
                             }
                             _ => {
