@@ -17159,31 +17159,40 @@ impl Engine {
 
     /// Flat cell ravel: every cell of `v` in row-major order, `len ==
     /// element_count()`. Unlike `flat_elements` (one storage level), this
-    /// descends hierarchical `Nested` storage to `rank` depth — multi-dim
-    /// `⍳` nests one entry per row, so `+/⍳2 2` needs 4 cells, not 2 rows.
+    /// descends hierarchical `Nested` storage — multi-dim `⍳` nests one
+    /// entry per row, so `+/⍳2 2` needs 4 cells, not 2 rows.
     /// Cells are opaque: a cell that is itself an array (iota coordinate
-    /// vector) is pushed whole, never recursed into.
+    /// vector, an enclosed string in a nested matrix) is pushed whole, never
+    /// recursed into. Depth alone cannot tell a structural subdivision from
+    /// an enclosed cell (a 2×2 string matrix is storage-depth 3 at logical
+    /// rank 2), so the descent is COUNT-guided (Kotlin foreach.kt iterates
+    /// flat indices via `valueAt`, one element per position): at any `Array`
+    /// node, one storage level holding exactly `element_count()` children
+    /// means every child is one logical element (stop); fewer children means
+    /// a structural split (recurse). An empty node yields nothing.
     fn flat_cell_ravel(&self, v: &AplRef<APLValue>) -> Vec<AplRef<APLValue>> {
         let rank = v.rank();
         if rank <= 1 {
             return self.flat_elements(v);
         }
-        fn walk(out: &mut Vec<AplRef<APLValue>>, node: &AplRef<APLValue>, depth: usize, rank: usize) {
-            if depth == rank {
-                out.push(node.clone());
-                return;
-            }
+        fn walk(out: &mut Vec<AplRef<APLValue>>, node: &AplRef<APLValue>) {
             match node.as_ref() {
-                APLValue::Array(a) => {
-                    for e in a.elements() {
-                        walk(out, &e, depth + 1, rank);
+                APLValue::Array(a) if a.element_count() > 0 => {
+                    let kids = a.elements();
+                    if kids.len() == a.element_count() {
+                        out.extend(kids);
+                    } else {
+                        for e in &kids {
+                            walk(out, e);
+                        }
                     }
                 }
+                APLValue::Array(_) => {}
                 other => out.push(Rc::new(other.clone())),
             }
         }
         let mut out = Vec::with_capacity(v.element_count());
-        walk(&mut out, v, 0, rank);
+        walk(&mut out, v);
         out
     }
 
