@@ -3050,6 +3050,7 @@ impl<'a> Parser<'a> {
                 // `__KOTLIN_FALLBACK__` (CustomFunctionTest
                 // `operatorWithLambdaFunctionLeftArg` → 112).
                 | Instr::DynamicRef { .. }
+                | Instr::DynamicRefExpr { .. }
         ) || match &first {
             Instr::Symbol { name, namespace } => {
                 let qual = match namespace {
@@ -3198,6 +3199,7 @@ impl<'a> Parser<'a> {
                 | Instr::Block { .. }
                 | Instr::OpCall { .. }
                 | Instr::DynamicRef { .. }
+                | Instr::DynamicRefExpr { .. }
                 // A `⍢`/`⍣`/`⍤` derived function (ValueOp) is just as much a
                 // function value as a Derived adverb — without this arm a leading
                 // `⌽⍢⌽ ⍳5` fell through to the bare-symbol heuristic and STRANDED
@@ -4466,6 +4468,16 @@ impl<'a> Parser<'a> {
                             if matches!(self.peek().map(|t| &t.token), Some(Token::CloseParen)) {
                                 self.advance();
                             }
+                            // Bind a trailing adverb/operator onto the group function
+                            // (`(n-)˝`, `(f)¨`): the symbol-fn arm does this via
+                            // bind_operators_kotlin (Kotlin parseOperator); without it
+                            // the adverb strands as a VALUE right-arg and dies at eval
+                            // with `undefined symbol: ˝`. Fall back to
+                            // fold_trailing_adverb exactly like the symbol arm.
+                            let f = match self.bind_operators_kotlin(f.clone()) {
+                                Ok(f) => f,
+                                Err(_) => self.fold_trailing_adverb(f),
+                            };
                             // Function group: identical continuation to the symbol arm
                             // below (Kotlin parser.kt:457–491).
                             match self.parse_paren_accum() {
@@ -5794,6 +5806,26 @@ impl<'a> Parser<'a> {
                         self.advance();
                         Ok(Instr::DynamicRef { name, namespace })
                     }
+                    // `⍞(fnExpr)` — computed dynamic reference (Kotlin
+                    // parseApplyDefinition, parser.kt:1194-1201: OpenParen →
+                    // parseValueToplevel). Mirrors the legacy-primary arm: parse
+                    // the group in value context and return it as a bare function
+                    // atom (the caller's apply loop handles adverbs/applying).
+                    Token::OpenParen => {
+                        self.advance(); // consume (
+                        let inner = self.parse_value_kotlin()?;
+                        self.expect(Token::CloseParen, "expected ) after ⍞(…)")?;
+                        // A function-shaped inner (`⍞(+)`, `⍞foo`) inlines like the
+                        // main-accumulator arm; a VALUE-shaped inner (an application
+                        // like `⍞(foo 1)`) wraps as DynamicRefExpr so it stays
+                        // function-shaped (Kotlin `DynamicFunctionDescriptor`) instead
+                        // of degrading to an `⍺/⍵` delegation under `⇐`.
+                        if Self::is_function_expr(&inner) {
+                            Ok(inner)
+                        } else {
+                            Ok(Instr::DynamicRefExpr { expr: Box::new(inner) })
+                        }
+                    }
                     _ => Err(self.err("expected a symbol after ⍞")),
                 }
             }
@@ -5966,11 +5998,49 @@ impl<'a> Parser<'a> {
                         // function, never an application): bare `λ(+/)` is `<function>`.
                         self.advance();
                         match self.parse_paren_value_leading() {
-                            Some(h @ Instr::Lambda { .. }) => Ok(h),
+                            Some(h) => {
+                                // Trailing operator INSIDE the parens (`λ((n-)˝)`):
+                                // Kotlin `parseOperator` binds it before the `)`.
+                                // Bind `adv` only when the token AFTER it is `)` —
+                                // otherwise the adverb is OUTSIDE (e.g. `λ(f)¨ x`
+                                // must stay each-over-lambda, not lambda-of-each).
+                                let mut h = h;
+                                let mut bound = false;
+                                loop {
+                                    let is_adv = matches!(
+                                        self.peek().map(|t| &t.token),
+                                        Some(Token::Literal(LiteralValue::Symbol { name, namespace }))
+                                            if namespace.is_none() && Self::is_adverb(name)
+                                    );
+                                    let next_is_close = matches!(
+                                        self.peek_at(1).map(|t| &t.token),
+                                        Some(Token::CloseParen)
+                                    );
+                                    if !(is_adv && next_is_close) {
+                                        break;
+                                    }
+                                    let op = match self.peek().map(|t| &t.token) {
+                                        Some(Token::Literal(LiteralValue::Symbol { name, .. })) => {
+                                            name.clone()
+                                        }
+                                        _ => break,
+                                    };
+                                    self.advance(); // consume the adverb
+                                    h = Instr::Derived {
+                                        func: Box::new(h),
+                                        op: Box::new(Instr::Symbol { name: op, namespace: None }),
+                                    };
+                                    bound = true;
+                                }
+                                if bound {
+                                    self.expect(Token::CloseParen, "expected ) after λ(…)")?;
+                                }
+                                match h {
+                                    h @ Instr::Lambda { .. } => Ok(h),
                             // Bare `(name)`: same `lookupFunction` gate as `λfoo`
                             // (Kotlin `λ(foo)` with undefined `foo` is a parse
                             // failure); a defined fn wraps like any fn expr.
-                            Some(h @ Instr::Symbol { .. }) => {
+                            h @ Instr::Symbol { .. } => {
                                 if let Instr::Symbol { name, namespace } = &h {
                                     if !Self::is_primitive_op(name)
                                         && !self.is_known_fn(name, namespace)
@@ -5984,10 +6054,12 @@ impl<'a> Parser<'a> {
                                     body: Box::new(h),
                                 })
                             }
-                            Some(holder) => Ok(Instr::Lambda {
+                            holder => Ok(Instr::Lambda {
                                 params: vec![],
                                 body: Box::new(holder),
                             }),
+                                }
+                            }
                             None => Err(self.err("λ: empty group is not a function")),
                         }
                     }
@@ -6121,6 +6193,7 @@ impl<'a> Parser<'a> {
                 // operator binds after it (`⍞f0 bar 10` → OpCall, giving 112)
                 // instead of dying with `__KOTLIN_FALLBACK__`.
                 | Instr::DynamicRef { .. }
+                | Instr::DynamicRefExpr { .. }
         )
     }
 
@@ -6623,11 +6696,49 @@ impl<'a> Parser<'a> {
                         // function, never an application): bare `λ(+/)` is `<function>`.
                         self.advance();
                         match self.parse_paren_value_leading() {
-                            Some(h @ Instr::Lambda { .. }) => Ok(h),
+                            Some(h) => {
+                                // Trailing operator INSIDE the parens (`λ((n-)˝)`):
+                                // Kotlin `parseOperator` binds it before the `)`.
+                                // Bind `adv` only when the token AFTER it is `)` —
+                                // otherwise the adverb is OUTSIDE (e.g. `λ(f)¨ x`
+                                // must stay each-over-lambda, not lambda-of-each).
+                                let mut h = h;
+                                let mut bound = false;
+                                loop {
+                                    let is_adv = matches!(
+                                        self.peek().map(|t| &t.token),
+                                        Some(Token::Literal(LiteralValue::Symbol { name, namespace }))
+                                            if namespace.is_none() && Self::is_adverb(name)
+                                    );
+                                    let next_is_close = matches!(
+                                        self.peek_at(1).map(|t| &t.token),
+                                        Some(Token::CloseParen)
+                                    );
+                                    if !(is_adv && next_is_close) {
+                                        break;
+                                    }
+                                    let op = match self.peek().map(|t| &t.token) {
+                                        Some(Token::Literal(LiteralValue::Symbol { name, .. })) => {
+                                            name.clone()
+                                        }
+                                        _ => break,
+                                    };
+                                    self.advance(); // consume the adverb
+                                    h = Instr::Derived {
+                                        func: Box::new(h),
+                                        op: Box::new(Instr::Symbol { name: op, namespace: None }),
+                                    };
+                                    bound = true;
+                                }
+                                if bound {
+                                    self.expect(Token::CloseParen, "expected ) after λ(…)")?;
+                                }
+                                match h {
+                                    h @ Instr::Lambda { .. } => Ok(h),
                             // Bare `(name)`: same `lookupFunction` gate as `λfoo`
                             // (Kotlin `λ(foo)` with undefined `foo` is a parse
                             // failure); a defined fn wraps like any fn expr.
-                            Some(h @ Instr::Symbol { .. }) => {
+                            h @ Instr::Symbol { .. } => {
                                 if let Instr::Symbol { name, namespace } = &h {
                                     if !Self::is_primitive_op(name)
                                         && !self.is_known_fn(name, namespace)
@@ -6641,10 +6752,12 @@ impl<'a> Parser<'a> {
                                     body: Box::new(h),
                                 })
                             }
-                            Some(holder) => Ok(Instr::Lambda {
+                            holder => Ok(Instr::Lambda {
                                 params: vec![],
                                 body: Box::new(holder),
                             }),
+                                }
+                            }
                             None => Err(self.err("λ: empty group is not a function")),
                         }
                     }

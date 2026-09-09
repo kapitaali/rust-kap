@@ -119,6 +119,13 @@ pub enum Instr {
     /// writing `x` but forces `x` to be interpreted as a function even if `x` would
     /// otherwise be a value. Used inside operator bodies to apply a function-operand.
     DynamicRef { name: String, namespace: Option<String> },
+    /// A *computed* dynamic function reference (Kap's `⍞(expr)` /
+    /// `parseApplyDefinition` with OpenParen, parser.kt:1194-1201): evaluates
+    /// `expr` to a *value*, which must be a function, and applies it. Unlike a
+    /// bare application (a value), this is FUNCTION-shaped (Kotlin wraps it in
+    /// a `DynamicFunctionDescriptor`), so `a ⇐ ⍞(foo 1)` binds the computed
+    /// function instead of building an `⍺/⍵` delegation.
+    DynamicRefExpr { expr: Box<Instr> },
     /// A *user-defined operator* definition: `∇ (x foo) a { … }` (1 function-operand) or
     /// `∇ (x foo y) a { … }` (2 function-operands). `op_left`/`op_right` are the names
     /// bound to the function-operands at the call site; `left_params`/`right_params` are

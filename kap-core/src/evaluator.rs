@@ -1214,6 +1214,8 @@ impl Engine {
                     .ok_or_else(|| AplError::runtime(format!("undefined symbol: {}", name)))?;
                 Ok(found)
             }
+            // `⍞(expr)` in value position: the computed function itself.
+            Instr::DynamicRefExpr { expr } => self.eval_instr(expr, env),
             Instr::OpCall { op, left_fn, right_fn, right_value } => {
                 // An operator call only appears as a *function*; route it through
                 // `eval_apply` with no trailing data argument.
@@ -1692,7 +1694,7 @@ impl Engine {
                     // Mirror that: evaluate JUST the head now and freeze it into
                     // Instr::Value (a bare `⍺`/`⍵` head is NOT frozen — params don't
                     // exist at def time; those stay lazy via train_head_is_bound).
-                    Instr::Derived { .. } | Instr::Train { .. } | Instr::ValueOp { .. } => {
+                    Instr::Derived { .. } | Instr::Train { .. } | Instr::ValueOp { .. } | Instr::DynamicRefExpr { .. } => {
                         match value.as_ref() {
                             // EXCEPTION — a 2-train with a VALUE-bound symbol head
                             // (`a ⇐ x+` with `x←10`): freeze the head now (see above).
@@ -1865,6 +1867,8 @@ impl Engine {
                     .ok_or_else(|| AplError::runtime(format!("undefined symbol: {}", name)))?;
                 Ok(found)
             }
+            // `⍞(expr)` in value position: the computed function itself.
+            Instr::DynamicRefExpr { expr } => self.eval_instr(expr, env),
             Instr::Value(v) => Ok(v.clone()),
             Instr::Index { array, selector } => {
                 let arr = self.eval_instr(array, env)?;
@@ -2874,6 +2878,52 @@ impl Engine {
                         return Err(AplError::runtime(format!(
                             "{} is not a function (got {})",
                             name, desc
+                        )));
+                    }
+                }
+            }
+            // Computed dynamic reference `⍞(expr)` (Kotlin `DynamicFunctionDescriptor`
+            // over a paren value, parser.kt:1194-1201): evaluate the expression in the
+            // CALLER's scope, force it, and apply the resulting function — mirroring
+            // the `⍞name` arm above (anonymous application: no self-name).
+            Instr::DynamicRefExpr { expr } => {
+                let v = self.eval_instr(expr, env)?.force(self)?;
+                match v.as_ref() {
+                    APLValue::UserFn { params, split, body, env: fenv } => {
+                        return self.apply_user_fn(
+                            params,
+                            *split,
+                            body.as_ref(),
+                            left,
+                            right,
+                            env,
+                            fenv,
+                            None,
+                        );
+                    }
+                    APLValue::Escape { target } => {
+                        return self.apply_escape(*target, left, right, env);
+                    }
+                    APLValue::NonBoundFn { body } => {
+                        return self.apply_nonbound_fn(body, left, right, env);
+                    }
+                    APLValue::UserOp { .. } => {
+                        return Err(AplError::runtime(
+                            "⍞(…): computed value is an operator, not a function".into(),
+                        ));
+                    }
+                    other => {
+                        let desc = match other {
+                            APLValue::Number(_) => "number",
+                            APLValue::Array(_) => "array",
+                            APLValue::Str(_) => "string",
+                            APLValue::Char(_) => "char",
+                            APLValue::Null => "null",
+                            _ => "non-function value",
+                        };
+                        return Err(AplError::runtime(format!(
+                            "⍞(…): computed value is not a function (got {})",
+                            desc
                         )));
                     }
                 }
@@ -5826,9 +5876,32 @@ impl Engine {
             self.bind_param_group(&child, &params[bind_split..], &right_val);
         }
         // Default `⍵`/`⍺` names (Kap's omega/alpha). `⍵` = right arg; `⍺` = left (if present).
-        child.define("⍵", &None, right_val.clone());
-        if let Some(lv) = &left_val {
-            child.define("⍺", &None, lv.clone());
+        // Bound ONLY for dfn bodies (`{…}` blocks, possibly with named params) and
+        // delegation bodies — NOT for bare function bodies (primitive symbols,
+        // trains, derived fns: `f ⇐ ×-`, `a ⇐ ⍞(foo 1)`). Kotlin binds ⍺/⍵ only in
+        // `parseFnDefinition` (dfn bodies); expression-functions resolve ⍺/⍵
+        // lexically, so `λ((10+⍵)+)` applied later reads the WRAP-time ⍵, not the
+        // call arg (oracle `a ⇐ ⍞(foo 1) ⋄ a 5` → 16, not 20). Binding them here
+        // would shadow the closure value with the call arg.
+        let body_binds_omega = !params.is_empty()
+            || !matches!(
+                body,
+                Instr::Derived { .. }
+                    | Instr::Train { .. }
+                    | Instr::ValueOp { .. }
+                    | Instr::AxisApplied { .. }
+                    | Instr::Symbol { .. }
+                    | Instr::DynamicRef { .. }
+                    | Instr::DynamicRefExpr { .. }
+                    | Instr::OverOp { .. }
+                    | Instr::InnerProduct { .. }
+                    | Instr::Obverse { .. }
+            );
+        if body_binds_omega {
+            child.define("⍵", &None, right_val.clone());
+            if let Some(lv) = &left_val {
+                child.define("⍺", &None, lv.clone());
+            }
         }
         // Self-binding: so a function can recurse by name (e.g. `fib` calling `fib`).
         if let Some(name) = self_name {
@@ -5862,7 +5935,7 @@ impl Engine {
         // catches it here and returns `v`. If it escapes uncaught (top level), `eval_string_in_env`
         // converts it to the Real-Kap message "Call to return without a function call".
         let result = match body {
-            Instr::Derived { .. } | Instr::Train { .. } | Instr::ValueOp { .. } | Instr::AxisApplied { .. } | Instr::Symbol { .. } | Instr::DynamicRef { .. } | Instr::OverOp { .. } | Instr::InnerProduct { .. } | Instr::Obverse { .. } => {
+            Instr::Derived { .. } | Instr::Train { .. } | Instr::ValueOp { .. } | Instr::AxisApplied { .. } | Instr::Symbol { .. } | Instr::DynamicRef { .. } | Instr::DynamicRefExpr { .. } | Instr::OverOp { .. } | Instr::InnerProduct { .. } | Instr::Obverse { .. } => {
                 child.fn_body_depth.set(child.fn_body_depth.get() + 1);
                 // Re-dispatch with the already-evaluated ARG VALUES (`⍵`/`⍺` bound
                 // above), NOT the original `left`/`right` Instrs: those must be read
@@ -15867,6 +15940,7 @@ impl Engine {
                         match sel {
                             Instr::Symbol { .. }
                             | Instr::DynamicRef { .. }
+                            | Instr::DynamicRefExpr { .. }
                             | Instr::Train { .. }
                             | Instr::Lambda { .. }
                             | Instr::Derived { .. }
