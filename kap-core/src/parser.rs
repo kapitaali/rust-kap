@@ -81,6 +81,7 @@ pub fn parse(
         macros: macros.clone(),
         kotlin_close_stack: Vec::new(),
         list_stop: false,
+        bool_stop: false,
         // Legacy entry: no engine attached — default namespace, fresh registry
         // (macros defined without a namespace check are same-ns visible).
         current_ns: "default".to_string(),
@@ -156,6 +157,14 @@ pub struct Parser<'a> {
     /// `1 + List[2, 3+4]`). Save/restore around nested parses that legitimately
     /// consume `;` themselves (`⟦…⟧` call brackets, `and`/`or` RHS lists).
     pub list_stop: bool,
+    /// `and`/`or` terminate the current *value* parse like a statement boundary
+    /// (Kotlin `END_EXPR_TOKEN_LIST` includes `AndToken`/`OrToken`, parser.kt:1351):
+    /// `finish_fn_call`'s right-argument parse (`processFn` → `parseValue`) stops
+    /// at `and`/`or` so the caller's boolean loop owns the keyword
+    /// (`2 ∊ X and 99` → `(2∊X) and 99`, not `2 ∊ (X and 99)`). Likewise an
+    /// `and`/`or` RHS parses ONE value unit; chaining is left-associative via
+    /// the caller's loop. Save/restore around nested parses.
+    pub bool_stop: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -397,6 +406,39 @@ impl<'a> Parser<'a> {
         self.parse_value_kotlin_with_lists(seeded, Vec::new())
     }
 
+    /// ONE `parseValue` unit for an `and`/`or` RHS (Kotlin
+    /// `parseBooleanExpressionInner`, parser.kt:376: `val rightValue = parseValue()`):
+    /// a full fn application whose right-argument parse stops at a following
+    /// `and`/`or` (Kotlin: `and`/`or` lex as `AndToken`/`OrToken`, tokeniser.kt:841-842,
+    /// which sit in END_EXPR_TOKEN_LIST, parser.kt:1351 — so `processFn` →
+    /// `parseValue` never sees them; the outer boolean loop owns them). Chaining
+    /// stays LEFT-associative via the caller's loop (oracle `5 or 6 or 0 and 0`
+    /// → 0, `9 or 5 and 0` → 0). Also stops at `;` (`list_stop`), so the
+    /// caller's `;`-list loop owns the separator.
+    fn parse_boolean_rhs(&mut self) -> Result<Instr, AplError> {
+        let saved_list = self.list_stop;
+        let saved_bool = self.bool_stop;
+        self.list_stop = true;
+        self.bool_stop = true;
+        let res = self.parse_value_kotlin();
+        self.list_stop = saved_list;
+        self.bool_stop = saved_bool;
+        res
+    }
+
+    /// Nested value parse with a FRESH boolean context. Kotlin parses group
+    /// contents via `parseExprToplevel` → `parseList` → `parseBooleanExpression`,
+    /// so `and`/`or` inside `(…)` / `⟦…⟧` / `if(…)` conditions belong to the inner
+    /// context — an enclosing `finish_fn_call` right-arg parse (`bool_stop=true`)
+    /// must not leak in, or the inner `expect(CloseParen)` dies on the keyword.
+    fn parse_value_kotlin_fresh_bool(&mut self) -> Result<Instr, AplError> {
+        let saved = self.bool_stop;
+        self.bool_stop = false;
+        let res = self.parse_value_kotlin();
+        self.bool_stop = saved;
+        res
+    }
+
     /// Accumulator loop with a PRE-SEEDED `left_args` AND pending `;`-list
     /// elements. `finish_fn_call` passes the caller's `&mut` vecs straight
     /// through (no moves) so an application after a `;` (e.g. `10 ; foo
@@ -504,13 +546,31 @@ impl<'a> Parser<'a> {
             }) = &tok.token
             {
                 if nn == "and" || nn == "or" {
+                    // `bool_stop` (Kotlin `AndToken`/`OrToken` ∈ END_EXPR_TOKEN_LIST,
+                    // parser.kt:1351): a nested value parse — `finish_fn_call`'s
+                    // right-arg parse or another boolean RHS — stops here WITHOUT
+                    // consuming, leaving the keyword to the caller's boolean loop
+                    // (`2 ∊ X and 99` → `(2∊X) and 99`, not `2 ∊ (X and 99)`).
+                    if self.bool_stop {
+                        break;
+                    }
                     let is_and = nn == "and";
                     self.advance();
-                    let saved = self.list_stop;
-                    self.list_stop = true;
-                    let rhs = self.parse_value_kotlin();
-                    self.list_stop = saved;
-                    let rhs = rhs?;
+                    // Kotlin `parseBooleanExpressionInner` (parser.kt:376): the
+                    // LHS is ONE `parseValue` unit — the pending strand is
+                    // flushed via `makeResultList` semantics: a single operand
+                    // passes UNWRAPPED, several strand. The RHS is likewise ONE
+                    // `parseValue` unit (a fn application there does NOT
+                    // swallow a following `and`/`or` — that belongs to THIS
+                    // loop), then the loop continues so chains are
+                    // LEFT-associative (`a and b and c` = `(a and b) and c`,
+                    // oracle `1 and 1 and 0` → 0, `0 or 0 and 5` → 0).
+                    // NOTE: a bare `parse_value_kotlin` RHS re-enters this
+                    // same `and` handling and would build a RIGHT-nested
+                    // tree — wrong for mixed chains (oracle
+                    // `5 or 6 or 0 and 0` → 0, `9 or 5 and 0` → 0). So the
+                    // RHS here is one value unit; chaining happens by loop.
+                    let rhs = self.parse_boolean_rhs()?;
                     let lhs = if left_args.len() == 1 {
                         left_args.pop().unwrap()
                     } else {
@@ -518,7 +578,7 @@ impl<'a> Parser<'a> {
                             elements: std::mem::take(&mut left_args),
                         }
                     };
-                    let op = Instr::BooleanOp {
+                    let mut op = Instr::BooleanOp {
                         op: if is_and {
                             BooleanOpKind::And
                         } else {
@@ -527,6 +587,33 @@ impl<'a> Parser<'a> {
                         left: Box::new(lhs),
                         right: Box::new(rhs),
                     };
+                    // Chain: a following `and`/`or` continues left-assoc.
+                    loop {
+                        let next_is_bool = matches!(
+                            self.peek().map(|t| &t.token),
+                            Some(Token::Literal(LiteralValue::Symbol { name, namespace }))
+                                if namespace.is_none() && (name == "and" || name == "or")
+                        );
+                        if !next_is_bool {
+                            break;
+                        }
+                        let is_and2 = matches!(
+                            self.peek().map(|t| &t.token),
+                            Some(Token::Literal(LiteralValue::Symbol { name, .. }))
+                                if name == "and"
+                        );
+                        self.advance();
+                        let rhs2 = self.parse_boolean_rhs()?;
+                        op = Instr::BooleanOp {
+                            op: if is_and2 {
+                                BooleanOpKind::And
+                            } else {
+                                BooleanOpKind::Or
+                            },
+                            left: Box::new(op),
+                            right: Box::new(rhs2),
+                        };
+                    }
                     // Like an application, a boolean op followed by `;` is
                     // the FIRST list element (Kotlin `parseBooleanExpression`
                     // sits inside `parseListInner`): consume the separator and
@@ -687,7 +774,7 @@ impl<'a> Parser<'a> {
                             // PAST the `)` and misparses `(λ{a}) (λ{b})` as Apply{λa,λb}
                             // instead of stranding Array[λa,λb] (`⍞((c≡1)⌷…)` pick).
                             self.kotlin_close_stack.push(Token::CloseParen);
-                            let inner = self.parse_value_kotlin();
+                            let inner = self.parse_value_kotlin_fresh_bool();
                             self.kotlin_close_stack.pop();
                             let inner = inner?;
                             self.expect(Token::CloseParen, "expected ) after ⍞(…)")?;
@@ -722,7 +809,7 @@ impl<'a> Parser<'a> {
                     self.advance(); // consume (
                     let group = {
                         self.kotlin_close_stack.push(Token::CloseParen);
-                        let g = self.parse_value_kotlin();
+                        let g = self.parse_value_kotlin_fresh_bool();
                         self.kotlin_close_stack.pop();
                         match g {
                             Ok(g) => g,
@@ -1564,10 +1651,14 @@ impl<'a> Parser<'a> {
         // `⟦…⟧` contents are their own `parseExprToplevel` context (Kotlin
         // parser.kt:441): `;` inside belongs to THIS bracket, so the
         // `list_stop` flag from an enclosing right-arg parse must not leak in.
+        // Same for `bool_stop`: bracket contents are a fresh boolean context.
         let saved = self.list_stop;
+        let saved_bool = self.bool_stop;
         self.list_stop = false;
+        self.bool_stop = false;
         let res = self.parse_function_call_list_inner(fn_instr);
         self.list_stop = saved;
+        self.bool_stop = saved_bool;
         res
     }
 
@@ -1800,11 +1891,18 @@ impl<'a> Parser<'a> {
         // `1+2;3+4` parses as `List[1+2, 3+4]`, not `1 + List[2, 3+4]`.
         // The caller's list loop then owns the separator (the `lists`
         // continuation below). Save/restore: nested `⟦…⟧` contents and
-        // `and`/`or` RHS lists manage the flag themselves.
+        // `and`/`or` RHS lists manage the flags themselves — EXCEPT `bool_stop`,
+        // which this parse SETS: Kotlin `processFn` calls `parseValue`, which never
+        // sees `AndToken`/`OrToken` (END_EXPR_TOKEN_LIST, parser.kt:1351), so a bare
+        // `and`/`or` terminates the right argument and the caller's boolean loop owns
+        // it (`2 ∊ X and 99` → `(2∊X) and 99`, not `2 ∊ (X and 99)`).
         let saved = self.list_stop;
+        let saved_bool = self.bool_stop;
         self.list_stop = true;
+        self.bool_stop = true;
         let right = self.parse_value_kotlin();
         self.list_stop = saved;
+        self.bool_stop = saved_bool;
         let right = right?;
         if left_args.is_empty() {
             // parser.kt:479–484 FnParseResult branch: when the right argument is a
@@ -1839,6 +1937,14 @@ impl<'a> Parser<'a> {
                 left: None,
                 right: Box::new(right),
             };
+            if self.peek_is_bool() {
+                // `and`/`or` follow a completed call: resume the accumulator with
+                // the call seeded so the boolean loop owns the keyword
+                // (Kotlin `AndToken`/`OrToken` ∈ END_EXPR_TOKEN_LIST).
+                left_args.push(call);
+                let seeded = std::mem::take(left_args);
+                return self.parse_value_kotlin_with_lists(seeded, std::mem::take(lists));
+            }
             if lists.is_empty()
                 && !matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator))
             {
@@ -1904,6 +2010,11 @@ impl<'a> Parser<'a> {
                 left: Some(Box::new(left)),
                 right: Box::new(right),
             };
+            if self.peek_is_bool() {
+                left_args.push(call);
+                let seeded = std::mem::take(left_args);
+                return self.parse_value_kotlin_with_lists(seeded, std::mem::take(lists));
+            }
             if lists.is_empty()
                 && !matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator))
             {
@@ -1932,6 +2043,11 @@ impl<'a> Parser<'a> {
             left: Some(Box::new(strand)),
             right: Box::new(right),
         };
+        if self.peek_is_bool() {
+            left_args.push(call);
+            let seeded = std::mem::take(left_args);
+            return self.parse_value_kotlin_with_lists(seeded, std::mem::take(lists));
+        }
         if lists.is_empty()
             && !matches!(self.peek().map(|t| &t.token), Some(Token::ListSeparator))
         {
@@ -2134,7 +2250,7 @@ impl<'a> Parser<'a> {
         // numbers"). Push the close token so the accumulator stops at `)`, mirroring the
         // `(...)` group arm.
         self.kotlin_close_stack.push(Token::CloseParen);
-        let cond_res = self.parse_value_kotlin();
+        let cond_res = self.parse_value_kotlin_fresh_bool();
         self.kotlin_close_stack.pop();
         let cond = cond_res?;
         self.skip_newlines();
@@ -2183,7 +2299,7 @@ impl<'a> Parser<'a> {
         self.advance();
         // Same accumulator as `parse_if` (Kotlin `processWhile`, parser.kt:1050).
         self.kotlin_close_stack.push(Token::CloseParen);
-        let cond_res = self.parse_value_kotlin();
+        let cond_res = self.parse_value_kotlin_fresh_bool();
         self.kotlin_close_stack.pop();
         let cond = cond_res?;
         self.skip_newlines();
@@ -2225,7 +2341,7 @@ impl<'a> Parser<'a> {
             self.advance();
             // Same accumulator as `parse_if` (Kotlin parses clause conds as values too).
             self.kotlin_close_stack.push(Token::CloseParen);
-            let cond_res = self.parse_value_kotlin();
+            let cond_res = self.parse_value_kotlin_fresh_bool();
             self.kotlin_close_stack.pop();
             let cond = cond_res?;
             self.skip_newlines();
@@ -3855,6 +3971,19 @@ impl<'a> Parser<'a> {
             }
             None => true,
         }
+    }
+
+    /// Whether the next token is a bare `and`/`or` keyword (Kotlin
+    /// `AndToken`/`OrToken`, tokeniser.kt:841-842). Used by `finish_fn_call`'s
+    /// early-return guards: a completed call followed by `and`/`or` must resume
+    /// the accumulator (so the boolean loop owns the keyword) instead of
+    /// returning and dropping the tail.
+    fn peek_is_bool(&self) -> bool {
+        matches!(
+            self.peek().map(|t| &t.token),
+            Some(Token::Literal(LiteralValue::Symbol { name, namespace }))
+                if namespace.is_none() && (name == "and" || name == "or")
+        )
     }
 
     fn is_primitive_op(name: &str) -> bool {

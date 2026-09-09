@@ -964,6 +964,7 @@ impl Engine {
                 macros,
                 kotlin_close_stack: Vec::new(),
                 list_stop: false,
+                bool_stop: false,
                 current_ns: env.ns_registry.current_ns(),
                 ns_registry: env.ns_registry.clone(),
             };
@@ -1059,6 +1060,7 @@ impl Engine {
                 macros,
                 kotlin_close_stack: Vec::new(),
                 list_stop: false,
+                bool_stop: false,
                 current_ns: ns_now.clone(),
                 ns_registry: env.ns_registry.clone(),
             };
