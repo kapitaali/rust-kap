@@ -18525,8 +18525,28 @@ impl Engine {
         }
         // Repeat each B-major-cell along `axis` per `counts`.
         let out_elems = Self::repeat_along_axis(&b, &b_dims, axis, &counts)?;
-        // Result shape: B's shape with axis replaced by the sum of counts.
-        let total: usize = counts.iter().map(|c| *c as usize).sum();
+        // Result shape: B's shape with axis replaced by the sum of the
+        // EFFECTIVE counts. A scalar A broadcasts to every cell along the
+        // axis (Kotlin `IntArray(bDimensions[axisInt]) { v }`, lookup.kt:353),
+        // exactly like `repeat_along_axis` does for the elements — summing
+        // the raw vec undercounts (`2/⍳6` got shape ⟨2⟩ with 12 elements).
+        let total: usize = if b_dims.is_empty() {
+            // Scalar B: the scalar arm of `repeat_along_axis` sums raw counts.
+            counts.iter().map(|c| *c as usize).sum()
+        } else {
+            let axis_len = b_dims.get(axis).copied().unwrap_or(0);
+            (0..axis_len)
+                .map(|i| {
+                    if counts.is_empty() {
+                        1
+                    } else if counts.len() == 1 {
+                        counts[0].max(0) as usize
+                    } else {
+                        counts.get(i).copied().unwrap_or(0).max(0) as usize
+                    }
+                })
+                .sum()
+        };
         let mut shape = b_dims.clone();
         if !shape.is_empty() {
             shape[axis] = total;
