@@ -1183,6 +1183,23 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Whether `[axis]` may bind onto `cur` (Kotlin `parseAxis`, parser.kt:1321,
+    /// applies to any derived fn; the port restricts to axis-aware verbs plus
+    /// a `(⊃ int:proto v)` group). Shared by `bind_operators_kotlin` and the
+    /// parenthesised-train member path (`({9,⊂⍵}+[1])`).
+    fn axis_binds(cur: &Instr) -> bool {
+        match cur {
+            Instr::ValueOp { func, .. } => matches!(func.as_ref(),
+                Instr::Symbol { name, .. }
+                    if name.as_str() == "⊃" || name.as_str() == "first"),
+            Instr::Symbol { name, .. } => {
+                matches!(name.as_str(), "+" | "-" | "×" | "÷" | "*" | "," | "⍪" | "⌽" | "⊖" | "↑" | "↓" | "labels" | "hasLabels" | "⊂" | "⊃" | "⌷" | "⊆" | "∊" | "/" | "⌿" | "⫽" | "∧" | "∨")
+                    || name == &char::from(92u8).to_string()
+            }
+            _ => false,
+        }
+    }
+
     /// P1-M4 port of Kotlin `parseOperator` (:1273–1319): loop over trailing operator
     /// bindings on a just-parsed function. Order per Kotlin: optional `[axis]` first,
     /// then adverb (Derived) / user-operator (OpCall) binding. An operator followed by
@@ -4667,6 +4684,27 @@ impl<'a> Parser<'a> {
                             continue;
                         }
                     }
+                    // Axis postfix `f[axis]` on a train member (Kotlin parseOperator
+                    // applies parseAxis to any fn, parser.kt:1277): e.g.
+                    // `({9,⊂⍵}+[1])` makes `+[1]` the second member. Same
+                    // allowlist as `bind_operators_kotlin` (axis_binds).
+                    if matches!(self.peek().map(|t| &t.token), Some(Token::OpenBracket))
+                        && Self::axis_binds(&e)
+                    {
+                        self.advance(); // consume [
+                        let axis = match self.parse_apply() {
+                            Ok(a) => a,
+                            Err(_) => return None,
+                        };
+                        if self.expect(Token::CloseBracket, "expected ] after axis specifier").is_err() {
+                            return None;
+                        }
+                        funcs.push(Instr::AxisApplied {
+                            func: Box::new(e),
+                            axis: Box::new(axis),
+                        });
+                        continue;
+                    }
                     // Operator-derivation: a function member immediately followed by an operator
                     // glyph (a known *user* operator OR a builtin adverb) binds as an OpCall /
                     // Derived function rather than a train member. e.g. `(≠⌸)` ->
@@ -4992,6 +5030,12 @@ impl<'a> Parser<'a> {
                     || self.is_known_fn(name, namespace)
             }
             Instr::Derived { .. } | Instr::OpCall { .. } | Instr::Lambda { .. } | Instr::Train { .. } | Instr::ValueOp { .. } => true,
+            // A `{…}` dfn block IS a function (Kotlin DeclaredFunction via
+            // processFn): `({9,⊂⍵}+[1])` is a 2-train atop. Likewise an
+            // AxisApplied wrapping (Kotlin AxisValAssignedFunctionDirect).
+            // The fold still restores on non-definite tails, so value groups
+            // like `({f} 1 2)` (application, not a train) keep working.
+            Instr::Block { .. } | Instr::AxisApplied { .. } => true,
             // `⍞name` (DynamicRef) ALWAYS means "fetch the value bound to name as a
             // function" — never a data variable — so it is a definite function for
             // train members (util.kap filter body `(toBoolean ⍞fn)¨ arg`).
