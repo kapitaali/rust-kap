@@ -203,8 +203,10 @@ def first_expr_in_call(body: str):
                     s = s[1:]
                 out.append(s)
             text = '\n'.join(out).strip('\n')
-            # Kotlin triple-quoted strings still process backslash escapes.
-            text = text.replace('\\\\', '\x00').replace('\\"', '"').replace('\x00', '\\')
+            # Kotlin triple-quoted (raw) strings process NO backslash escapes
+            # (only `$`-templates interpolate) — so backslashes stay verbatim.
+            # A prior version unescaped `\\`/`\"` here, corrupting Kap string
+            # escapes (JsonTest deref rows lost their `\"` and failed to parse).
             return text
         decl2 = re.search(
             r'val\s+' + re.escape(ident) + r'\s*=\s*"',

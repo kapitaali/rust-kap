@@ -2085,6 +2085,7 @@ impl Engine {
             APLValue::Map(_) => true,
             APLValue::Stream(_) => true,
             APLValue::Process(_) => true,
+            APLValue::Timestamp(_) => true,
         }
     }
 
@@ -3829,6 +3830,74 @@ impl Engine {
                     Ok(v.clone())
                 } else {
                     Err(AplError::runtime("close: value is not closeable".into()))
+                }
+            }
+            // `json:` namespace (`json/json-mod.kt`, decoder `json/json-decoder.kt`,
+            // JVM mapping `json.jvm.kt:26-83`).
+            "json:readString" => {
+                // `ReadStringJsonAPLFunction`: parse a string as JSON.
+                let s = Self::kap_string(&right_val.force(self)?, "json:readString")?;
+                Self::parse_json(&s)
+            }
+            "json:read" => {
+                // `ReadJsonAPLFunction`: parse a file (or stream) as JSON.
+                let forced = right_val.force(self)?;
+                let text = if let Some(s) = self.stream_value(&forced)? {
+                    let bytes = s.borrow_mut().read_bytes(None).map_err(io_err)?;
+                    String::from_utf8_lossy(&bytes).into_owned()
+                } else {
+                    let path = Self::kap_string(&forced, "json:read")?;
+                    std::fs::read_to_string(&path).map_err(io_err)?
+                };
+                Self::parse_json(&text)
+            }
+            "json:writeString" => {
+                // `WriteStringJsonAPLFunction`: Kap value → JSON text.
+                let mut out = String::new();
+                Self::write_json(&right_val.force(self)?, &mut out)?;
+                Ok(Rc::new(APLValue::Str(out)))
+            }
+            // `time:` namespace (builtins/time-functions.kt).
+            "time:toTimestamp" => {
+                // `ToTimestampFunction` (MathCombine: element-wise millis → stamp).
+                Self::map_cells(&right_val.force(self)?, &|e| match e.as_ref() {
+                    APLValue::Number(n) => n
+                        .as_long()
+                        .map(|ms| Rc::new(APLValue::Timestamp(ms)))
+                        .map_err(|_| {
+                            AplError::runtime("time:toTimestamp: not an integer".into())
+                        }),
+                    _ => Err(AplError::runtime("time:toTimestamp: not a number".into())),
+                })
+            }
+            "time:fromTimestamp" => {
+                // `FromTimestampFunction` (MathCombine: stamp → millis).
+                Self::map_cells(&right_val.force(self)?, &|e| match e.as_ref() {
+                    APLValue::Timestamp(ms) => {
+                        Ok(Rc::new(APLValue::Number(KapNumber::Long(*ms))))
+                    }
+                    _ => Err(AplError::runtime("Argument is not a timestamp".into())),
+                })
+            }
+            "time:format" => {
+                // `FormatTimestampFunction`: stamp → ISO string.
+                let fv = right_val.force(self)?;
+                match fv.as_ref() {
+                    APLValue::Timestamp(ms) => Ok(Rc::new(APLValue::Str(
+                        crate::time::format_timestamp(*ms),
+                    ))),
+                    _ => Err(AplError::runtime("Argument is not a timestamp".into())),
+                }
+            }
+            "time:parse" => {
+                // `ParseTimestampFunction`: ISO string → stamp.
+                let s = Self::kap_string(&right_val.force(self)?, "time:parse")?;
+                match crate::time::parse_timestamp(&s) {
+                    Some(ms) => Ok(Rc::new(APLValue::Timestamp(ms))),
+                    None => Err(AplError::runtime(format!(
+                        "Cannot parse string as a timestamp: '{}'",
+                        s
+                    ))),
                 }
             }
             // `math:*` — P2 (ROADMAP §5) port of engine.kt:436–466 registrations
@@ -6177,6 +6246,11 @@ impl Engine {
                 | "io2:open" | "io2:read" | "io2:readLine" | "io2:lines"
                 | "io2:arrayStream" | "io2:write" | "io2:flush" | "io2:exec"
                 | "close"
+                // `json:` namespace (json/json-mod.kt): readString always; `read`
+                // only outside secure mode (JsonAPLModule); `writeString` always.
+                | "json:read" | "json:readString" | "json:writeString"
+                // `time:` namespace (builtins/time-functions.kt).
+                | "time:toTimestamp" | "time:fromTimestamp" | "time:format" | "time:parse"
         )
     }
 
@@ -7369,6 +7443,230 @@ impl Engine {
         Ok(Rc::new(APLValue::Process(Rc::new(std::cell::RefCell::new(
             proc,
         )))))
+    }
+
+    // --- `json:` helpers (json/json-mod.kt + jvm json.jvm.kt:26-83) ---
+
+    /// Parse JSON text into a Kap value. Mapping (json.jvm.kt `parseEntry`):
+    /// object → Map (string keys), array → rank-1, number → Double (gson
+    /// `nextDouble` — ALL numbers are doubles), string → Str, boolean → 1/0,
+    /// null → Nil.
+    fn parse_json(text: &str) -> Result<AplRef<APLValue>, AplError> {
+        let v: serde_json::Value = serde_json::from_str(text)
+            .map_err(|e| AplError::runtime(format!("Parse error in JSON: {}", e)))?;
+        Ok(Self::json_to_apl(&v))
+    }
+
+    fn json_to_apl(v: &serde_json::Value) -> AplRef<APLValue> {
+        match v {
+            serde_json::Value::Null => Rc::new(APLValue::Nil),
+            serde_json::Value::Bool(b) => Rc::new(APLValue::Number(KapNumber::Long(if *b {
+                1
+            } else {
+                0
+            }))),
+            serde_json::Value::Number(n) => Rc::new(APLValue::Number(KapNumber::Double(
+                n.as_f64().unwrap_or(f64::NAN),
+            ))),
+            serde_json::Value::String(s) => Rc::new(APLValue::Str(s.clone())),
+            serde_json::Value::Array(xs) => {
+                let elems: Vec<AplRef<APLValue>> = xs.iter().map(Self::json_to_apl).collect();
+                Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![elems.len()],
+                    ArrayData::Nested(elems),
+                ))))
+            }
+            serde_json::Value::Object(m) => {
+                let pairs: Vec<(AplRef<APLValue>, AplRef<APLValue>)> = m
+                    .iter()
+                    .map(|(k, v)| (Rc::new(APLValue::Str(k.clone())), Self::json_to_apl(v)))
+                    .collect();
+                Rc::new(APLValue::Map(KapMap::new(pairs)))
+            }
+        }
+    }
+
+    /// Kap value → JSON text (`parseAPLToJson`, json-mod.kt:22-120).
+    fn write_json(v: &AplRef<APLValue>, out: &mut String) -> Result<(), AplError> {
+        let encode_err = |v: &AplRef<APLValue>| {
+            AplError::runtime(format!("Value cannot be encoded to JSON: {}", v.format_value()))
+        };
+        match v.as_ref() {
+            APLValue::Map(m) => {
+                out.push('{');
+                for (i, (k, val)) in m.pairs.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    match k.as_ref() {
+                        APLValue::Str(s) => {
+                            out.push('"');
+                            out.push_str(&Self::json_escape(s));
+                            out.push_str("\":");
+                        }
+                        _ => {
+                            return Err(AplError::runtime(format!(
+                                "Key is not a string: {}",
+                                k.format_value()
+                            )))
+                        }
+                    }
+                    Self::write_json(val, out)?;
+                }
+                out.push('}');
+            }
+            APLValue::Number(KapNumber::Long(n)) => out.push_str(&n.to_string()),
+            APLValue::Number(KapNumber::Double(d)) => {
+                if d.fract() == 0.0 && d.is_finite() && d.abs() < 1e21 {
+                    out.push_str(&format!("{:.1}", d));
+                } else {
+                    out.push_str(&format!("{}", d));
+                }
+            }
+            APLValue::Symbol { name, namespace } => {
+                // Only `:true` / `:false` keywords encode (json-mod.kt:59-69).
+                if namespace.as_deref() == Some("keyword") && (name == "true" || name == "false") {
+                    out.push_str(name);
+                } else {
+                    return Err(encode_err(v));
+                }
+            }
+            APLValue::Nil => out.push_str("null"),
+            APLValue::Str(s) => {
+                out.push('"');
+                out.push_str(&Self::json_escape(s));
+                out.push('"');
+            }
+            APLValue::Array(a) => {
+                let dims = &a.dimensions;
+                if dims.len() == 2 {
+                    if dims[1] != 2 {
+                        return Err(AplError::runtime(
+                            "Two-dimensional values must have 2 columns".into(),
+                        ));
+                    }
+                    out.push('{');
+                    let elems = a.elements();
+                    for i in 0..dims[0] {
+                        if i > 0 {
+                            out.push(',');
+                        }
+                        match elems[i * 2].as_ref() {
+                            APLValue::Str(s) => {
+                                out.push('"');
+                                out.push_str(&Self::json_escape(s));
+                                out.push_str("\":");
+                            }
+                            k => {
+                                return Err(AplError::runtime(format!(
+                                    "Key is not a string: {}",
+                                    k.format_value()
+                                )))
+                            }
+                        }
+                        Self::write_json(&elems[i * 2 + 1], out)?;
+                    }
+                    out.push('}');
+                } else if dims.len() == 1 {
+                    if dims[0] == 0 {
+                        out.push_str("[]");
+                    } else {
+                        out.push('[');
+                        let elems = a.elements();
+                        for (i, e) in elems.iter().enumerate() {
+                            if i > 0 {
+                                out.push(',');
+                            }
+                            Self::write_json(e, out)?;
+                        }
+                        out.push(']');
+                    }
+                } else if dims.is_empty() {
+                    // Rank-0: only enclosed strings allowed (json-mod.kt:73-84).
+                    let elems = a.elements();
+                    let inner = elems.first().ok_or_else(|| encode_err(v))?;
+                    match inner.as_ref() {
+                        APLValue::Str(s) => {
+                            out.push('"');
+                            out.push_str(&Self::json_escape(s));
+                            out.push('"');
+                        }
+                        APLValue::Array(ia) if ia.dimensions.len() == 1 => {
+                            let mut s = String::new();
+                            for e in ia.elements() {
+                                match e.as_ref() {
+                                    APLValue::Char(c) => s.push(*c),
+                                    _ => {
+                                        return Err(AplError::runtime(
+                                            "Content in enclosed values must be strings".into(),
+                                        ))
+                                    }
+                                }
+                            }
+                            out.push('"');
+                            out.push_str(&Self::json_escape(&s));
+                            out.push('"');
+                        }
+                        _ => {
+                            return Err(AplError::runtime(
+                                "Content in enclosed values must be strings".into(),
+                            ))
+                        }
+                    }
+                } else {
+                    return Err(encode_err(v));
+                }
+            }
+            _ => return Err(encode_err(v)),
+        }
+        Ok(())
+    }
+
+    /// `jsonEscape` (json-mod.kt:122-141).
+    fn json_escape(s: &str) -> String {
+        let mut buf = String::new();
+        for ch in s.chars() {
+            match ch {
+                '\\' => buf.push_str("\\\\"),
+                '"' => buf.push_str("\\\""),
+                _ if ('a'..='z').contains(&ch)
+                    || ('A'..='Z').contains(&ch)
+                    || (' '..='?').contains(&ch) =>
+                {
+                    buf.push(ch)
+                }
+                _ => {
+                    buf.push_str("\\u");
+                    let hex = format!("{:x}", ch as u32);
+                    for _ in 0..(4usize.saturating_sub(hex.len())) {
+                        buf.push('0');
+                    }
+                    buf.push_str(&hex);
+                }
+            }
+        }
+        buf
+    }
+
+    /// Apply `f` to every flat element, preserving dimensions (the port's
+    /// `MathCombineAPLFunction.combine1Arg` shape for single-type mappings).
+    fn map_cells(
+        v: &AplRef<APLValue>,
+        f: &dyn Fn(&AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        match v.as_ref() {
+            APLValue::Array(a) => {
+                let mut out = Vec::with_capacity(a.element_count());
+                for e in a.elements() {
+                    out.push(f(&e)?);
+                }
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    a.dimensions.clone(),
+                    ArrayData::Nested(out),
+                )))))
+            }
+            _ => f(v),
+        }
     }
 
     // --- `unicode:*` builtins (Real Kap UnicodeModule) ---
@@ -12776,7 +13074,7 @@ impl Engine {
             | APLValue::List(_) | APLValue::Map(_) | APLValue::Symbol { .. }
             | APLValue::Deferred { .. } | APLValue::UserFn { .. } | APLValue::UserOp { .. }
             | APLValue::Escape { .. } | APLValue::NonBoundFn { .. }
-            | APLValue::Stream(_) | APLValue::Process(_) => {
+            | APLValue::Stream(_) | APLValue::Process(_) | APLValue::Timestamp(_) => {
                 out.push(Rc::new(value.clone()));
             }
             APLValue::Array(arr) => {
@@ -14733,6 +15031,9 @@ impl Engine {
             }
             APLValue::Stream(_) => {
                 Err(AplError::runtime("cannot use a stream as an array element".into()))
+            }
+            APLValue::Timestamp(_) => {
+                Err(AplError::runtime("cannot use a timestamp as an array element".into()))
             }
             APLValue::Process(_) => {
                 Err(AplError::runtime("cannot use a process as an array element".into()))
@@ -18270,6 +18571,8 @@ impl Engine {
             // `APLMap.equals` ignores insertion order; oracle: `≡` of two maps
             // built from `:a 1 :b 10` and `:b 10 :a 1` returns 1).
             (APLValue::Map(am), APLValue::Map(bm)) => am.deep_equal(bm),
+            // Timestamps compare by instant (dates-platform.kt:17-18).
+            (APLValue::Timestamp(x), APLValue::Timestamp(y)) => x == y,
             _ => false,
         }
     }
@@ -18310,6 +18613,7 @@ impl Engine {
             // `APLMap.equals` ignores insertion order; oracle: `≡` of two maps
             // built from `:a 1 :b 10` and `:b 10 :a 1` returns 1).
             (APLValue::Map(am), APLValue::Map(bm)) => am.deep_equal(bm),
+            (APLValue::Timestamp(x), APLValue::Timestamp(y)) => x == y,
             _ => false,
         }
     }
@@ -18347,6 +18651,7 @@ impl Engine {
                         .zip(ye.iter())
                         .all(|(p, q)| Self::deep_equal(p.as_ref(), q.as_ref()))
             }
+            (APLValue::Timestamp(x), APLValue::Timestamp(y)) => x == y,
             _ => false,
         }
     }

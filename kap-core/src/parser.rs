@@ -250,6 +250,11 @@ impl<'a> Parser<'a> {
                                 "open" | "read" | "readLine" | "lines" | "arrayStream"
                                     | "write" | "flush" | "exec"
                             ))
+                        // P3 `json:` namespace (json/json-mod.kt).
+                        || (ns == "json" && matches!(base, "read" | "readString" | "writeString"))
+                        // P3 `time:` namespace (builtins/time-functions.kt).
+                        || (ns == "time"
+                            && matches!(base, "toTimestamp" | "fromTimestamp" | "format" | "parse"))
                 }
                 None => false,
             }
