@@ -938,6 +938,20 @@ impl NamespaceRegistry {
                     if ns == &Self::default_ns() && !out.contains(name) {
                         out.push(name.clone());
                     }
+                    // EXPORTED fns of any namespace are also seeded bare: Kotlin
+                    // resolves a bare use through exported namespaces (the stdlib
+                    // `⌹` lives in ns `kap`, and the oracle applies `⌹ 2 2⍴…`
+                    // monadically from top level once the stdlib is loaded).
+                    if self
+                        .exports
+                        .borrow()
+                        .get(ns)
+                        .map(|set| set.contains(name))
+                        .unwrap_or(false)
+                        && !out.contains(name)
+                    {
+                        out.push(name.clone());
+                    }
                 }
             }
         }

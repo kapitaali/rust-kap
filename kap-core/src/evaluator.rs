@@ -3773,6 +3773,127 @@ impl Engine {
                     .map_err(|e| AplError::runtime(format!("Error while parsing CSV: {}", e)))?;
                 Self::csv_table(rows, &flags)
             }
+            "io:toHex" => {
+                // io.kap `toHex`: `⍵≡0` → "0"; `n` = ⍺ when bound, else
+                // `⌊1+16⍟|⍵`; digits `,(n⍴16)⊤⍵` from "0123456789ABCDEF".
+                // Oracle: 255→"FF", 256→"100", ¯255→"01", 0→"0",
+                // 74667→"123AB", 12 io:toHex 74667→"0000000123AB".
+                let (num, size): (AplRef<APLValue>, Option<i64>) = match left_val.as_ref() {
+                    None => {
+                        let v = right_val.force(self)?;
+                        (v, None)
+                    }
+                    Some(l) => {
+                        let l = l.force(self)?;
+                        let r = right_val.force(self)?;
+                        let n = Self::kap_long(&l, "io:toHex")?;
+                        (r, Some(n))
+                    }
+                };
+                let int_val = match num.as_ref() {
+                    APLValue::Number(n) => n
+                        .as_long()
+                        .map_err(|_| {
+                            AplError::runtime("io:toHex: argument is not an integer".into())
+                        })?,
+                    _ => {
+                        return Err(AplError::runtime(
+                            "io:toHex: argument is not a number".into(),
+                        ))
+                    }
+                };
+                if int_val == 0 {
+                    return Ok(Rc::new(APLValue::Str("0".into())));
+                }
+                let n = match size {
+                    Some(n) => n as usize,
+                    None => {
+                        let mag = int_val.unsigned_abs();
+                        // ⌊1+16⍟|⍵ = number of hex digits of |⍵.
+                        ((64 - mag.leading_zeros()).div_ceil(4)) as usize
+                    }
+                };
+                let mag = int_val.unsigned_abs();
+                let mut digits = String::with_capacity(n);
+                for i in (0..n).rev() {
+                    let d = ((mag >> (4 * i)) & 0xF) as u32;
+                    digits.push(std::char::from_digit(d, 16).unwrap().to_ascii_uppercase());
+                }
+                Ok(Rc::new(APLValue::Str(digits)))
+            }
+            "io:fromHex" => {
+                // io.kap `fromHex`: decoded ← digits ⍳ lowercase ⍵; any
+                // non-digit → "Invalid characters in hex string"; value =
+                // 16⊥decoded (bigint-exact for long strings).
+                let s = Self::kap_string(&right_val.force(self)?, "io:fromHex")?;
+                let mut acc = num_bigint::BigInt::from(0u8);
+                for c in s.chars() {
+                    let d = match c.to_ascii_lowercase().to_digit(16) {
+                        Some(d) if c.is_ascii_hexdigit() => d,
+                        _ => {
+                            return Err(AplError::runtime(
+                                "Invalid characters in hex string".into(),
+                            ))
+                        }
+                    };
+                    acc = acc * 16 + d;
+                }
+                Ok(Rc::new(APLValue::Number(KapNumber::BigInt(acc))))
+            }
+            "io:encodeUtf8" => {
+                // io.kap `encodeUtf8`: string → vector of UTF-8 byte values.
+                let s = Self::kap_string(&right_val.force(self)?, "io:encodeUtf8")?;
+                let bytes: Vec<i64> = s
+                    .as_bytes()
+                    .iter()
+                    .map(|b| *b as i64)
+                    .collect();
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![bytes.len()],
+                    ArrayData::Long(bytes),
+                )))))
+            }
+            "io:base64Encode" => {
+                // io.kap `base64Encode`: standard alphabet, `=` padding.
+                let v = right_val.force(self)?;
+                let bytes: Vec<u8> = match v.as_ref() {
+                    APLValue::Array(a) => a
+                        .elements()
+                        .iter()
+                        .map(|e| {
+                            Self::kap_long(e, "io:base64Encode")
+                                .map(|n| n as u8)
+                        })
+                        .collect::<Result<Vec<u8>, _>>()?,
+                    APLValue::Str(s) => s.as_bytes().to_vec(),
+                    _ => {
+                        return Err(AplError::runtime(
+                            "io:base64Encode: argument must be a byte vector".into(),
+                        ))
+                    }
+                };
+                const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+                for chunk in bytes.chunks(3) {
+                    let b0 = chunk[0] as u32;
+                    let b1 = chunk.get(1).copied().map(|b| b as u32);
+                    let b2 = chunk.get(2).copied().map(|b| b as u32);
+                    let triple = (b0 << 16) | (b1.unwrap_or(0) << 8) | b2.unwrap_or(0);
+                    out.push(ALPHA[(triple >> 18) as usize & 63] as char);
+                    out.push(ALPHA[(triple >> 12) as usize & 63] as char);
+                    if b1.is_some() {
+                        out.push(ALPHA[(triple >> 6) as usize & 63] as char);
+                    } else {
+                        out.push('=');
+                    }
+                    if b2.is_some() {
+                        out.push(ALPHA[triple as usize & 63] as char);
+                    } else {
+                        out.push('=');
+                    }
+                }
+                Ok(Rc::new(APLValue::Str(out)))
+            }
             "io:fromHtmlTable" => {
                 // `FromHtmlTableFunction` (builtins/parse-html.kt): monadic
                 // uses table index 0; dyadic left arg is the table index
@@ -6464,6 +6585,7 @@ impl Engine {
                 // (engine.kt:1163). Two-gate rule: parser admits them via
                 // is_known_fn; listed here for the eval-time late gate.
                 | "io:read" | "io:readFile" | "io:readdir" | "io:readCsv" | "io:fromHtmlTable"
+                | "io:toHex" | "io:fromHex" | "io:encodeUtf8" | "io:base64Encode"
                 | "io2:open" | "io2:read" | "io2:readLine" | "io2:lines"
                 | "io2:arrayStream" | "io2:write" | "io2:flush" | "io2:exec"
                 | "close"
@@ -16201,7 +16323,16 @@ impl Engine {
                 let cell_size = cell_size.max(1);
                 let mut results = Vec::with_capacity(elems.len() / cell_size);
                 for cell in elems.chunks(cell_size) {
-                    let cell_val = self.make_simple_or_nested(cell_dims.clone(), cell.to_vec())?;
+                    // A rank-0 cell (k=0 spec) is the BARE scalar (Kotlin
+                    // discloses the enclosed cell before applying), not a
+                    // 0-dim array — oracle: `(1 2 3)(+⍤0) 10` → `⟨11 12 13⟩`
+                    // flat, and stdlib `⊥`'s `×⍀…(+⍤¯1)…` chain nests into
+                    // `(((291)))` if the cell stays boxed.
+                    let cell_val: AplRef<APLValue> = if cell_dims.is_empty() && !cell.is_empty() {
+                        cell[0].clone()
+                    } else {
+                        self.make_simple_or_nested(cell_dims.clone(), cell.to_vec())?
+                    };
                     let r = self.eval_apply(func, &None, &Box::new(Instr::Value(cell_val)), env)?;
                     results.push(r);
                 }
@@ -16249,10 +16380,16 @@ impl Engine {
                             "⍤: cell frame does not match argument shape".into(),
                         ));
                     }
-                    let lcell_val =
-                        self.make_simple_or_nested(lcell_dims.clone(), lelems[ls..ls + lcell].to_vec())?;
-                    let rcell_val =
-                        self.make_simple_or_nested(rcell_dims.clone(), relems[rs..rs + rcell].to_vec())?;
+                    let lcell_val: AplRef<APLValue> = if lcell_dims.is_empty() {
+                        lelems[ls].clone()
+                    } else {
+                        self.make_simple_or_nested(lcell_dims.clone(), lelems[ls..ls + lcell].to_vec())?
+                    };
+                    let rcell_val: AplRef<APLValue> = if rcell_dims.is_empty() {
+                        relems[rs].clone()
+                    } else {
+                        self.make_simple_or_nested(rcell_dims.clone(), relems[rs..rs + rcell].to_vec())?
+                    };
                     let r = self.eval_apply(
                         func,
                         &Some(Box::new(Instr::Value(lcell_val))),
