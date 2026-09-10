@@ -4853,6 +4853,60 @@ impl Engine {
             // port error text reads like the oracle (e.g. `throwNative: Invalid characters in
             // hex string`). The left operand is a *symbol* (typically a quoted symbol literal
             // `'kap:KapEvalException`); a bare symbol reference also works.
+            "int:isKapMultidimensionalString" => {
+                // Kotlin `IsMultidimensionalStringFunction` (div_functions.kt:588,
+                // registered engine.kt:432): `a.isMultidimensionalStringValue()`
+                // (types.kt:1232) — true iff the value is char-typed or every
+                // member (recursively, `iterateMembers`) is an `APLChar`.
+                // Any-rank char array → 1; anything else → 0.
+                let v = right_val.force(self)?;
+                fn all_chars(v: &APLValue) -> bool {
+                    match v {
+                        APLValue::Char(_) => true,
+                        APLValue::Array(a) => a
+                            .elements()
+                            .iter()
+                            .all(|e| all_chars(e.as_ref())),
+                        APLValue::Str(_) => true,
+                        _ => false,
+                    }
+                }
+                let is_md = all_chars(v.as_ref());
+                Ok(Rc::new(APLValue::Number(KapNumber::Long(i64::from(
+                    is_md,
+                )))))
+            }
+            "int:hasLabels" => {
+                // Kotlin `HasLabelsFunction` (div_functions.kt:371, registered
+                // engine.kt:478): dyadic `axis int:hasLabels value` — 1 iff the
+                // value carries dimension labels for that axis. Out-of-range
+                // axis → IllegalAxisException "A must be a valid axis in B".
+                let axis = Self::kap_long(
+                    &left_val
+                        .as_ref()
+                        .map(|l| l.force(self))
+                        .transpose()?
+                        .expect("int:hasLabels requires a left argument"),
+                    "int:hasLabels",
+                )?;
+                let v = right_val.force(self)?;
+                let dims = v.dimensions();
+                if axis < 0 || axis as usize >= dims.len() {
+                    return Err(AplError::runtime(
+                        "A must be a valid axis in B".into(),
+                    ));
+                }
+                let has = match v.as_ref() {
+                    APLValue::Array(a) => a
+                        .labels()
+                        .and_then(|l| l.labels.get(axis as usize).cloned().flatten())
+                        .is_some(),
+                    _ => false,
+                };
+                Ok(Rc::new(APLValue::Number(KapNumber::Long(i64::from(
+                    has,
+                )))))
+            }
             "int:throwNative" => {
                 // The left operand is a *symbol*. In Kap a quoted symbol literal
                 // `'kap:KapEvalException` is a single token whose namespace/name carry the
