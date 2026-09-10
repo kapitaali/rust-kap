@@ -243,7 +243,7 @@ impl<'a> Parser<'a> {
                             ))
                         // P3 `io:` / `io2:` file + stream natives (engine.kt:361-404,
                         // builtins/io_functions.kt + execprocess.kt).
-                        || (ns == "io" && matches!(base, "read" | "readFile" | "readdir" | "readCsv" | "fromHtmlTable" | "toHex" | "fromHex" | "encodeUtf8" | "base64Encode"))
+                        || (ns == "io" && matches!(base, "read" | "readFile" | "readdir" | "readCsv" | "fromHtmlTable"))
                         || (ns == "io2"
                             && matches!(
                                 base,
@@ -705,7 +705,7 @@ impl<'a> Parser<'a> {
                 Token::Literal(LiteralValue::Symbol { name, .. })
                     if name == "if"
                         || name == "while"
-                        || (name == "when" && !self.macros.contains_key("when")) =>
+                        || (name == "when" && self.macro_lookup("when").is_none()) =>
                 {
                     let instr = self
                         .parse_keyword_prefix()?
@@ -1059,9 +1059,8 @@ impl<'a> Parser<'a> {
                     let namespace = namespace.clone();
                     // defsyntax macro triggers keep working under the new path.
                     if namespace.is_none() {
-                        if let Some(m) = self.macros.get(&name) {
-                            let m = m.clone();
-                            if self.macro_visible(&name, &m) {
+                        if let Some(m) = self.macro_lookup(&name) {
+                            {
                                 self.advance();
                                 left_args.push(self.expand_macro(&m)?);
                                 continue;
@@ -2383,12 +2382,15 @@ impl<'a> Parser<'a> {
                 match name.as_str() {
                     "if" => return Ok(Some(self.parse_if()?)),
                     "while" => return Ok(Some(self.parse_while()?)),
-                    // `when` is intercepted by the hardcoded builtin ONLY when no defsyntax
-                    // macro named `when` is registered. The stdlib's `structure.kap` defines
-                    // `when`/`whenInner` as defsyntax macros (same `when { … }` surface); in
-                    // that case the macro path in `parse_primary` must handle expansion. (Kotlin
-                    // registerCustomSyntax overrides the keyword form.)
-                    "when" if !self.macros.contains_key("when") => {
+                    // `when` is intercepted by the hardcoded builtin ONLY when no
+                    // defsyntax macro named `when` is VISIBLE (bare-key or the
+                    // implicitly-imported core `kap` namespace — see
+                    // `macro_lookup`). The stdlib's `structure.kap` defines
+                    // `when`/`whenInner` as defsyntax macros (same `when { … }`
+                    // surface); in that case the macro path in `parse_primary`
+                    // handles expansion. (Kotlin registerCustomSyntax overrides
+                    // the keyword form.)
+                    "when" if self.macro_lookup("when").is_none() => {
                         return Ok(Some(self.parse_when()?))
                     }
                     _ => {}
@@ -6562,12 +6564,9 @@ impl<'a> Parser<'a> {
                 // Namespace-gated: an invisible macro (defined elsewhere, neither
                 // exported nor imported here) falls through to the plain-symbol path.
                 if namespace.is_none() {
-                    if let Some(m) = self.macros.get(&name) {
-                        let m = m.clone();
-                        if self.macro_visible(&name, &m) {
-                            self.advance(); // consume the trigger symbol
-                            return self.expand_macro(&m);
-                        }
+                    if let Some(m) = self.macro_lookup(&name) {
+                        self.advance(); // consume the trigger symbol
+                        return self.expand_macro(&m);
                     }
                     // `declare(…)` is a STRUCTURAL special form (Kotlin DeclareToken →
                     // processExport): its argument is never evaluated and must NOT go
@@ -7236,11 +7235,39 @@ impl<'a> Parser<'a> {
             return true;
         }
         self.ns_registry.is_exported(&m.namespace, name)
-            && self
-                .ns_registry
-                .imports_of(&self.current_ns)
-                .iter()
-                .any(|ns| ns == &m.namespace)
+            && (m.namespace == "kap"
+                // Kotlin: EVERY namespace implicitly imports the core namespace
+                // `kap` (tokeniser.kt:83-90 `makeNamespace` adds the import unless
+                // `overrideDefaultImport`), so an exported kap-ns macro is
+                // visible from any namespace without an explicit `import`.
+                || self
+                    .ns_registry
+                    .imports_of(&self.current_ns)
+                    .iter()
+                    .any(|ns| ns == &m.namespace))
+    }
+
+    /// Look up a defsyntax trigger by bare name (Kotlin `syntaxRulesForSymbol` on the
+    /// token's symbol). A bare token resolves via `findSymbolInImportsOrIntern`
+    /// (engine.kt:568): current namespace first, then the implicitly imported core
+    /// namespace `kap` — so a macro defined under `namespace("kap")` (the stdlib's
+    /// `when`, `unwindProtect`) triggers from bare use in ANY namespace when
+    /// exported. Same-ns (bare-key) registration always wins.
+    fn macro_lookup(&self, name: &str) -> Option<crate::ast::SyntaxMacro> {
+        if let Some(m) = self.macros.get(name) {
+            if self.macro_visible(name, m) {
+                return Some(m.clone());
+            }
+        }
+        if self.current_ns != "kap" {
+            let qual = format!("kap:{}", name);
+            if let Some(m) = self.macros.get(&qual) {
+                if self.macro_visible(name, m) {
+                    return Some(m.clone());
+                }
+            }
+        }
+        None
     }
 
     /// Expand a registered macro at the current position (Kotlin `processCustomSyntax`).
@@ -7421,11 +7448,31 @@ impl<'a> Parser<'a> {
                     }
                 }
                 SyntaxRule::Repeat { var, sub } => {
-                    // Sub-macros are registered globally (see DefSyntaxSub arm), so look the
-                    // bare name up in the parser's macro table.
-                    let sub_macro = match self.macros.get(sub) {
-                        Some(s) => s.clone(),
-                        None => return Err(self.err(&format!("unknown sub-macro '{}' in :repeat", sub))),
+                    // Sub-macros resolve like triggers but WITHOUT the export gate:
+                    // Kotlin `customSyntaxSubRulesForSymbol` matches the interned
+                    // symbol — `whenInner` is referenced inside `when`'s rule list
+                    // in the same ns (`kap`), so symbol identity resolves it; the
+                    // stdlib never exports sub-macros.
+                    let sub_macro = match self
+                        .macros
+                        .get(sub)
+                        .cloned()
+                        .or_else(|| {
+                            if self.current_ns != "kap" {
+                                self.macros
+                                    .get(&format!("kap:{}", sub))
+                                    .cloned()
+                            } else {
+                                None
+                            }
+                        }) {
+                        Some(s) => s,
+                        None => {
+                            return Err(self.err(&format!(
+                                "unknown sub-macro '{}' in :repeat",
+                                sub
+                            )))
+                        }
                     };
                     let mut results: Vec<Instr> = Vec::new();
                     while self.sub_macro_matches(&sub_macro) {

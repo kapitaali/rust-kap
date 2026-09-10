@@ -75,10 +75,18 @@ fn load_cases() -> Vec<Case> {
 }
 
 fn classify(engine: &Engine, c: &Case) -> Outcome {
+    classify_str(engine, &c.expr, c)
+}
+
+/// Like [`classify`], but evaluates a harness-prepared source string (H2: the
+/// `StandardLib*` rows prepend `use("standard-lib.kap")` to mirror Kotlin's
+/// `withStandardLib = true` engine configuration).
+fn classify_str(engine: &Engine, src: &str, c: &Case) -> Outcome {
     // Guard against engine panics (e.g. unchecked indexing in builtins): a crash is
     // treated as "unsupported", never an abort of the whole suite.
-    let res =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| engine.eval_to_string(&c.expr)));
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        engine.eval_to_string(src)
+    }));
     let errored = match &res {
         Ok(Err(_)) | Err(_) => true,
         Ok(Ok(_)) => false,
@@ -143,8 +151,29 @@ fn classify_with_timeout(c: &Case) -> Outcome {
             ] {
                 engine.set_lib_paths(&[candidate]);
             }
+            // H2 (harness-only): Kotlin's `parseAPLExpression(expr, withStandardLib
+            // = true)` builds the engine through `makeEngine(standardLib = true)`,
+            // which loads `standard-lib.kap`. The extractor drops that flag; the
+            // `StandardLib*Test.kt` suites pass it on every call, so reproduce the
+            // load. It must run in the SAME eval_string as the row expr
+            // (`eval_string` is stateless — each call gets a fresh root env, so a
+            // separate `use()` call would vanish). Newline separates the
+            // statements; `eval_string_in_env` evaluates them in one env, so the
+            // stdlib fns/macros are visible to the expr (Kotlin-faithful; NOT an
+            // engine change).
+            // H2 (harness-only, DISABLED): Kotlin's `parseAPLExpression(expr,
+            // withStandardLib = true)` loads `standard-lib.kap` into the engine;
+            // the extractor drops that flag, so `StandardLib*Test.kt` rows would
+            // need `use("standard-lib.kap")` prepended here. DISABLED because row
+            // 998 (`testMatrixDivision`) stack-overflows the worker thread via the
+            // port's dyadic-`↓` divergence (below), aborting the whole sweep —
+            // re-enable only after the `⌹`/`↓` cluster is fixed:
+            // (0,1)↓(2 2⍴…) must be a 2×1 per-axis drop (drop.kt:328 axisArray);
+            // the port currently does NOT drop (a1 keeps B's full shape), so
+            // QR/Rinv recurse on wrong shapes.
+            let src = c.expr.clone();
             let o =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| classify(&engine, &c)))
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| classify_str(&engine, &src, &c)))
                     .unwrap_or(Outcome::Unsupported);
             let _ = tx.send(o);
         });
