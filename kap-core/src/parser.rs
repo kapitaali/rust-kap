@@ -783,6 +783,38 @@ impl<'a> Parser<'a> {
                         _ => return Err(self.err("expected a symbol after ⍞")),
                     }
                 }
+                // `⍠name`: method call (Kotlin `MethodCallToken` →
+                // `processMethodCall`, parser.kt:923-931): pop the last left-arg
+                // as the object ref, read the next symbol as the method name;
+                // the remaining leftArgs bind via processFn (= finish_fn_call).
+                // With no left arg Kotlin throws `Method call without source
+                // reference` (parser.kt:924-926).
+                Token::MethodCallToken => {
+                    if left_args.is_empty() {
+                        return Err(self.err("Method call without source reference"));
+                    }
+                    let object = left_args.pop().unwrap();
+                    self.advance(); // consume ⍠
+                    self.skip_newlines();
+                    let (mname, mns) = match self.peek() {
+                        Some(t) => match &t.token {
+                            Token::Literal(LiteralValue::Symbol { name, namespace }) => {
+                                (name.clone(), namespace.clone())
+                            }
+                            _ => {
+                                return Err(self.err("expected a symbol after ⍠"))
+                            }
+                        },
+                        None => return Err(self.err("expected a symbol after ⍠")),
+                    };
+                    self.advance(); // consume the method name
+                    let mc = Instr::MethodCall {
+                        object: Box::new(object),
+                        method: mname,
+                        method_namespace: mns,
+                    };
+                    return self.finish_fn_call(mc, &mut left_args, &mut lists);
+                }
                 Token::LambdaToken => {
                     // `λ` (Kotlin processLambda, parser.kt:1204) — a function-reference
                     // operator that yields a FUNCTION VALUE, never auto-applies by
@@ -6146,6 +6178,7 @@ impl<'a> Parser<'a> {
             | Instr::AxisApplied { .. }
             | Instr::OverOp { .. }
             | Instr::MemberDeref { .. }
+            | Instr::MethodCall { .. }
             | Instr::Block { .. }
             | Instr::DynamicRef { .. } => true,
             _ => false,
@@ -6184,6 +6217,10 @@ impl<'a> Parser<'a> {
                 | Instr::Obverse { .. }
                 // `object.member` (MemberDeref) is a function-shaped postfix, like `Index`.
                 | Instr::MemberDeref { .. }
+                // `object⍠name` (MethodCall) is a function-shaped postfix: Kotlin
+                // routes the `MethodCallFunction` descriptor through processFn
+                // (parser.kt:990), so `a⍠m 200` applies monadically.
+                | Instr::MethodCall { .. }
                 // P1-M7: a `{…}` block IS a function value (Kotlin OpenFnDef →
                 // processFn); required for `{2×⍵}¨ 1 2 3` to bind the each-adverb.
                 | Instr::Block { .. }

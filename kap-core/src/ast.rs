@@ -214,6 +214,15 @@ pub enum Instr {
     /// Without this flag the evaluator cannot tell `a.col1` (name-form: lookup column
     /// "col1") from `a.(col1)` (value-form: evaluate the variable `col1` first).
     MemberDeref { object: Box<Instr>, member: Box<Instr>, value_form: bool },
+    /// Method call: `object⍠name` (Kotlin `MethodCallToken` → `processMethodCall`,
+    /// parser.kt:923 + `MethodCallFunction`, `method-calls.kt`). The parser pops the
+    /// last left-arg as `object` and reads the next symbol as `method`; the node is
+    /// function-shaped (a `MethodCallFunction` descriptor) and applies monadically
+    /// to a right arg: `a⍠valuePlusN 200`. A left arg is a Kotlin
+    /// `Unimplemented2ArgException` ("Function cannot be called with two
+    /// arguments"). `method_namespace` is `None` for a bare name (which formats as
+    /// `default:name` in `Method not found` errors).
+    MethodCall { object: Box<Instr>, method: String, method_namespace: Option<String> },
     /// Short-circuit boolean operator: `and` / `or` (Kotlin `AndToken`/`OrToken` →
     /// `BooleanAndFunction`/`BooleanOrFunction`). These are *not* the bitwise `∧`/`∨`
     /// functions — they sit at the **lowest precedence** (below assignment) and evaluate

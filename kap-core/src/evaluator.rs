@@ -1151,6 +1151,12 @@ impl Engine {
                 &Box::new(Instr::Empty),
                 env,
             ),
+            // A bare `object⍠name` with no right argument (Kotlin
+            // `IllegalContextForFunction`, oracle: `a⍠valuePlusN` alone →
+            // `No arguments specified for function`).
+            Instr::MethodCall { .. } => Err(AplError::runtime(
+                "No arguments specified for function".to_string(),
+            )),
             Instr::Symbol { name, namespace } => {
                 // A keyword-namespace symbol (`:UTF16`, `:pretty`, …) is a *value*
                 // symbol (interned, renders `:utf16`), not a lookup in the ordinary
@@ -2329,6 +2335,17 @@ impl Engine {
         }
     }
 
+    /// `nameWithNamespace` for a `⍠` method name (Kotlin `Symbol.nameWithNamespace`,
+    /// used by `MethodNotFoundException`, method-calls.kt:3): a bare name carries
+    /// the implicit `default` namespace (oracle: `a⍠noSuchMethod 200` →
+    /// `Method not found: default:noSuchMethod`).
+    fn method_display(method: &str, method_namespace: &Option<String>) -> String {
+        match method_namespace {
+            Some(ns) => format!("{}:{}", ns, method),
+            None => format!("default:{}", method),
+        }
+    }
+
     fn eval_apply(
         &self,
         fn_expr: &Instr,
@@ -2927,6 +2944,83 @@ impl Engine {
                             "⍞(…): computed value is not a function (got {})",
                             desc
                         )));
+                    }
+                }
+            }
+            // Method call `object⍠name` (Kotlin `MethodCallFunction`,
+            // method-calls.kt:24-34): the object is evaluated in the CALLER's
+            // scope on every call (`objectRefInstruction.evalWithContext`,
+            // method-calls.kt:27), resolved via `kapClass.resolveMethod`, and
+            // the method runs with ⍺=object, ⍵=right arg
+            // (`APLFunctionMethodCall`, method-calls.kt:36-40).
+            Instr::MethodCall { object, method, method_namespace } => {
+                if left.is_some() {
+                    // Kotlin `Unimplemented2ArgException` (common.kt:116): a
+                    // method-call function has no two-arg form (oracle:
+                    // `1 a⍠valuePlusN 200` → this text).
+                    return Err(AplError::runtime(
+                        "Function cannot be called with two arguments".into(),
+                    ));
+                }
+                let obj = self.eval_instr(object, env)?.force(self)?;
+                // Default `KapClass.resolveMethod` (objects.kt:14-15) throws
+                // for every class except `map` (`MapClass`, method-calls.kt:9).
+                let map = match obj.as_ref() {
+                    APLValue::Map(m) => m,
+                    _ => return Err(AplError::runtime("Invalid target object".into())),
+                };
+                // `kap:methods` type-qualified key (method-calls.kt:12).
+                let methods_key = APLValue::Symbol {
+                    name: "methods".to_string(),
+                    namespace: Some("kap".to_string()),
+                };
+                let disp = Self::method_display(method, method_namespace);
+                let methods_val = map.lookup(&methods_key).ok_or_else(|| {
+                    AplError::runtime(format!("Method not found: {}", disp))
+                })?;
+                // `ensureMap` (types.kt:987): the methods value must be a map.
+                let methods_val = methods_val.force(self)?;
+                let methods = match methods_val.as_ref() {
+                    APLValue::Map(m) => m,
+                    other => {
+                        return Err(AplError::runtime(format!(
+                            "Value {} is not a map (type={})",
+                            methods_val.format_value(),
+                            other.class_name()
+                        )))
+                    }
+                };
+                // Type-qualified method-name key (method-calls.kt:15), then
+                // unwrap deferred (method-calls.kt:16): the entry must be a
+                // lambda, else `MethodNotFoundException` (method-calls.kt:17).
+                let mkey = APLValue::Symbol {
+                    name: method.clone(),
+                    namespace: method_namespace.clone(),
+                };
+                let mv = methods.lookup(&mkey).ok_or_else(|| {
+                    AplError::runtime(format!("Method not found: {}", disp))
+                })?;
+                let mv = mv.force(self)?;
+                match mv.as_ref() {
+                    APLValue::UserFn { params, split, body, env: fenv } => {
+                        // Anonymous application: no self-name (mirror ⍞ arms).
+                        let left_instr = Some(Box::new(Instr::Value(obj.clone())));
+                        return self.apply_user_fn(
+                            params,
+                            *split,
+                            body.as_ref(),
+                            &left_instr,
+                            right,
+                            env,
+                            fenv,
+                            None,
+                        );
+                    }
+                    _ => {
+                        return Err(AplError::runtime(format!(
+                            "Method not found: {}",
+                            disp
+                        )))
                     }
                 }
             }
@@ -5895,6 +5989,7 @@ impl Engine {
                     | Instr::Symbol { .. }
                     | Instr::DynamicRef { .. }
                     | Instr::DynamicRefExpr { .. }
+                    | Instr::MethodCall { .. }
                     | Instr::OverOp { .. }
                     | Instr::InnerProduct { .. }
                     | Instr::Obverse { .. }
@@ -5937,7 +6032,7 @@ impl Engine {
         // catches it here and returns `v`. If it escapes uncaught (top level), `eval_string_in_env`
         // converts it to the Real-Kap message "Call to return without a function call".
         let result = match body {
-            Instr::Derived { .. } | Instr::Train { .. } | Instr::ValueOp { .. } | Instr::AxisApplied { .. } | Instr::Symbol { .. } | Instr::DynamicRef { .. } | Instr::DynamicRefExpr { .. } | Instr::OverOp { .. } | Instr::InnerProduct { .. } | Instr::Obverse { .. } => {
+            Instr::Derived { .. } | Instr::Train { .. } | Instr::ValueOp { .. } | Instr::AxisApplied { .. } | Instr::Symbol { .. } | Instr::DynamicRef { .. } | Instr::DynamicRefExpr { .. } | Instr::MethodCall { .. } | Instr::OverOp { .. } | Instr::InnerProduct { .. } | Instr::Obverse { .. } => {
                 child.fn_body_depth.set(child.fn_body_depth.get() + 1);
                 // Re-dispatch with the already-evaluated ARG VALUES (`⍵`/`⍺` bound
                 // above), NOT the original `left`/`right` Instrs: those must be read
