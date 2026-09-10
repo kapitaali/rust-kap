@@ -112,7 +112,18 @@ fn classify(engine: &Engine, c: &Case) -> Outcome {
 /// thread is abandoned and the case is counted as `Unsupported` — so a single
 /// bad builtin can no longer freeze the entire `cargo test` run.
 fn classify_with_timeout(c: &Case) -> Outcome {
-    let c = c.clone();
+    let mut c = c.clone();
+    // F1 (11e): jsTest-marked rows use absolute scratch paths (`/foo`) that
+    // are neither writable nor portable here. Remap to a temp dir before
+    // eval. Harness-only adaptation, tagged and documented — the engine's
+    // io2: path handling stays byte-faithful (the row exercises io2: stream
+    // writes + readLine, not node).
+    if c.file.contains("jsTest") {
+        let dir = std::env::temp_dir().join("kap-conform-fs");
+        let _ = std::fs::create_dir_all(&dir);
+        let rep = dir.join("foo").to_string_lossy().into_owned();
+        c.expr = c.expr.replace("\"/foo\"", &format!("\"{}\"", rep));
+    }
     let (tx, rx) = std::sync::mpsc::channel();
     // 64MB worker stack: legit deep recursion (Y-combinator, fib) needs room,
     // especially in debug builds with large frames. Timeouts still bound hangs.
