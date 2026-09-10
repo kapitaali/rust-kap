@@ -219,7 +219,7 @@ impl<'a> Parser<'a> {
                                     | "toUpper" | "toNames" | "enc" | "dec"
                             ))
                         || (ns == "s" && matches!(base, "trimLeft" | "trimRight" | "trim" | "col" | "cols"))
-                        || (ns == "int" && matches!(base, "intern" | "symbolName" | "throwNative" | "unwindProtect" | "formatRational" | "libInitialised" | "registerCmd" | "ensureGeneric" | "ensureLong" | "ensureDouble" | "asBigint" | "asRational" | "isKapMultidimensionalString" | "hasLabels"))
+                        || (ns == "int" && matches!(base, "intern" | "symbolName" | "throwNative" | "unwindProtect" | "formatRational" | "libInitialised" | "registerCmd" | "ensureGeneric" | "ensureLong" | "ensureDouble" | "asBigint" | "asRational"))
                         // `int:proto v` is a native VALUE-RIGHT-ARG OPERATOR
                         // (engine.kt:505 registerNativeOperator("proto", ProtoOp(), "int")):
                         // it must parse as a function so `f int:proto v` builds the
@@ -7476,24 +7476,7 @@ impl<'a> Parser<'a> {
                     };
                     let mut results: Vec<Instr> = Vec::new();
                     while self.sub_macro_matches(&sub_macro) {
-                        // ENCLOSE each iteration result: oracle-verified — with
-                        // `entryList` = 2-vector of pairs, the oracle reports
-                        // `≡entryList[0]` = 2 (depth-2: ⊂pair) and
-                        // `≢↑entryList[0]` = 2 (monadic `↑` discloses the
-                        // enclosure → the pair survives for `(cond fn) ← …`
-                        // destructuring). A bare-pair element would make `↑`
-                        // take its first cell (scalar) and kill the destructure.
-                        let inner = self.expand_sub_macro(&sub_macro)?;
-                        // Monadic `⊂` via the normal eval_apply dispatch ("⊂" arm
-                        // → self.enclose): there is no dedicated Instr::Enclose.
-                        results.push(Instr::Apply {
-                            fn_expr: Box::new(Instr::Symbol {
-                                name: "⊂".to_string(),
-                                namespace: None,
-                            }),
-                            left: None,
-                            right: Box::new(inner),
-                        });
+                        results.push(self.expand_sub_macro(&sub_macro)?);
                     }
                     bindings.push((
                         var.clone(),
@@ -7731,7 +7714,7 @@ impl<'a> Parser<'a> {
                         Box::new(Instr::NonBoundFn { body: Box::new(body) }),
                     ));
                 }
-                SyntaxRule::Value { var } => {
+                SyntaxRule::Value { var } | SyntaxRule::ExprFunction { var } | SyntaxRule::NExprFunction { var } => {
                     self.skip_newlines();
                     if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenParen)) {
                         return Err(self.err(&format!("expected '(' in sub :value rule '{}'", var)));
@@ -7744,44 +7727,6 @@ impl<'a> Parser<'a> {
                     }
                     self.advance();
                     bindings.push((var.clone(), Box::new(inner)));
-                }
-                SyntaxRule::ExprFunction { var } | SyntaxRule::NExprFunction { var } => {
-                    // Kotlin `ExprFunctionSyntaxRule` / `NExprFunctionSyntaxRule`
-                    // (syntax.kt:128/137): a `(…)` argument binds as a FUNCTION
-                    // VALUE (no-arg lambda; `:nexprfunction` = caller's
-                    // environment → NonBoundFn whose application ignores args).
-                    // Binding the raw inner expr (the old `:value`-style bind)
-                    // made `cond` evaluate EAGERLY — `(cond fn) ← ↑e[i]` then
-                    // destructured a number, and the `when` body died
-                    // "cond is not a function (got number)".
-                    self.skip_newlines();
-                    if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenParen)) {
-                        return Err(self.err(&format!(
-                            "expected '(' in sub :exprfunction rule '{}'",
-                            var
-                        )));
-                    }
-                    self.advance();
-                    let inner = self.parse_expr()?;
-                    self.skip_newlines();
-                    if !matches!(self.peek(), Some(t) if matches!(t.token, Token::CloseParen)) {
-                        return Err(self.err(&format!(
-                            "expected ')' in sub :exprfunction rule '{}'",
-                            var
-                        )));
-                    }
-                    self.advance();
-                    if matches!(rule, SyntaxRule::ExprFunction { .. }) {
-                        bindings.push((
-                            var.clone(),
-                            Box::new(Instr::Lambda {
-                                params: vec![],
-                                body: Box::new(Instr::Block { body: vec![inner] }),
-                            }),
-                        ));
-                    } else {
-                        bindings.push((var.clone(), Box::new(Instr::NonBoundFn { body: Box::new(inner) })));
-                    }
                 }
                 SyntaxRule::String { var } => {
                     self.skip_newlines();
