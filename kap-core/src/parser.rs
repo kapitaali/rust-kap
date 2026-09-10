@@ -262,6 +262,13 @@ impl<'a> Parser<'a> {
                                 | "toJvmBoolean" | "toJvmByteArray" | "findPrimitiveTypeClass"
                                 | "createArrayInstance" | "arraySetElement" | "instanceOf"
                                 | "findClass"))
+                        // 11c Stage-1 `thread:` locks (thread/lock.kt: `makeLock`
+                        // etc. are fns; `withHeldLock` is a value-right-arg op
+                        // like `int:proto`, `withLock` is custom stdlib syntax
+                        // desugared natively below).
+                        || (ns == "thread"
+                            && matches!(base, "makeLock" | "makeCondvar" | "wait" | "signal"
+                                | "signalAll" | "withHeldLock" | "withLock"))
                 }
                 None => false,
             }
@@ -1179,6 +1186,44 @@ impl<'a> Parser<'a> {
                         let fn_instr = Instr::Symbol { name, namespace };
                         return self.finish_fn_call(fn_instr, &mut left_args, &mut lists);
                     }
+                    // `thread:withLock (lock) { fn }` (LockTest lockWithCustomSyntax,
+                    // withStandardLib: thread.kap's `withLock` defsyntax desugars to
+                    // `(⍞fn thread:withHeldLock lock) ⍬`). The bare conformance
+                    // harness loads no stdlib, so desugar natively to the same
+                    // shape: Apply(ValueOp(fn, withHeldLock, lock), ⍬).
+                    if namespace.as_deref() == Some("thread")
+                        && name == "withLock"
+                        && left_args.is_empty()
+                    {
+                        self.advance(); // consume thread:withLock
+                        self.skip_newlines();
+                        let lock_parsed = self.parse_primary()?;
+                        // A `(lock)` group parses function-shaped here (1-train
+                        // around the symbol, mirroring the paren-group path) —
+                        // evaluating that would APPLY `lock`. The operand is a
+                        // VALUE (the lock), so unwrap a lone-symbol train.
+                        let lock_instr = match lock_parsed {
+                            Instr::Train { mut funcs, reverse: false, compose: false }
+                                if funcs.len() == 1 && matches!(funcs[0], Instr::Symbol { .. }) =>
+                            {
+                                funcs.pop().unwrap()
+                            }
+                            other => other,
+                        };
+                        self.skip_newlines();
+                        let fn_instr = self.parse_primary()?;
+                        let derived = Instr::ValueOp {
+                            func: Box::new(fn_instr),
+                            op_name: "thread:withHeldLock".to_string(),
+                            operand: Box::new(lock_instr),
+                        };
+                        let nil = Instr::Array { elements: vec![] };
+                        return Ok(Instr::Apply {
+                            fn_expr: Box::new(derived),
+                            left: None,
+                            right: Box::new(nil),
+                        });
+                    }
                     // Keyword-namespace symbols (`:name`) are ALWAYS values —
                     // never function-shaped (parser.kt makeVariableRef). A
                     // namespaced symbol whose namespace is NOT yet known as a
@@ -1445,6 +1490,24 @@ impl<'a> Parser<'a> {
                     cur = Instr::ValueOp {
                         func: Box::new(cur),
                         op_name: "int:proto".to_string(),
+                        operand: Box::new(operand),
+                    };
+                    continue;
+                }
+                // Native value-op `f thread:withHeldLock lock` (Kotlin
+                // `CallWithLockOperator`, engine.kt:510): same shape as
+                // `int:proto` — the lock value is the operand, the evaluator
+                // validates it and applies the function under it.
+                if namespace.as_deref() == Some("thread")
+                    && name == "withHeldLock"
+                    && Self::is_function_expr(&cur)
+                {
+                    self.advance(); // consume thread:withHeldLock
+                    self.skip_newlines();
+                    let operand = self.parse_apply()?;
+                    cur = Instr::ValueOp {
+                        func: Box::new(cur),
+                        op_name: "thread:withHeldLock".to_string(),
                         operand: Box::new(operand),
                     };
                     continue;
@@ -2271,7 +2334,15 @@ impl<'a> Parser<'a> {
                     // fallback, not a whole-block bailout, so mixed bodies work.
                     self.skip_newlines();
                     let save = self.pos;
-                    let stmt = match self.parse_value_kotlin() {
+                    // The accumulator loop breaks only on EOF/⋄/newline and the
+                    // pushed `kotlin_close_stack` closers — `{…}` interiors need
+                    // their `}` pushed like `(…)` pushes `)` (op← resumes the
+                    // loop after building its Assign; without this `{ a +← v }`
+                    // dies in parse_primary on `}`).
+                    self.kotlin_close_stack.push(Token::CloseBrace);
+                    let res = self.parse_value_kotlin();
+                    self.kotlin_close_stack.pop();
+                    let stmt = match res {
                         Ok(s) => s,
                         Err(crate::AplError::Runtime(m))
                             if m.contains("__KOTLIN_FALLBACK__") =>

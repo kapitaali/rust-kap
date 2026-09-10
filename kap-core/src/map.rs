@@ -47,6 +47,8 @@ pub fn values_key_equal(a: &APLValue, b: &APLValue) -> bool {
         (APLValue::Null, APLValue::Null) => true,
         (APLValue::Timestamp(x), APLValue::Timestamp(y)) => x == y,
         (APLValue::Jvm(x), APLValue::Jvm(y)) => *x.borrow() == *y.borrow(),
+        (APLValue::Lock { id: x, .. }, APLValue::Lock { id: y, .. }) => x == y,
+        (APLValue::Condvar { id: x }, APLValue::Condvar { id: y }) => x == y,
         (APLValue::Symbol { name: n1, namespace: ns1 }, APLValue::Symbol { name: n2, namespace: ns2 }) => {
             // Per the oracle, bare symbol literals (`'foo`) have implicit namespace
             // `default`. A bare name and its `default:foo` qualified form are the

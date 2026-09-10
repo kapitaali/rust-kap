@@ -2087,6 +2087,7 @@ impl Engine {
             APLValue::Process(_) => true,
             APLValue::Timestamp(_) => true,
             APLValue::Jvm(_) => true,
+            APLValue::Lock { .. } | APLValue::Condvar { .. } => true,
         }
     }
 
@@ -3260,6 +3261,19 @@ impl Engine {
                 let proto_val = self.eval_instr(operand, env)?.force(self)?;
                 return self.apply_proto_op(func, &proto_val, left, right, env);
             }
+            // `f thread:withHeldLock lock` (Kotlin `CallWithLockOperator`,
+            // thread/lock.kt:45-66): evaluate the lock instr, check it is a
+            // lock, apply the operand under it. Single-threaded Stage-1 takes
+            // no real lock — the shape (validate + apply + return) is what the
+            // rows exercise.
+            if op_name == "thread:withHeldLock" {
+                let lockv = self.eval_instr(operand, env)?.force(self)?;
+                match lockv.as_ref() {
+                    APLValue::Lock { .. } => {}
+                    _ => return Err(AplError::runtime(format!("{}: expected a lock", op_name))),
+                }
+                return self.eval_apply(func, left, right, env);
+            }
             return Err(AplError::runtime(format!(
                 "unknown value-right-arg operator: {}",
                 op_name
@@ -4043,6 +4057,30 @@ impl Engine {
                     Ok(Self::jvm_wrap(crate::jvm::JvmValue::ClassRef(name)))
                 } else {
                     Err(AplError::runtime(format!("Class not found: {}", name)))
+                }
+            }
+            // 11c Stage-1 `thread:` locks (thread/lock.kt, thread.kt).
+            "thread:makeLock" => {
+                // `MakeLockFunction`: 0 = non-reentrant, 1 = reentrant.
+                let n = Self::kap_long(&right_val.force(self)?, "thread:makeLock")?;
+                let reentrant = match n {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(AplError::runtime(format!("makeLock: Argument must be 0 or 1"))),
+                };
+                Ok(Rc::new(APLValue::Lock { reentrant, id: crate::next_lock_id() }))
+            }
+            "thread:makeCondvar" => {
+                match right_val.force(self)?.as_ref() {
+                    APLValue::Lock { .. } => Ok(Rc::new(APLValue::Condvar { id: crate::next_lock_id() })),
+                    _ => Err(AplError::runtime("thread:makeCondvar: expected a lock".into())),
+                }
+            }
+            "thread:wait" | "thread:signal" | "thread:signalAll" => {
+                // Single-threaded Stage-1: no-ops returning `⍬`.
+                match right_val.force(self)?.as_ref() {
+                    APLValue::Condvar { .. } => Ok(Rc::new(APLValue::Null)),
+                    _ => Err(AplError::runtime("thread:condvar: expected a condvar".into())),
                 }
             }
             // `math:*` — P2 (ROADMAP §5) port of engine.kt:436–466 registrations
@@ -6402,6 +6440,12 @@ impl Engine {
                 | "jvm:toJvmBoolean" | "jvm:toJvmByteArray" | "jvm:findPrimitiveTypeClass"
                 | "jvm:createArrayInstance" | "jvm:arraySetElement" | "jvm:instanceOf"
                 | "jvm:findClass"
+                // 11c Stage-1 `thread:` locks (thread/lock.kt). Core-registered in
+                // Kotlin (engine.kt:507-515, outside the secure blocks), so no
+                // secure gate. `makeThread`/`joinThread`/`withHeldLock`-as-fn stay
+                // unregistered until the D1 decision (Stage 2).
+                | "thread:makeLock" | "thread:makeCondvar" | "thread:wait"
+                | "thread:signal" | "thread:signalAll"
         )
     }
 
@@ -13309,7 +13353,7 @@ impl Engine {
             | APLValue::Deferred { .. } | APLValue::UserFn { .. } | APLValue::UserOp { .. }
             | APLValue::Escape { .. } | APLValue::NonBoundFn { .. }
             | APLValue::Stream(_) | APLValue::Process(_) | APLValue::Timestamp(_)
-            | APLValue::Jvm(_) => {
+            | APLValue::Jvm(_) | APLValue::Lock { .. } | APLValue::Condvar { .. } => {
                 out.push(Rc::new(value.clone()));
             }
             APLValue::Array(arr) => {
@@ -15272,6 +15316,9 @@ impl Engine {
             }
             APLValue::Jvm(_) => {
                 Err(AplError::runtime("cannot use a JVM value as an array element".into()))
+            }
+            APLValue::Lock { .. } | APLValue::Condvar { .. } => {
+                Err(AplError::runtime("cannot use a lock as an array element".into()))
             }
             APLValue::Process(_) => {
                 Err(AplError::runtime("cannot use a process as an array element".into()))
@@ -18812,6 +18859,8 @@ impl Engine {
             // Timestamps compare by instant (dates-platform.kt:17-18).
             (APLValue::Timestamp(x), APLValue::Timestamp(y)) => x == y,
             (APLValue::Jvm(x), APLValue::Jvm(y)) => *x.borrow() == *y.borrow(),
+            (APLValue::Lock { id: x, .. }, APLValue::Lock { id: y, .. }) => x == y,
+            (APLValue::Condvar { id: x }, APLValue::Condvar { id: y }) => x == y,
             _ => false,
         }
     }
@@ -18854,6 +18903,8 @@ impl Engine {
             (APLValue::Map(am), APLValue::Map(bm)) => am.deep_equal(bm),
             (APLValue::Timestamp(x), APLValue::Timestamp(y)) => x == y,
             (APLValue::Jvm(x), APLValue::Jvm(y)) => *x.borrow() == *y.borrow(),
+            (APLValue::Lock { id: x, .. }, APLValue::Lock { id: y, .. }) => x == y,
+            (APLValue::Condvar { id: x }, APLValue::Condvar { id: y }) => x == y,
             _ => false,
         }
     }
@@ -18893,6 +18944,8 @@ impl Engine {
             }
             (APLValue::Timestamp(x), APLValue::Timestamp(y)) => x == y,
             (APLValue::Jvm(x), APLValue::Jvm(y)) => *x.borrow() == *y.borrow(),
+            (APLValue::Lock { id: x, .. }, APLValue::Lock { id: y, .. }) => x == y,
+            (APLValue::Condvar { id: x }, APLValue::Condvar { id: y }) => x == y,
             _ => false,
         }
     }

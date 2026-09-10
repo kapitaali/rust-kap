@@ -148,6 +148,19 @@ pub enum APLValue {
     /// Tier-1 emulation only: scalars, primitive classes, nominal class refs,
     /// emulated primitive arrays. See `jvm.rs`.
     Jvm(AplRef<std::cell::RefCell<jvm::JvmValue>>),
+    /// A threading lock (Kotlin `LockValue`, thread/lock.kt:10-12). Stage-1
+    /// (§11c): single-threaded token — `withHeldLock` applies under it without
+    /// real locking. `id` gives JVM-object-identity semantics.
+    Lock { reentrant: bool, id: u64 },
+    /// A condition variable (Kotlin `CondvarValue`, lock.kt). Stage-1 token.
+    Condvar { id: u64 },
+}
+
+/// Fresh ids for `Lock`/`Condvar` identity (Kotlin: JVM object identity —
+/// two `makeLock` calls are never equal).
+static LOCK_IDS: AtomicU64 = AtomicU64::new(1);
+pub(crate) fn next_lock_id() -> u64 {
+    LOCK_IDS.fetch_add(1, AtomicOrdering::SeqCst)
 }
 
 impl APLValue {
@@ -197,6 +210,8 @@ impl APLValue {
             // Kotlin `SystemClass.INTERNAL` (io_functions.kt:15-27): streams are
             // opaque wrapped values; `typeof` renders `kap:internal`.
             APLValue::Stream(_) => "internal",
+            // Kotlin `LockValue`/`CondvarValue` (lock.kt): wrapped MPLock/MPCondVar.
+            APLValue::Lock { .. } | APLValue::Condvar { .. } => "internal",
             // Kotlin `SystemClass.PROCESS` (execprocess.kt: `ProcessKapClass`,
             // `ModuleClass` named "process").
             APLValue::Process(_) => "process",
@@ -253,6 +268,8 @@ impl APLValue {
             APLValue::Timestamp(ms) => crate::time::format_timestamp(*ms),
             // Kotlin `JvmInstanceValue.formatted` (jvm-module.kt:74-76).
             APLValue::Jvm(h) => h.borrow().display(),
+            APLValue::Lock { .. } => "lock".to_string(),
+            APLValue::Condvar { .. } => "condvar".to_string(),
         }
     }
 
@@ -290,6 +307,8 @@ impl APLValue {
             APLValue::Process(p) => format!("MPProcess[pid={}]", p.borrow().pid),
             APLValue::Timestamp(ms) => crate::time::format_timestamp(*ms),
             APLValue::Jvm(h) => h.borrow().display(),
+            APLValue::Lock { .. } => "lock".to_string(),
+            APLValue::Condvar { .. } => "condvar".to_string(),
         }
     }
 
@@ -357,6 +376,8 @@ impl APLValue {
             APLValue::Process(p) => format!("MPProcess[pid={}]", p.borrow().pid),
             APLValue::Timestamp(ms) => crate::time::format_timestamp(*ms),
             APLValue::Jvm(h) => h.borrow().display(),
+            APLValue::Lock { .. } => "lock".to_string(),
+            APLValue::Condvar { .. } => "condvar".to_string(),
         }
     }
 
@@ -393,6 +414,8 @@ impl APLValue {
             APLValue::Process(p) => format!("MPProcess[pid={}]", p.borrow().pid),
             APLValue::Timestamp(ms) => crate::time::format_timestamp(*ms),
             APLValue::Jvm(h) => h.borrow().display(),
+            APLValue::Lock { .. } => "lock".to_string(),
+            APLValue::Condvar { .. } => "condvar".to_string(),
         }
     }
 

@@ -70,6 +70,8 @@ fn format_value(v: &APLValue) -> String {
         APLValue::Process(p) => format!("MPProcess[pid={}]", p.borrow().pid),
         APLValue::Timestamp(ms) => kap_core::time::format_timestamp(*ms),
         APLValue::Jvm(h) => h.borrow().display(),
+        APLValue::Lock { .. } => "lock".to_string(),
+        APLValue::Condvar { .. } => "condvar".to_string(),
         APLValue::Deferred { .. } => "<deferred>".to_string(),
         APLValue::UserFn { .. } => "<fn>".to_string(),
         APLValue::Escape { .. } => "<fn>".to_string(),
