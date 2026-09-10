@@ -243,7 +243,7 @@ impl<'a> Parser<'a> {
                             ))
                         // P3 `io:` / `io2:` file + stream natives (engine.kt:361-404,
                         // builtins/io_functions.kt + execprocess.kt).
-                        || (ns == "io" && matches!(base, "read" | "readFile" | "readdir" | "readCsv"))
+                        || (ns == "io" && matches!(base, "read" | "readFile" | "readdir" | "readCsv" | "fromHtmlTable"))
                         || (ns == "io2"
                             && matches!(
                                 base,

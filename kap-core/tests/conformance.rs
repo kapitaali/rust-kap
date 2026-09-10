@@ -1196,6 +1196,31 @@ fn curated_kap_parity() {
             }
         }
     }
+    // --- html cluster (ParseHtmlFunctionTest 2518/2519/2522):
+    // `io:fromHtmlTable` monadic/dyadic; shapes, labels and cell values
+    // oracle-verified (incl. `123foo` -> 123, bare-th thead headers).
+    {
+        let html_cases: Vec<(&str, &str)> = vec![
+            ("⍴ io:fromHtmlTable \"<table><thead><th>Foo</th><th>Bar</th></thead><tbody><tr><td>1</td><td>10</td></tr><tr><td>abctest</td><td>123foo</td></tr></tbody></table>\"", "(2 2)"),
+            ("labels io:fromHtmlTable \"<table><thead><th>Foo</th><th>Bar</th></thead><tbody><tr><td>1</td><td>10</td></tr><tr><td>abctest</td><td>123foo</td></tr></tbody></table>\"", "(\"Foo\" \"Bar\")"),
+            ("io:fromHtmlTable \"<table><thead><th>Foo</th><th>Bar</th></thead><tbody><tr><td>1</td><td>10</td></tr><tr><td>abctest</td><td>123foo</td></tr></tbody></table>\"", "(1 10 \"abctest\" 123)"),
+            ("⍴ 1 io:fromHtmlTable \"<table><tr><td>1</td></tr></table><table><tbody><tr><td>10</td><td>11</td></tr></tbody></table>\"", "(1 2)"),
+            ("1 io:fromHtmlTable \"<table><tr><td>1</td></tr></table><table><tbody><tr><td>10</td><td>11</td></tr></tbody></table>\"", "(10 11)"),
+        ];
+        for (expr, expected) in html_cases {
+            match engine.eval_string(expr) {
+                Ok(v) => {
+                    let got = v.format_display();
+                    if &got != expected {
+                        failures.push(format!("MISMATCH  {expr:?}  expected {expected:?} got {got:?}"));
+                    }
+                }
+                Err(e) => {
+                    failures.push(format!("ERROR    {expr:?}  -> {e}"));
+                }
+            }
+        }
+    }
     // --- 11d `${...}` template rows (CompareTest 1368/1373/1374 +
     // EncoderAPLFunctionTest 2516/2517): every combination below was
     // verified element-for-element against kap-jvm-text (oracle uses

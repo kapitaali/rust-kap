@@ -3773,6 +3773,21 @@ impl Engine {
                     .map_err(|e| AplError::runtime(format!("Error while parsing CSV: {}", e)))?;
                 Self::csv_table(rows, &flags)
             }
+            "io:fromHtmlTable" => {
+                // `FromHtmlTableFunction` (builtins/parse-html.kt): monadic
+                // uses table index 0; dyadic left arg is the table index
+                // (`ensureNumber().asInt()`). Failures raise
+                // `HtmlParserException`: "No table found in HTML content".
+                let idx = match left_val.as_ref() {
+                    None => 0,
+                    Some(lv) => Self::kap_long(&lv.force(self)?, "io:fromHtmlTable")?,
+                };
+                let s = Self::kap_string(&right_val.force(self)?, "io:fromHtmlTable")?;
+                match crate::html::nth_table(&s, idx) {
+                    Some(t) => Self::html_table(t),
+                    None => Err(AplError::runtime("No table found in HTML content".into())),
+                }
+            }
             "io:readdir" => {
                 // `ReaddirFunction`: N×1 name matrix; dyadic `:size`/`:type`
                 // selectors add columns (engine.kt:376).
@@ -6448,7 +6463,7 @@ impl Engine {
                 // builtins/io_functions.kt + execprocess.kt) + `close`
                 // (engine.kt:1163). Two-gate rule: parser admits them via
                 // is_known_fn; listed here for the eval-time late gate.
-                | "io:read" | "io:readFile" | "io:readdir" | "io:readCsv"
+                | "io:read" | "io:readFile" | "io:readdir" | "io:readCsv" | "io:fromHtmlTable"
                 | "io2:open" | "io2:read" | "io2:readLine" | "io2:lines"
                 | "io2:arrayStream" | "io2:write" | "io2:flush" | "io2:exec"
                 | "close"
@@ -7581,6 +7596,49 @@ impl Engine {
             arr.labels = Some(Box::new(DimensionLabels { labels: vec![rl, cl] }));
         }
         Ok(Rc::new(APLValue::Array(Rc::new(arr))))
+    }
+
+    /// Build the result array for `io:fromHtmlTable` (`htmlTableToArray`,
+    /// htmlconverter.kt:51-85): cells via `parseStringToAPLValue`
+    /// (`NumberWithThousandsSeparator`, else trimmed string), short rows
+    /// padded with `APLONG_0`, column labels merged when present.
+    fn html_table(t: crate::html::HtmlTable) -> Result<AplRef<APLValue>, AplError> {
+        use crate::array::{ArrayData, AxisLabel, DimensionLabels, KapArray};
+        let num_rows = t.rows.len();
+        let num_cols = t.rows.iter().map(|r| r.len()).max().unwrap_or(0);
+        let mut elems: Vec<AplRef<APLValue>> = Vec::with_capacity(num_rows * num_cols);
+        for row in &t.rows {
+            for cell in row {
+                elems.push(Rc::new(Self::html_cell(cell)));
+            }
+            for _ in row.len()..num_cols {
+                elems.push(Rc::new(APLValue::Number(KapNumber::Long(0))));
+            }
+        }
+        let mut arr = KapArray::new(vec![num_rows, num_cols], ArrayData::Nested(elems));
+        if let Some(headers) = t.headers {
+            let cl = headers.into_iter().map(Some).collect::<Vec<AxisLabel>>();
+            arr.labels = Some(Box::new(DimensionLabels { labels: vec![None, Some(cl)] }));
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(arr))))
+    }
+
+    /// One table cell (`parseStringToAPLValue`, htmlconverter.kt:109-118).
+    fn html_cell(text: &str) -> APLValue {
+        let trimmed = text.trim();
+        match crate::html::parse_cell_number(trimmed) {
+            Some(crate::html::CellNumber::Integer(d)) => {
+                match KapNumber::parse_kap_number_string(&d) {
+                    Some(n) => APLValue::Number(n),
+                    None => APLValue::Str(trimmed.to_string()),
+                }
+            }
+            Some(crate::html::CellNumber::Decimal(d)) => match d.parse::<f64>() {
+                Ok(f) => APLValue::Number(KapNumber::Double(f)),
+                Err(_) => APLValue::Str(trimmed.to_string()),
+            },
+            None => APLValue::Str(trimmed.to_string()),
+        }
     }
 
     /// `asByteArray` (types.kt:666): rank-1 numbers (0-255) or chars → bytes.

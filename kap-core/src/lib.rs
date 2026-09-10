@@ -29,6 +29,7 @@ pub mod stream;
 pub mod time;
 pub mod jvm;
 pub mod csv;
+pub mod html;
 
 /// A persistent, REPL-like Kap evaluation context. State (variables, user
 /// functions) survives across `eval` calls. See [`session::Session`].
