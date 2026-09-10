@@ -794,6 +794,12 @@ pub struct NamespaceRegistry {
     ///   `⎕A ← 5` → "Assignment to constant variable: kap:⎕A");
     /// - by `declare(:const …)` at eval time (B6 / code_analysis_03).
     pub constants: RefCell<HashSet<(String, String)>>,
+    /// `(ns, name)` pairs bound as FUNCTION DEFINITIONS (∇ tradfns and
+    /// `name ⇐ dfn`). A plain `←`-assigned lambda is a VARIABLE holding a
+    /// function value (Kotlin `makeVariableRef`), NOT a function binding:
+    /// `A B` with both ←-bound strands to a 2-vector of fns (oracle-verified).
+    /// The parser's known-function seeding consults this set.
+    pub fn_definitions: RefCell<HashSet<(String, String)>>,
 }
 
 impl NamespaceRegistry {
@@ -819,6 +825,20 @@ impl NamespaceRegistry {
             .entry(ns.to_string())
             .or_default()
             .insert(name.to_string(), val);
+    }
+    /// Mark `(ns, name)` as a FUNCTION DEFINITION (`∇` tradfn or `name ⇐ dfn`).
+    /// The parser seeds `known_functions` from this set; `←`-assigned lambdas
+    /// are variables and are NOT marked (oracle: `A B` strands to a 2-vector).
+    pub fn mark_fn_def(&self, ns: &str, name: &str) {
+        self.fn_definitions
+            .borrow_mut()
+            .insert((ns.to_string(), name.to_string()));
+    }
+    /// Clear the function-definition mark (a later `←` rebinds the name as a value).
+    pub fn unmark_fn_def(&self, ns: &str, name: &str) {
+        self.fn_definitions
+            .borrow_mut()
+            .remove(&(ns.to_string(), name.to_string()));
     }
     /// Mark `(ns, name)` as read-only (Kotlin `Namespace.addConstant`).
     /// Oracle behaviour (2026-08-24): `declare(:const q)` BINDS `q ← null`
@@ -921,38 +941,34 @@ impl NamespaceRegistry {
     /// `function_names()` so a user-defined function is recognized as applicable after a
     /// separate `∇`/`⇐` statement).
     pub fn collect_function_names(&self, out: &mut Vec<String>) {
-        for (ns, m) in self.symbols.borrow().iter() {
-            for (name, val) in m.iter() {
-                if matches!(val.as_ref(), APLValue::UserFn { .. }) {
-                    // Qualified form (`foo:a`): Kotlin registers `∇`-defined fns
-                    // engine-globally under their defining namespace, and later
-                    // statements resolve them via `lookupFunction` → `getFunction`.
-                    let qual = format!("{}:{}", ns, name);
-                    if !out.contains(&qual) {
-                        out.push(qual);
-                    }
-                    // Bare form only when the fn lives in the default namespace
-                    // (bare `a` elsewhere resolves per-current-ns at parse time;
-                    // see `is_known_fn`'s current-ns check). Unconditional bare
-                    // pushes would misparse value strands as applications.
-                    if ns == &Self::default_ns() && !out.contains(name) {
-                        out.push(name.clone());
-                    }
-                    // EXPORTED fns of any namespace are also seeded bare: Kotlin
-                    // resolves a bare use through exported namespaces (the stdlib
-                    // `⌹` lives in ns `kap`, and the oracle applies `⌹ 2 2⍴…`
-                    // monadically from top level once the stdlib is loaded).
-                    if self
-                        .exports
-                        .borrow()
-                        .get(ns)
-                        .map(|set| set.contains(name))
-                        .unwrap_or(false)
-                        && !out.contains(name)
-                    {
-                        out.push(name.clone());
-                    }
-                }
+        let fns = self.fn_definitions.borrow();
+        for (ns, name) in fns.iter() {
+            let is_user_fn = self
+                .symbols
+                .borrow()
+                .get(ns)
+                .and_then(|m| m.get(name))
+                .map(|v| matches!(v.as_ref(), APLValue::UserFn { .. }))
+                .unwrap_or(false);
+            if !is_user_fn {
+                continue;
+            }
+            let qual = format!("{}:{}", ns, name);
+            if !out.contains(&qual) {
+                out.push(qual);
+            }
+            if ns == &Self::default_ns() && !out.contains(name) {
+                out.push(name.clone());
+            }
+            if self
+                .exports
+                .borrow()
+                .get(ns)
+                .map(|set| set.contains(name))
+                .unwrap_or(false)
+                && !out.contains(name)
+            {
+                out.push(name.clone());
             }
         }
     }

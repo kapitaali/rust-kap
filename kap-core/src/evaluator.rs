@@ -1382,6 +1382,10 @@ impl Engine {
                     // variable: kap:⎕A"). The constant is registered under its owning
                     // namespace; a bare name resolves there via current-ns/default fallback.
                     self.check_not_constant(name, namespace, env)?;
+                    // A `←` assignment binds a VALUE: clear any function-definition
+                    // mark (oracle: ≡(A B) = 2 for ←-bound lambda names).
+                    let def_ns = namespace.clone().unwrap_or_else(|| env.ns_registry.current_ns());
+                    env.ns_registry.unmark_fn_def(&def_ns, name);
                     // `←` updates the nearest enclosing binding (closure-safe), falling
                     // back to defining locally when the name is new in this scope.
                     env.assign(name, namespace, v.clone());
@@ -1703,6 +1707,8 @@ impl Engine {
                 // Track this name as a function definition (∇), so the parser
                 // treats later uses as applicable. See PROBLEM.md (A2).
                 env.function_defs.borrow_mut().insert(name.clone());
+                let def_ns = namespace.clone().unwrap_or_else(|| env.ns_registry.current_ns());
+                env.ns_registry.mark_fn_def(&def_ns, name);
                 Ok(Rc::new(APLValue::Null))
             }
             Instr::FnAssign {
@@ -1870,6 +1876,8 @@ impl Engine {
                 // treats later uses as applicable. ←-bound lambdas do NOT add
                 // here — they are values. See PROBLEM.md (A2).
                 env.function_defs.borrow_mut().insert(name.clone());
+                let def_ns = namespace.clone().unwrap_or_else(|| env.ns_registry.current_ns());
+                env.ns_registry.mark_fn_def(&def_ns, name);
                 // PLAN §2.8b: `foo ⇐ {a ← 2}` with const `a` errors HERE (oracle
                 // 1:37), never called. `⇐` bodies have no named params (⍺/⍵
                 // only). SKIP while executing a deferred body (v3 gate): a
