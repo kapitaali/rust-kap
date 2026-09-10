@@ -8,8 +8,12 @@ use crate::KapNumber;
 use num_bigint::BigInt;
 use num_rational::BigRational;
 
-/// Read exactly four hex digits from `chars` (starting at index 0 of the slice)
-/// and return the resulting code point, or `None` if fewer than four hex digits.
+
+/// Lex a character after `@`. Returns (char, next_index, next_col). Column tracking
+/// is approximate (counts chars). Supports `@\n`, `@\t`, `@\0`, `@\s`, `@e`, `@\\`,
+/// and `@\uXXXX` (including a surrogate pair `@\uD835\uDC9F` → one astral char).
+/// Read exactly four hex digits from the start of the slice
+/// and return the resulting code point, or None if fewer than four.
 fn parse_hex4(chars: &[char]) -> Option<u32> {
     if chars.len() < 4 {
         return None;
@@ -21,9 +25,6 @@ fn parse_hex4(chars: &[char]) -> Option<u32> {
     Some(v)
 }
 
-/// Lex a character after `@`. Returns (char, next_index, next_col). Column tracking
-/// is approximate (counts chars). Supports `@\n`, `@\t`, `@\0`, `@\s`, `@e`, `@\\`,
-/// and `@\uXXXX` (including a surrogate pair `@\uD835\uDC9F` → one astral char).
 pub fn lex_char(chars: &[char], i: usize, _line: usize, col: usize) -> Option<(char, usize, usize)> {
     if i >= chars.len() {
         return None;
@@ -43,23 +44,46 @@ pub fn lex_char(chars: &[char], i: usize, _line: usize, col: usize) -> Option<(c
             '0' => Some(('\0', i + 2, col + 2)),
             '\\' => Some(('\\', i + 2, col + 2)),
             'u' => {
-                // @\uXXXX — may be a high surrogate followed by a low surrogate,
-                // which combine into a single astral code point (one `char`).
-                let code = parse_hex4(&chars[i + 2..])?;
-                if (0xD800..=0xDBFF).contains(&code) {
-                    let k = i + 6; // index just past the first `\uXXXX`
-                    if k + 1 < chars.len() && chars[k] == '\\' && chars[k + 1] == 'u' {
-                        let code2 = parse_hex4(&chars[k + 2..])?;
+                // Kap unicode hex escape, variable-length digits
+                // (Kotlin processUnicodeHexCode): consume the maximal
+                // alphanumeric run; empty run or non-hex digit is an error.
+                // A high surrogate followed by a second escape combines
+                // into one astral char (paired surrogates in Kap source).
+                fn hex_run(chars: &[char], from: usize) -> Option<(u32, usize)> {
+                    let mut j = from;
+                    while j < chars.len() && chars[j].is_alphanumeric() {
+                        j += 1;
+                    }
+                    if j == from {
+                        return None;
+                    }
+                    let mut code = 0u32;
+                    for k in from..j {
+                        code = code * 16 + chars[k].to_digit(16)?;
+                    }
+                    if code > 0x10FFFF {
+                        return None;
+                    }
+                    Some((code, j))
+                }
+                let (code, j) = hex_run(chars, i + 2)?;
+                if (0xD800..=0xDBFF).contains(&code)
+                    && j + 1 < chars.len()
+                    && chars[j] as u32 == 92
+                    && chars[j + 1] == 'u'
+                {
+                    if let Some((code2, j2)) = hex_run(chars, j + 2) {
                         if (0xDC00..=0xDFFF).contains(&code2) {
-                            let cp =
-                                0x10000 + ((code - 0xD800) << 10) + (code2 - 0xDC00);
-                            return char::from_u32(cp).map(|ch| (ch, k + 6, col + 6));
+                            let cp = 0x10000 + ((code - 0xD800) << 10) + (code2 - 0xDC00);
+                            if let Some(ch) = char::from_u32(cp) {
+                                return Some((ch, j2, col + (j2 - i)));
+                            }
                         }
                     }
-                    // Lone surrogate (no valid pairing): Kap has no valid char for it.
                     return None;
                 }
-                char::from_u32(code).map(|ch| (ch, i + 6, col + 6))
+                // Unpaired surrogates have no Rust char (from_u32 rejects them).
+                char::from_u32(code).map(|ch| (ch, j, col + (j - i)))
             }
             _ => None,
         }

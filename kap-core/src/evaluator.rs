@@ -2086,6 +2086,7 @@ impl Engine {
             APLValue::Stream(_) => true,
             APLValue::Process(_) => true,
             APLValue::Timestamp(_) => true,
+            APLValue::Jvm(_) => true,
         }
     }
 
@@ -3898,6 +3899,150 @@ impl Engine {
                         "Cannot parse string as a timestamp: '{}'",
                         s
                     ))),
+                }
+            }
+            // 11a Tier-1 `jvm:` emulation (jvmmod/jvm-module.kt, no-JVM subset).
+            // Conversions are scalar-only like Kotlin's `NoAxisAPLFunction`
+            // (`ensureNumber` rejects arrays); `toJvmBoolean` follows
+            // `AbstractAPLValue.asBoolean` (non-numbers are truthy).
+            "jvm:toJvmString" => {
+                let s = Self::jvm_to_string(&right_val.force(self)?, "jvm:toJvmString")?;
+                Ok(Self::jvm_wrap(crate::jvm::JvmValue::Scalar(crate::jvm::JvmScalar::Str(s))))
+            }
+            "jvm:toJvmShort" => {
+                let n = Self::jvm_long(&right_val.force(self)?, "jvm:toJvmShort")?;
+                if !(i64::from(i16::MIN)..=i64::from(i16::MAX)).contains(&n) {
+                    return Err(AplError::runtime(format!("Value does not fit in short: {}", n)));
+                }
+                Ok(Self::jvm_wrap(crate::jvm::JvmValue::Scalar(crate::jvm::JvmScalar::Short(n as i16))))
+            }
+            "jvm:toJvmInt" => {
+                let n = Self::jvm_long(&right_val.force(self)?, "jvm:toJvmInt")?;
+                if !(i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(&n) {
+                    return Err(AplError::runtime(format!("Value does not fit in int: {}", n)));
+                }
+                Ok(Self::jvm_wrap(crate::jvm::JvmValue::Scalar(crate::jvm::JvmScalar::Int(n as i32))))
+            }
+            "jvm:toJvmLong" => {
+                let n = Self::jvm_long(&right_val.force(self)?, "jvm:toJvmLong")?;
+                Ok(Self::jvm_wrap(crate::jvm::JvmValue::Scalar(crate::jvm::JvmScalar::Long(n))))
+            }
+            "jvm:toJvmByte" => {
+                let n = Self::jvm_long(&right_val.force(self)?, "jvm:toJvmByte")?;
+                if !(0..=255).contains(&n) {
+                    return Err(AplError::runtime(format!("Value does not fit in byte: {}", n)));
+                }
+                Ok(Self::jvm_wrap(crate::jvm::JvmValue::Scalar(crate::jvm::JvmScalar::Byte(n as u8 as i8))))
+            }
+            "jvm:toJvmChar" => {
+                let n = Self::jvm_long(&right_val.force(self)?, "jvm:toJvmChar")?;
+                if !(0..=0xffff).contains(&n) {
+                    return Err(AplError::runtime(format!("Value does not fit in char: {}", n)));
+                }
+                let c = char::from_u32(n as u32).ok_or_else(|| AplError::runtime(format!("Value does not fit in char: {}", n)))?;
+                Ok(Self::jvm_wrap(crate::jvm::JvmValue::Scalar(crate::jvm::JvmScalar::Char(c))))
+            }
+            "jvm:toJvmFloat" => {
+                let f = Self::jvm_num(&right_val.force(self)?, "jvm:toJvmFloat")?.as_double() as f32;
+                Ok(Self::jvm_wrap(crate::jvm::JvmValue::Scalar(crate::jvm::JvmScalar::Float(f))))
+            }
+            "jvm:toJvmDouble" => {
+                let d = Self::jvm_num(&right_val.force(self)?, "jvm:toJvmDouble")?.as_double();
+                Ok(Self::jvm_wrap(crate::jvm::JvmValue::Scalar(crate::jvm::JvmScalar::Double(d))))
+            }
+            "jvm:toJvmBoolean" => {
+                let b = match right_val.force(self)?.as_ref() {
+                    APLValue::Number(n) => n.as_boolean(),
+                    _ => true,
+                };
+                Ok(Self::jvm_wrap(crate::jvm::JvmValue::Scalar(crate::jvm::JvmScalar::Bool(b))))
+            }
+            "jvm:toJvmByteArray" => {
+                let b = Self::kap_bytes(&right_val.force(self)?)?;
+                Ok(Self::jvm_wrap(crate::jvm::JvmValue::Scalar(crate::jvm::JvmScalar::Bytes(b))))
+            }
+            "jvm:findPrimitiveTypeClass" => {
+                let fv = right_val.force(self)?;
+                match fv.as_ref() {
+                    APLValue::Symbol { name, .. } => match crate::jvm::prim_class_for_symbol(name) {
+                        Some(c) => Ok(Self::jvm_wrap(crate::jvm::JvmValue::Class(c))),
+                        None => Err(AplError::runtime(format!("Unexpected type name: {}", name))),
+                    },
+                    _ => Err(AplError::runtime("jvm:findPrimitiveTypeClass: expected a symbol".into())),
+                }
+            }
+            "jvm:createArrayInstance" => {
+                let args = Self::call_args(&right_val.force(self)?);
+                if args.len() != 2 {
+                    return Err(AplError::runtime("jvm:createArrayInstance: expected 2 arguments".into()));
+                }
+                let elem = match args[0].as_ref() {
+                    APLValue::Jvm(h) => match &*h.borrow() {
+                        crate::jvm::JvmValue::Class(crate::jvm::JvmClass::PrimArray(p))
+                        | crate::jvm::JvmValue::Class(crate::jvm::JvmClass::Prim(p)) => *p,
+                        _ => return Err(AplError::runtime("jvm:createArrayInstance: expected an array class".into())),
+                    },
+                    _ => return Err(AplError::runtime("jvm:createArrayInstance: expected a JVM class".into())),
+                };
+                let size = Self::kap_long(&args[1], "jvm:createArrayInstance")?;
+                if size < 0 {
+                    return Err(AplError::runtime("jvm:createArrayInstance: negative size".into()));
+                }
+                let data = vec![elem.zero(); size as usize];
+                Ok(Self::jvm_wrap(crate::jvm::JvmValue::ObjectArray { elem, data }))
+            }
+            "jvm:arraySetElement" => {
+                let args = Self::call_args(&right_val.force(self)?);
+                if args.len() != 3 {
+                    return Err(AplError::runtime("jvm:arraySetElement: expected 3 arguments".into()));
+                }
+                let idx = Self::kap_long(&args[1], "jvm:arraySetElement")?;
+                if idx < 0 {
+                    return Err(AplError::runtime("jvm:arraySetElement: negative index".into()));
+                }
+                let slot = match args[0].as_ref() {
+                    APLValue::Jvm(h) => h.clone(),
+                    _ => return Err(AplError::runtime("jvm:arraySetElement: expected a JVM array".into())),
+                };
+                let mut gv = slot.borrow_mut();
+                let (elem, data) = match &mut *gv {
+                    crate::jvm::JvmValue::ObjectArray { elem, data } => (*elem, data),
+                    _ => return Err(AplError::runtime("jvm:arraySetElement: argument is not a JVM array".into())),
+                };
+                let i = idx as usize;
+                if i >= data.len() {
+                    return Err(AplError::runtime("jvm:arraySetElement: index out of bounds".into()));
+                }
+                data[i] = Self::jvm_coerce_arg(&args[2], elem, "jvm:arraySetElement")?;
+                Ok(Rc::new(APLValue::Null))
+            }
+            "jvm:instanceOf" => {
+                let args = Self::call_args(&right_val.force(self)?);
+                if args.len() != 2 {
+                    return Err(AplError::runtime("jvm:instanceOf: expected 2 arguments".into()));
+                }
+                let ty = match args[1].as_ref() {
+                    APLValue::Jvm(h) => h.borrow().clone(),
+                    _ => return Err(AplError::runtime("jvm:instanceOf: expected a JVM class".into())),
+                };
+                let r = match args[0].as_ref() {
+                    APLValue::Nil => 0,
+                    APLValue::Jvm(h) => match &*h.borrow() {
+                        crate::jvm::JvmValue::Scalar(s) => {
+                            if crate::jvm::JvmValue::instance_of(s, &ty) { 1 } else { 0 }
+                        }
+                        _ => 0,
+                    },
+                    _ => return Err(AplError::runtime("jvm:instanceOf: expected a JVM instance".into())),
+                };
+                Ok(Rc::new(APLValue::Number(KapNumber::Long(r))))
+            }
+            "jvm:findClass" => {
+                let name = Self::kap_string(&right_val.force(self)?, "jvm:findClass")?;
+                if name == "java.lang.String" {
+                    Ok(Self::jvm_wrap(crate::jvm::JvmValue::ClassRef(name)))
+                } else {
+                    Err(AplError::runtime(format!("Class not found: {}", name)))
                 }
             }
             // `math:*` — P2 (ROADMAP §5) port of engine.kt:436–466 registrations
@@ -6251,6 +6396,12 @@ impl Engine {
                 | "json:read" | "json:readString" | "json:writeString"
                 // `time:` namespace (builtins/time-functions.kt).
                 | "time:toTimestamp" | "time:fromTimestamp" | "time:format" | "time:parse"
+                // 11a Tier-1 `jvm:` emulation (jvmmod/jvm-module.kt, no-JVM subset).
+                | "jvm:toJvmString" | "jvm:toJvmShort" | "jvm:toJvmInt" | "jvm:toJvmLong"
+                | "jvm:toJvmByte" | "jvm:toJvmChar" | "jvm:toJvmFloat" | "jvm:toJvmDouble"
+                | "jvm:toJvmBoolean" | "jvm:toJvmByteArray" | "jvm:findPrimitiveTypeClass"
+                | "jvm:createArrayInstance" | "jvm:arraySetElement" | "jvm:instanceOf"
+                | "jvm:findClass"
         )
     }
 
@@ -6278,6 +6429,13 @@ impl Engine {
                 | "io2:lines"
                 | "io2:flush"
                 | "json:read"
+                // 11a `jvm:` — JvmModule.allowedInSecureMode is false (modulebuilder.kt:20
+                // default), so the whole namespace is absent in secure mode.
+                | "jvm:toJvmString" | "jvm:toJvmShort" | "jvm:toJvmInt" | "jvm:toJvmLong"
+                | "jvm:toJvmByte" | "jvm:toJvmChar" | "jvm:toJvmFloat" | "jvm:toJvmDouble"
+                | "jvm:toJvmBoolean" | "jvm:toJvmByteArray" | "jvm:findPrimitiveTypeClass"
+                | "jvm:createArrayInstance" | "jvm:arraySetElement" | "jvm:instanceOf"
+                | "jvm:findClass"
         )
     }
 
@@ -7193,6 +7351,82 @@ impl Engine {
                 "Argument is not of type: binary output stream, got: {}",
                 other.class_name()
             ))),
+        }
+    }
+
+    /// Wrap a Tier-1 JVM value (§11a, `jvm.rs`).
+    fn jvm_wrap(v: crate::jvm::JvmValue) -> AplRef<APLValue> {
+        Rc::new(APLValue::Jvm(crate::jvm::new_jvm(v)))
+    }
+
+    /// Kap scalar number (`ensureNumber()`); arrays and non-numbers error.
+    fn jvm_num(v: &AplRef<APLValue>, who: &str) -> Result<KapNumber, AplError> {
+        match v.as_ref() {
+            APLValue::Number(n) => Ok(n.clone()),
+            _ => Err(AplError::runtime(format!("{}: not a number", who))),
+        }
+    }
+
+    /// `ensureNumber().asLong()` with Kotlin truncation semantics
+    /// (`APLDouble.asLong` = `toLong`; rationals truncate — see `jvm.rs`).
+    fn jvm_long(v: &AplRef<APLValue>, who: &str) -> Result<i64, AplError> {
+        let n = Self::jvm_num(v, who)?;
+        crate::jvm::jvm_long(&n).map_err(|_| AplError::runtime(format!("{}: not an integer", who)))
+    }
+
+    /// `toStringValue()` for `jvm:toJvmString`: strings/chars pass through,
+    /// numbers render as displayed.
+    fn jvm_to_string(v: &AplRef<APLValue>, who: &str) -> Result<String, AplError> {
+        match v.as_ref() {
+            APLValue::Number(n) => Ok(n.format(true)),
+            _ => Self::kap_string(v, who),
+        }
+    }
+
+    /// Coerce an `arraySetElement` value argument to the array element type:
+    /// Kap numbers via `toJava` rules; JVM scalars by widening.
+    fn jvm_coerce_arg(
+        v: &AplRef<APLValue>,
+        elem: crate::jvm::JvmPrim,
+        who: &str,
+    ) -> Result<crate::jvm::JvmScalar, AplError> {
+        match v.as_ref() {
+            APLValue::Number(n) => crate::jvm::coerce_to_prim(n, elem)
+                .map_err(|e| AplError::runtime(format!("{}: {}", who, e))),
+            APLValue::Jvm(h) => match &*h.borrow() {
+                crate::jvm::JvmValue::Scalar(crate::jvm::JvmScalar::Bool(b)) => {
+                    if elem == crate::jvm::JvmPrim::Boolean {
+                        Ok(crate::jvm::JvmScalar::Bool(*b))
+                    } else {
+                        Err(AplError::runtime(format!("{}: cannot convert boolean", who)))
+                    }
+                }
+                crate::jvm::JvmValue::Scalar(crate::jvm::JvmScalar::Char(c)) => {
+                    crate::jvm::coerce_to_prim(&KapNumber::Long(*c as i64), elem)
+                        .map_err(|e| AplError::runtime(format!("{}: {}", who, e)))
+                }
+                crate::jvm::JvmValue::Scalar(crate::jvm::JvmScalar::Float(f)) => {
+                    crate::jvm::coerce_to_prim(&KapNumber::Double(*f as f64), elem)
+                        .map_err(|e| AplError::runtime(format!("{}: {}", who, e)))
+                }
+                crate::jvm::JvmValue::Scalar(crate::jvm::JvmScalar::Double(d)) => {
+                    crate::jvm::coerce_to_prim(&KapNumber::Double(*d), elem)
+                        .map_err(|e| AplError::runtime(format!("{}: {}", who, e)))
+                }
+                crate::jvm::JvmValue::Scalar(s) => {
+                    let n = match s {
+                        crate::jvm::JvmScalar::Byte(b) => *b as i64,
+                        crate::jvm::JvmScalar::Short(n) => *n as i64,
+                        crate::jvm::JvmScalar::Int(n) => *n as i64,
+                        crate::jvm::JvmScalar::Long(n) => *n,
+                        _ => return Err(AplError::runtime(format!("{}: cannot convert to Java", who))),
+                    };
+                    crate::jvm::coerce_to_prim(&KapNumber::Long(n), elem)
+                        .map_err(|e| AplError::runtime(format!("{}: {}", who, e)))
+                }
+                _ => Err(AplError::runtime(format!("{}: cannot convert to Java", who))),
+            },
+            _ => Err(AplError::runtime(format!("{}: cannot convert to Java", who))),
         }
     }
 
@@ -13074,7 +13308,8 @@ impl Engine {
             | APLValue::List(_) | APLValue::Map(_) | APLValue::Symbol { .. }
             | APLValue::Deferred { .. } | APLValue::UserFn { .. } | APLValue::UserOp { .. }
             | APLValue::Escape { .. } | APLValue::NonBoundFn { .. }
-            | APLValue::Stream(_) | APLValue::Process(_) | APLValue::Timestamp(_) => {
+            | APLValue::Stream(_) | APLValue::Process(_) | APLValue::Timestamp(_)
+            | APLValue::Jvm(_) => {
                 out.push(Rc::new(value.clone()));
             }
             APLValue::Array(arr) => {
@@ -15034,6 +15269,9 @@ impl Engine {
             }
             APLValue::Timestamp(_) => {
                 Err(AplError::runtime("cannot use a timestamp as an array element".into()))
+            }
+            APLValue::Jvm(_) => {
+                Err(AplError::runtime("cannot use a JVM value as an array element".into()))
             }
             APLValue::Process(_) => {
                 Err(AplError::runtime("cannot use a process as an array element".into()))
@@ -18573,6 +18811,7 @@ impl Engine {
             (APLValue::Map(am), APLValue::Map(bm)) => am.deep_equal(bm),
             // Timestamps compare by instant (dates-platform.kt:17-18).
             (APLValue::Timestamp(x), APLValue::Timestamp(y)) => x == y,
+            (APLValue::Jvm(x), APLValue::Jvm(y)) => *x.borrow() == *y.borrow(),
             _ => false,
         }
     }
@@ -18614,6 +18853,7 @@ impl Engine {
             // built from `:a 1 :b 10` and `:b 10 :a 1` returns 1).
             (APLValue::Map(am), APLValue::Map(bm)) => am.deep_equal(bm),
             (APLValue::Timestamp(x), APLValue::Timestamp(y)) => x == y,
+            (APLValue::Jvm(x), APLValue::Jvm(y)) => *x.borrow() == *y.borrow(),
             _ => false,
         }
     }
@@ -18652,6 +18892,7 @@ impl Engine {
                         .all(|(p, q)| Self::deep_equal(p.as_ref(), q.as_ref()))
             }
             (APLValue::Timestamp(x), APLValue::Timestamp(y)) => x == y,
+            (APLValue::Jvm(x), APLValue::Jvm(y)) => *x.borrow() == *y.borrow(),
             _ => false,
         }
     }

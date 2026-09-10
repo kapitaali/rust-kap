@@ -493,7 +493,7 @@ pub fn format_double(v: f64) -> String {
 
 /// Convert a `BigInt` to `i64`, erroring if it does not fit. Avoids the `ToPrimitive`
 /// trait import dance; uses decimal string round-trip which is always correct.
-fn bigint_to_i64(v: &BigInt) -> Result<i64, String> {
+pub(crate) fn bigint_to_i64(v: &BigInt) -> Result<i64, String> {
     v.to_string()
         .parse::<i64>()
         .map_err(|_| format!("does not fit in long: {}", v))

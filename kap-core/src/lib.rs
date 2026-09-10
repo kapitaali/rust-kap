@@ -27,6 +27,7 @@ pub mod map;
 pub mod session;
 pub mod stream;
 pub mod time;
+pub mod jvm;
 
 /// A persistent, REPL-like Kap evaluation context. State (variables, user
 /// functions) survives across `eval` calls. See [`session::Session`].
@@ -143,6 +144,10 @@ pub enum APLValue {
     /// `dates/dates-platform.kt`). Created by `time:toTimestamp` /
     /// `time:parse`. See `time.rs`.
     Timestamp(i64),
+    /// A JVM interop value (Kotlin `JvmInstanceValue`, jvmmod/jvm-module.kt),
+    /// Tier-1 emulation only: scalars, primitive classes, nominal class refs,
+    /// emulated primitive arrays. See `jvm.rs`.
+    Jvm(AplRef<std::cell::RefCell<jvm::JvmValue>>),
 }
 
 impl APLValue {
@@ -197,6 +202,8 @@ impl APLValue {
             APLValue::Process(_) => "process",
             // Kotlin `SystemClass.TIMESTAMP` (objects.kt:37).
             APLValue::Timestamp(_) => "timestamp",
+            // Kotlin `JvmInstanceClass` (jvmmod/jvm-module.kt:19-21).
+            APLValue::Jvm(_) => "jvmInstance",
         }
     }
 
@@ -244,6 +251,8 @@ impl APLValue {
             APLValue::Process(p) => format!("MPProcess[pid={}]", p.borrow().pid),
             // Kotlin `APLTimestamp.formatted` (dates-platform.kt:13-15): ISO string.
             APLValue::Timestamp(ms) => crate::time::format_timestamp(*ms),
+            // Kotlin `JvmInstanceValue.formatted` (jvm-module.kt:74-76).
+            APLValue::Jvm(h) => h.borrow().display(),
         }
     }
 
@@ -280,6 +289,7 @@ impl APLValue {
             APLValue::Stream(s) => s.borrow().display_name().to_string(),
             APLValue::Process(p) => format!("MPProcess[pid={}]", p.borrow().pid),
             APLValue::Timestamp(ms) => crate::time::format_timestamp(*ms),
+            APLValue::Jvm(h) => h.borrow().display(),
         }
     }
 
@@ -346,6 +356,7 @@ impl APLValue {
             APLValue::Stream(s) => s.borrow().display_name().to_string(),
             APLValue::Process(p) => format!("MPProcess[pid={}]", p.borrow().pid),
             APLValue::Timestamp(ms) => crate::time::format_timestamp(*ms),
+            APLValue::Jvm(h) => h.borrow().display(),
         }
     }
 
@@ -381,6 +392,7 @@ impl APLValue {
             APLValue::Stream(s) => s.borrow().display_name().to_string(),
             APLValue::Process(p) => format!("MPProcess[pid={}]", p.borrow().pid),
             APLValue::Timestamp(ms) => crate::time::format_timestamp(*ms),
+            APLValue::Jvm(h) => h.borrow().display(),
         }
     }
 

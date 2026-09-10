@@ -255,6 +255,13 @@ impl<'a> Parser<'a> {
                         // P3 `time:` namespace (builtins/time-functions.kt).
                         || (ns == "time"
                             && matches!(base, "toTimestamp" | "fromTimestamp" | "format" | "parse"))
+                        // 11a Tier-1 `jvm:` emulation (jvmmod/jvm-module.kt, no-JVM subset).
+                        || (ns == "jvm"
+                            && matches!(base, "toJvmString" | "toJvmShort" | "toJvmInt" | "toJvmLong"
+                                | "toJvmByte" | "toJvmChar" | "toJvmFloat" | "toJvmDouble"
+                                | "toJvmBoolean" | "toJvmByteArray" | "findPrimitiveTypeClass"
+                                | "createArrayInstance" | "arraySetElement" | "instanceOf"
+                                | "findClass"))
                 }
                 None => false,
             }
