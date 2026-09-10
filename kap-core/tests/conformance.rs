@@ -1159,6 +1159,89 @@ fn curated_kap_parity() {
             }
         }
     }
+    // --- 11d `${...}` template rows (CompareTest 1368/1373/1374 +
+    // EncoderAPLFunctionTest 2516/2517): every combination below was
+    // verified element-for-element against kap-jvm-text (oracle uses
+    // angle brackets, normalised here to the port paren display).
+    // Includes the infinity-identity fix (numeric_compare_valid =
+    // !isNaN per number.kt:154; same-class NaN pairs via compareSameType).
+    {
+        let template_cases: Vec<(&str, &str)> = vec![
+            ("5 = 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(0 0 0 0 0 0 0 0 0 0 0 0)"),
+            ("5 ≠ 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(1 1 1 1 1 1 1 1 1 1 1 1)"),
+            ("5 < 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(1 1 1 1 1 1 0 0 0 0 0 0)"),
+            ("5 > 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(0 0 0 0 0 0 1 1 1 1 1 1)"),
+            ("5 ≤ 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(1 1 1 1 1 1 0 0 0 0 0 0)"),
+            ("5 ≥ 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(0 0 0 0 0 0 1 1 1 1 1 1)"),
+            ("5.0 = 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(0 0 0 0 0 0 0 0 0 0 0 0)"),
+            ("5.0 ≠ 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(1 1 1 1 1 1 1 1 1 1 1 1)"),
+            ("5.0 < 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(1 1 1 1 1 1 0 0 0 0 0 0)"),
+            ("5.0 > 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(0 0 0 0 0 0 1 1 1 1 1 1)"),
+            ("5.0 ≤ 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(1 1 1 1 1 1 0 0 0 0 0 0)"),
+            ("5.0 ≥ 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(0 0 0 0 0 0 1 1 1 1 1 1)"),
+            ("5.1 = 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(0 0 0 0 0 0 0 0 0 0 0 0)"),
+            ("5.1 ≠ 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(1 1 1 1 1 1 1 1 1 1 1 1)"),
+            ("5.1 < 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(1 1 1 1 1 1 0 0 0 0 0 0)"),
+            ("5.1 > 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(0 0 0 0 0 0 1 1 1 1 1 1)"),
+            ("5.1 ≤ 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(1 1 1 1 1 1 0 0 0 0 0 0)"),
+            ("5.1 ≥ 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(0 0 0 0 0 0 1 1 1 1 1 1)"),
+            ("5j0 = 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(0 0 0 0 0 0 0 0 0 0 0 0)"),
+            ("5j0 ≠ 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(1 1 1 1 1 1 1 1 1 1 1 1)"),
+            ("5j0 < 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(1 1 1 1 1 1 0 0 0 0 0 0)"),
+            ("5j0 > 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(0 0 0 0 0 0 1 1 1 1 1 1)"),
+            ("5j0 ≤ 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(1 1 1 1 1 1 0 0 0 0 0 0)"),
+            ("5j0 ≥ 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(0 0 0 0 0 0 1 1 1 1 1 1)"),
+            ("5.1j0 = 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(0 0 0 0 0 0 0 0 0 0 0 0)"),
+            ("5.1j0 ≠ 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(1 1 1 1 1 1 1 1 1 1 1 1)"),
+            ("5.1j0 < 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(1 1 1 1 1 1 0 0 0 0 0 0)"),
+            ("5.1j0 > 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(0 0 0 0 0 0 1 1 1 1 1 1)"),
+            ("5.1j0 ≤ 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(1 1 1 1 1 1 0 0 0 0 0 0)"),
+            ("5.1j0 ≥ 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(0 0 0 0 0 0 1 1 1 1 1 1)"),
+            ("(int:asBigint 5) = 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(0 0 0 0 0 0 0 0 0 0 0 0)"),
+            ("(int:asBigint 5) ≠ 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(1 1 1 1 1 1 1 1 1 1 1 1)"),
+            ("(int:asBigint 5) < 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(1 1 1 1 1 1 0 0 0 0 0 0)"),
+            ("(int:asBigint 5) > 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(0 0 0 0 0 0 1 1 1 1 1 1)"),
+            ("(int:asBigint 5) ≤ 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(1 1 1 1 1 1 0 0 0 0 0 0)"),
+            ("(int:asBigint 5) ≥ 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(0 0 0 0 0 0 1 1 1 1 1 1)"),
+            ("(9÷2) = 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(0 0 0 0 0 0 0 0 0 0 0 0)"),
+            ("(9÷2) ≠ 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(1 1 1 1 1 1 1 1 1 1 1 1)"),
+            ("(9÷2) < 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(1 1 1 1 1 1 0 0 0 0 0 0)"),
+            ("(9÷2) > 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(0 0 0 0 0 0 1 1 1 1 1 1)"),
+            ("(9÷2) ≤ 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(1 1 1 1 1 1 0 0 0 0 0 0)"),
+            ("(9÷2) ≥ 6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)", "(0 0 0 0 0 0 1 1 1 1 1 1)"),
+            ("(1.0÷0.0)=(1.0÷0.0)", "1"),
+            ("(¯1.0÷0.0)=(¯1.0÷0.0)", "1"),
+            ("(¯1.0÷0.0)=(1.0÷0.0)", "0"),
+            ("(1.0÷0.0)≠(1.0÷0.0)", "0"),
+            ("(¯1.0÷0.0)≠(¯1.0÷0.0)", "0"),
+            ("(¯1.0÷0.0)≠(1.0÷0.0)", "1"),
+            ("(1.0÷0.0)≡(1.0÷0.0)", "1"),
+            ("(¯1.0÷0.0)≡(¯1.0÷0.0)", "1"),
+            ("(¯1.0÷0.0)≡(1.0÷0.0)", "0"),
+            ("(1.0÷0.0)≢(1.0÷0.0)", "0"),
+            ("(¯1.0÷0.0)≢(¯1.0÷0.0)", "0"),
+            ("(¯1.0÷0.0)≢(1.0÷0.0)", "1"),
+            ("x ← encoder:encode 2 ⋆ ⍳ 300 ⋄ d ← encoder:decode x ⋄ ⍴ d", "(300)"),
+            ("x ← encoder:encode 2 ⋆ ⍳ 300 ⋄ d ← encoder:decode x ⋄ d.(100)", "1267650600228229401496703205376"),
+            ("x ← encoder:encode 2 ⋆ ⍳ 300 ⋄ d ← encoder:decode x ⋄ d.(299)", "1018517988167243043134222844204689080525734196832968125318070224677190649881668353091698688"),
+            ("x ← encoder:encode -2 ⋆ ⍳ 300 ⋄ d ← encoder:decode x ⋄ ⍴ d", "(300)"),
+            ("x ← encoder:encode -2 ⋆ ⍳ 300 ⋄ d ← encoder:decode x ⋄ d.(100)", "-1267650600228229401496703205376"),
+            ("x ← encoder:encode -2 ⋆ ⍳ 300 ⋄ d ← encoder:decode x ⋄ d.(299)", "-1018517988167243043134222844204689080525734196832968125318070224677190649881668353091698688"),
+        ];
+        for (expr, expected) in template_cases {
+            match engine.eval_string(expr) {
+                Ok(v) => {
+                    let got = v.format_display();
+                    if &got != expected {
+                        failures.push(format!("MISMATCH  {expr:?}  expected {expected:?} got {got:?}"));
+                    }
+                }
+                Err(e) => {
+                    failures.push(format!("ERROR    {expr:?}  -> {e}"));
+                }
+            }
+        }
+    }
     for (expr, expected) in cases {
         // Render with `format_display` (REPL form: strings quoted, `⍬` for null, `@` for
         // char) to match Real Kap's reference output, not the bare `format_value` used by

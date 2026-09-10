@@ -313,6 +313,30 @@ def main():
                 # removed, and replaced by `int:ensureGeneric`). The port has one
                 # backend, so record the plain form (marker stripped).
                 expr = expr.replace('{GENERIC}', '')
+                # `${…}` Kotlin string templates with statically-known bindings
+                # (11d): expand to literal Kap so the row is scorable (all five
+                # are expected=null: any produced value scores). `⋄`-chains cover
+                # EVERY combination, so any failure keeps the row red; the full
+                # matrices are additionally oracle-verified in curated rows. The
+                # two fails-kind template rows are untouched (they already score
+                # via parse errors).
+                if '${' in expr and kind == 'eval':
+                    base = os.path.basename(path)
+                    if (base, name) == ('CompareTest.kt', 'compareNumbersWithAllTypes'):
+                        _vals = ['5', '5.0', '5.1', '5j0', '5.1j0', '(int:asBigint 5)', '(9÷2)']
+                        _names = ['=', '≠', '<', '>', '≤', '≥']
+                        _tail = '6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)'
+                        expr = ' ⋄ '.join([_v + ' ' + _n + ' ' + _tail for _v in _vals for _n in _names])
+                    elif (base, name) == ('CompareTest.kt', 'compareEqualsInfinity'):
+                        _pairs = [('(1.0÷0.0)', '(1.0÷0.0)'), ('(¯1.0÷0.0)', '(¯1.0÷0.0)'), ('(¯1.0÷0.0)', '(1.0÷0.0)')]
+                        expr = ' ⋄ '.join([_a + '=' + _b for _a, _b in _pairs] + [_a + '≠' + _b for _a, _b in _pairs])
+                    elif (base, name) == ('CompareTest.kt', 'compareSameInfinity'):
+                        _pairs = [('(1.0÷0.0)', '(1.0÷0.0)'), ('(¯1.0÷0.0)', '(¯1.0÷0.0)'), ('(¯1.0÷0.0)', '(1.0÷0.0)')]
+                        expr = ' ⋄ '.join([_a + '≡' + _b for _a, _b in _pairs] + [_a + '≢' + _b for _a, _b in _pairs])
+                    elif (base, name) == ('EncoderAPLFunctionTest.kt', 'encodeLargePositiveIntegers'):
+                        expr = 'x ← encoder:encode 2 ⋆ ⍳ 300 ⋄ encoder:decode x'
+                    elif (base, name) == ('EncoderAPLFunctionTest.kt', 'encodeLargeNegativeIntegers'):
+                        expr = 'x ← encoder:encode -2 ⋆ ⍳ 300 ⋄ encoder:decode x'
                 records.append({
                     'file': os.path.relpath(path, ARRAY_ROOT),
                     'test': name,

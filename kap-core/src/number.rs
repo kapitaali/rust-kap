@@ -251,7 +251,9 @@ impl KapNumber {
     fn numeric_compare_valid(&self) -> bool {
         match self {
             KapNumber::Complex(_, im) => *im == 0.0,
-            KapNumber::Double(d) => d.is_finite(),
+            // Kotlin `KapDouble.numericCompareValid` (number.kt:154): only NaN
+            // is invalid — infinities compare normally via `numericCompare`.
+            KapNumber::Double(d) => !d.is_nan(),
             _ => true,
         }
     }
@@ -280,6 +282,13 @@ impl KapNumber {
                 return im;
             }
             return Self::cmp_doubles_nan(*ar, *br);
+        }
+        // Kotlin `compareTotalOrdering` (types.kt:791-803): same-class but
+        // invalid pairs (only NaN doubles reach here now) go to
+        // `compareSameType` — NaN ≡ NaN — instead of collapsing to Equal by
+        // type position.
+        if let (KapNumber::Double(x), KapNumber::Double(y)) = (a, b) {
+            return Self::cmp_doubles_nan(*x, *y);
         }
         // Distinct kinds (or an invalid complex) → by Kap type sort position
         // (Long=0, BigInt=1, Rational=2, Double=3, Complex=4).
