@@ -21,6 +21,22 @@ use crate::{APLValue, AplError, AplRef, Engine, Environment};
 use std::collections::HashSet;
 use std::rc::Rc;
 
+/// Convert a `std::io::Error` into a Kap runtime error (Kotlin
+/// `withIOExceptionConversions` wraps IO failures the same way).
+fn io_err(e: impl std::fmt::Display) -> AplError {
+    AplError::runtime(format!("IO error: {}", e))
+}
+
+/// Extra `io:readdir` columns (`ReaddirFunction.OutputType`, io_functions.kt).
+#[derive(Clone, Copy)]
+enum ReaddirCol {
+    Size,
+    Type,
+}
+
+/// Shared handle to an open Kap byte stream (`APLValue::Stream` payload).
+type IoStream = AplRef<std::cell::RefCell<crate::stream::KapStream>>;
+
 /// Adjust a (possibly negative) index into a valid 0-based position within `axis_size`,
 /// matching Kap's `Dimensions.checkAndAdjustSelectedIndex` (dimension.kt):
 /// non-negative `i` must satisfy `0 <= i < axis_size`; negative `i` counts from the end
@@ -2067,6 +2083,8 @@ impl Engine {
             APLValue::Deferred { .. } => false,
             APLValue::Symbol { .. } => true,
             APLValue::Map(_) => true,
+            APLValue::Stream(_) => true,
+            APLValue::Process(_) => true,
         }
     }
 
@@ -2382,6 +2400,91 @@ impl Engine {
         let anon = format!("<anonymous applyRef {}>", n);
         env.define(&anon, &None, fv);
         Instr::DynamicRef { name: anon, namespace: None }
+    }
+
+    /// `⍠` on a process value (`ProcessKapClass.resolveMethod`, execprocess.kt):
+    /// `:stream :stdin`/`:stdout`/`:stderr` yields the stdio stream;
+    /// `:waitForExit ms` yields the exit code (`nil` on timeout).
+    /// Anything else is `KapMethodNotFound` (objects.kt:6-7).
+    fn process_method_call(
+        &self,
+        p: &AplRef<std::cell::RefCell<crate::stream::KapProcess>>,
+        method: &str,
+        method_namespace: &Option<String>,
+        right: &Box<Instr>,
+        env: &AplRef<Environment>,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        // Method names are keyword-namespace symbols (`:stream`, `:waitForExit`);
+        // display matches `nameWithNamespace` (`:stream`, cf. `default:m`).
+        let disp = match method_namespace {
+            Some(ns) if ns == "keyword" => format!(":{}", method),
+            Some(ns) => format!("{}:{}", ns, method),
+            None => format!("default:{}", method),
+        };
+        let no_method = || {
+            AplError::runtime(format!(
+                "Method does not exist: {}. Object: MPProcess[pid={}]",
+                disp,
+                p.borrow().pid
+            ))
+        };
+        if method_namespace.as_deref() != Some("keyword") {
+            return Err(no_method());
+        }
+        match method {
+            "stream" => {
+                let arg = self.eval_instr(right, env)?.force(self)?;
+                let (name, ns) = match arg.as_ref() {
+                    APLValue::Symbol { name, namespace } => (name.clone(), namespace.clone()),
+                    _ => {
+                        return Err(AplError::runtime(
+                            "⍠:stream: argument must be a symbol".into(),
+                        ))
+                    }
+                };
+                if ns.as_deref() != Some("keyword") {
+                    return Err(AplError::runtime(format!(
+                        "Unexpected keyword: {}",
+                        match ns {
+                            Some(n) => format!("{}:{}", n, name),
+                            None => format!("default:{}", name),
+                        }
+                    )));
+                }
+                let proc = p.borrow();
+                let s = match name.as_str() {
+                    "stdin" => proc.stdin.clone(),
+                    "stdout" => proc.stdout.clone(),
+                    "stderr" => proc.stderr.clone(),
+                    _ => {
+                        return Err(AplError::runtime(format!(
+                            "Unexpected keyword: :{}",
+                            name
+                        )))
+                    }
+                };
+                drop(proc);
+                s.map(|v| Ok(Rc::new(APLValue::Stream(v))))
+                    .unwrap_or_else(|| Err(no_method()))
+            }
+            "waitForExit" => {
+                let arg = self.eval_instr(right, env)?.force(self)?;
+                let ms = match arg.as_ref() {
+                    APLValue::Number(n) => n.as_double(),
+                    _ => {
+                        return Err(AplError::runtime(
+                            "⍠:waitForExit: argument must be a number".into(),
+                        ))
+                    }
+                };
+                let code = p.borrow_mut().wait_timeout(ms).map_err(io_err)?;
+                match code {
+                    Some(c) => Ok(Rc::new(APLValue::Number(KapNumber::Long(c as i64)))),
+                    None => Ok(Rc::new(APLValue::Nil)),
+                }
+            }
+            _ => Err(no_method()),
+        }
     }
 
     fn eval_apply(
@@ -3002,7 +3105,11 @@ impl Engine {
                 }
                 let obj = self.eval_instr(object, env)?.force(self)?;
                 // Default `KapClass.resolveMethod` (objects.kt:14-15) throws
-                // for every class except `map` (`MapClass`, method-calls.kt:9).
+                // for every class except `map` (`MapClass`, method-calls.kt:9)
+                // and `process` (`ProcessKapClass`, execprocess.kt).
+                if let APLValue::Process(p) = obj.as_ref() {
+                    return self.process_method_call(p, method, method_namespace, right, env);
+                }
                 let map = match obj.as_ref() {
                     APLValue::Map(m) => m,
                     _ => return Err(AplError::runtime("Invalid target object".into())),
@@ -3358,6 +3465,18 @@ impl Engine {
                 // fails only because the port applies `{…}` as data, a
                 // separate gap — the `f ⇐ {…}` name form works).
                 "catch" => return self.catch_apply(func, left, right, env),
+                // `atLeave` (Kotlin AtLeaveScopeOperator, div_functions.kt:235):
+                // `cleanup atLeave value` — pushes a frame-release callback that
+                // runs `cleanup` on the value when the current scope exits, and
+                // evaluates to the value unchanged. The port has no scope-exit
+                // hook (D1 environments drop by Rc); the callback timing is
+                // unobservable in straight-line evaluation, so this returns the
+                // right arg as-is. Documented divergence, not a stub: the VALUE
+                // semantics are exact.
+                "atLeave" => {
+                    let v = self.eval_instr(right, env)?.force(self)?;
+                    return Ok(v);
+                }
                 "⌸" | "key" => return self.key_apply(func, left, right, env),
                 other => Err(AplError::runtime(format!("unknown adverb: {}", other))),
             };
@@ -3483,6 +3602,13 @@ impl Engine {
             Some(l) => Some(self.eval_instr(l, env)?.force(self)?),
             None => None,
         };
+        // Secure mode (Kotlin `Engine.secureMode`, engine.kt:360+): file/network
+        // natives are never registered, so resolving them fails lookup with
+        // `VariableNotAssigned` (the oracle runs SecureTest.kt with
+        // `secureMode = true`; the harness mirrors it per case).
+        if self.secure_mode.get() && Self::is_secure_gated(&name) {
+            return Err(AplError::runtime(format!("Variable not assigned: {}", name)));
+        }
         match name.as_str() {
             "+" => {
                 // Ambivalent: monadic `+ x` = identity (return x); dyadic = add.
@@ -3585,6 +3711,125 @@ impl Engine {
                 };
                 println!("{}", rendered);
                 Ok(right_val)
+            }
+            // `io:` / `io2:` file + stream natives (engine.kt:361-404,
+            // builtins/io_functions.kt). `io2:` multi-arg calls arrive as
+            // `Apply{fn, None, List[args]}` from `⟦…⟧` (Kotlin
+            // `MultiArgumentAPLFunction` unpacks the `APLList` the same way).
+            "io:read" => {
+                // `ReadFunction`: lines of a file (or stream) as strings.
+                let forced = right_val.force(self)?;
+                if let Some(s) = self.stream_value(&forced)? {
+                    let lines = s.borrow_mut().read_all_lines().map_err(io_err)?;
+                    Ok(Self::str_vec(lines))
+                } else {
+                    let path = Self::kap_string(&forced, "io:read")?;
+                    let text = std::fs::read_to_string(&path).map_err(io_err)?;
+                    Ok(Self::str_vec(text.lines().map(|l| l.to_string()).collect()))
+                }
+            }
+            "io:readFile" => {
+                // `ReadFileFunction`: whole file as one string.
+                let path = Self::kap_string(&right_val.force(self)?, "io:readFile")?;
+                let text = std::fs::read_to_string(&path).map_err(io_err)?;
+                Ok(Rc::new(APLValue::Str(text)))
+            }
+            "io:readdir" => {
+                // `ReaddirFunction`: N×1 name matrix; dyadic `:size`/`:type`
+                // selectors add columns (engine.kt:376).
+                let path = Self::kap_string(&right_val.force(self)?, "io:readdir")?;
+                let selectors = match left_val.as_ref() {
+                    None => Vec::new(),
+                    Some(lv) => Self::readdir_selectors(&lv.force(self)?)?,
+                };
+                Self::io_readdir(&path, &selectors)
+            }
+            "io2:open" => {
+                // `OpenFunction` (1-2 args): path [+ `:input`/`:output` options].
+                let args = Self::call_args(&right_val.force(self)?);
+                if args.is_empty() || args.len() > 2 {
+                    return Err(AplError::runtime("io2:open: expected 1 or 2 arguments".into()));
+                }
+                let path = Self::kap_string(&args[0], "io2:open")?;
+                let output = if args.len() == 2 {
+                    Self::open_output_mode(&args[1])?
+                } else {
+                    false
+                };
+                Self::io2_open(&path, output)
+            }
+            "io2:read" => {
+                // `ReadBytesFromStreamFunction` (1-2 args): raw bytes as numbers.
+                let args = Self::call_args(&right_val.force(self)?);
+                if args.is_empty() || args.len() > 2 {
+                    return Err(AplError::runtime("io2:read: expected 1 or 2 arguments".into()));
+                }
+                let stream = Self::require_input_stream(&args[0], "io2:read")?;
+                let limit = if args.len() == 2 {
+                    Some(Self::kap_long(&args[1], "io2:read")?)
+                } else {
+                    None
+                };
+                let bytes = stream
+                    .borrow_mut()
+                    .read_bytes(limit.map(|n| n.max(0) as usize))
+                    .map_err(io_err)?;
+                Ok(Self::byte_vec(bytes))
+            }
+            "io2:readLine" => {
+                // `ReadLineFromStreamFunction`: next line or `null` at EOF.
+                let stream = Self::require_input_stream(&right_val.force(self)?, "io2:readLine")?;
+                let line = stream.borrow_mut().read_line().map_err(io_err)?;
+                match line {
+                    Some(s) => Ok(Rc::new(APLValue::Str(s))),
+                    None => Ok(Rc::new(APLValue::Nil)),
+                }
+            }
+            "io2:lines" => {
+                // `ReadAllLinesFromStreamFunction`.
+                let stream = Self::require_input_stream(&right_val.force(self)?, "io2:lines")?;
+                let lines = stream.borrow_mut().read_all_lines().map_err(io_err)?;
+                Ok(Self::str_vec(lines))
+            }
+            "io2:arrayStream" => {
+                // `ArrayStreamFunction`: bytes of the arg as an input stream.
+                let bytes = Self::kap_bytes(&right_val.force(self)?)?;
+                Ok(Rc::new(APLValue::Stream(Rc::new(std::cell::RefCell::new(
+                    crate::stream::KapStream::input(crate::stream::StreamReader::Memory {
+                        data: bytes,
+                        pos: 0,
+                    }),
+                )))))
+            }
+            "io2:write" => {
+                // `WriteBytesToStreamFunction` (2 args: stream, data).
+                let args = Self::call_args(&right_val.force(self)?);
+                if args.len() != 2 {
+                    return Err(AplError::runtime("io2:write: expected 2 arguments".into()));
+                }
+                let stream = Self::require_output_stream(&args[0])?;
+                let bytes = Self::kap_bytes(&args[1])?;
+                stream.borrow_mut().write_bytes(&bytes).map_err(io_err)?;
+                Ok(Rc::new(APLValue::Null))
+            }
+            "io2:flush" => {
+                let stream = Self::require_output_stream(&right_val.force(self)?)?;
+                stream.borrow_mut().flush().map_err(io_err)?;
+                Ok(Rc::new(APLValue::Null))
+            }
+            "io2:exec" => {
+                // `ExecFunction`: rank-1 string vector (cmd + args) → process.
+                Self::io2_exec(&right_val.force(self)?)
+            }
+            "close" => {
+                // `CloseAPLFunction` (engine.kt:1163): close + return the value.
+                let v = right_val.force(self)?;
+                if let APLValue::Stream(s) = v.as_ref() {
+                    s.borrow_mut().close();
+                    Ok(v.clone())
+                } else {
+                    Err(AplError::runtime("close: value is not closeable".into()))
+                }
             }
             // `math:*` — P2 (ROADMAP §5) port of engine.kt:436–466 registrations
             // (`SinAPLFunction` etc. in math_functions.kt, prime.kt). Monadic fns are
@@ -5924,8 +6169,43 @@ impl Engine {
                 // knows it (two-gate rule).
                 | "comp"
                 | "labels" | "hasLabels"
- )
- }
+                // `io:` / `io2:` file + stream natives (engine.kt:361-404,
+                // builtins/io_functions.kt + execprocess.kt) + `close`
+                // (engine.kt:1163). Two-gate rule: parser admits them via
+                // is_known_fn; listed here for the eval-time late gate.
+                | "io:read" | "io:readFile" | "io:readdir"
+                | "io2:open" | "io2:read" | "io2:readLine" | "io2:lines"
+                | "io2:arrayStream" | "io2:write" | "io2:flush" | "io2:exec"
+                | "close"
+        )
+    }
+
+    /// Builtins never registered in secure mode (Kotlin engine.kt `if
+    /// (!secureMode)` blocks + `JsonAPLModule`: file/network natives). Listed
+    /// for the eval-time secure gate above (two-gate rule); `json:read` is
+    /// included ahead of its implementation so the gate stays complete.
+    fn is_secure_gated(name: &str) -> bool {
+        matches!(
+            name,
+            "io:read"
+                | "io:write"
+                | "io:readLine"
+                | "io:writeCsv"
+                | "io:readCsv"
+                | "io:readFile"
+                | "io:load"
+                | "io:readdir"
+                | "io2:open"
+                | "io2:read"
+                | "io2:write"
+                | "io2:readLine"
+                | "io2:arrayStream"
+                | "io2:exec"
+                | "io2:lines"
+                | "io2:flush"
+                | "json:read"
+        )
+    }
 
     /// Apply a user-defined lambda. `split` = number of leading params that are bound to
     /// the *left* (dyadic) argument; the remainder are bound to the right argument.
@@ -6738,6 +7018,357 @@ impl Engine {
             "plain" => Ok(value.format_value()),
             other => Err(AplError::runtime(format!("invalid io:print style: {}", other))),
         }
+    }
+
+    // --- `io:` / `io2:` stream + file helpers (builtins/io_functions.kt) ---
+
+    /// Split a multi-arg `⟦…⟧` call: a `List` yields its elements, anything else
+    /// is the single argument (Kotlin `MultiArgumentAPLFunction` arg unpacking).
+    fn call_args(v: &AplRef<APLValue>) -> Vec<AplRef<APLValue>> {
+        match v.as_ref() {
+            APLValue::List(a) => a.elements(),
+            _ => vec![v.clone()],
+        }
+    }
+
+    /// Kap string value → Rust string (`Str`, `Char`, or char array).
+    fn kap_string(v: &AplRef<APLValue>, who: &str) -> Result<String, AplError> {
+        match v.as_ref() {
+            APLValue::Str(s) => Ok(s.clone()),
+            APLValue::Char(c) => Ok(c.to_string()),
+            APLValue::Array(a) => {
+                let mut out = String::new();
+                for e in a.elements() {
+                    match e.as_ref() {
+                        APLValue::Char(c) => out.push(*c),
+                        APLValue::Str(s) => out.push_str(s),
+                        _ => {
+                            return Err(AplError::runtime(format!(
+                                "{}: value is not a string",
+                                who
+                            )))
+                        }
+                    }
+                }
+                Ok(out)
+            }
+            _ => Err(AplError::runtime(format!("{}: value is not a string", who))),
+        }
+    }
+
+    /// Kap number → i64 (`ensureNumber().asInt()`).
+    fn kap_long(v: &AplRef<APLValue>, who: &str) -> Result<i64, AplError> {
+        match v.as_ref() {
+            APLValue::Number(n) => {
+                n.as_long().map_err(|_| AplError::runtime(format!("{}: not an integer", who)))
+            }
+            _ => Err(AplError::runtime(format!("{}: not a number", who))),
+        }
+    }
+
+    /// Rank-1 vector of strings (Kotlin `APLArrayList(dimensionsOfSize(n))` of
+    /// `APLString`).
+    fn str_vec(lines: Vec<String>) -> AplRef<APLValue> {
+        let elems: Vec<AplRef<APLValue>> =
+            lines.into_iter().map(|s| Rc::new(APLValue::Str(s))).collect();
+        Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![elems.len()],
+            ArrayData::Nested(elems),
+        ))))
+    }
+
+    /// Raw bytes as 0-255 numbers (Kotlin `ReadBytesFromStreamFunction` builder).
+    fn byte_vec(bytes: Vec<u8>) -> AplRef<APLValue> {
+        let longs: Vec<i64> = bytes.into_iter().map(|b| b as i64).collect();
+        Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![longs.len()],
+            ArrayData::Long(longs),
+        ))))
+    }
+
+    /// `Some(stream)` for stream values (forcing deferreds first), else `None`.
+    fn stream_value(&self, v: &AplRef<APLValue>) -> Result<Option<IoStream>, AplError> {
+        let f = v.force(self)?;
+        match f.as_ref() {
+            APLValue::Stream(s) => Ok(Some(s.clone())),
+            _ => Ok(None),
+        }
+    }
+
+    fn require_input_stream(v: &AplRef<APLValue>, who: &str) -> Result<IoStream, AplError> {
+        match v.as_ref() {
+            APLValue::Stream(s) if s.borrow().is_input() => Ok(s.clone()),
+            APLValue::Stream(_) => Err(AplError::runtime(format!(
+                "{}: stream is not readable",
+                who
+            ))),
+            other => Err(AplError::runtime(format!(
+                "Argument is not of type: binary input stream, got: {}",
+                other.class_name()
+            ))),
+        }
+    }
+
+    fn require_output_stream(v: &AplRef<APLValue>) -> Result<IoStream, AplError> {
+        match v.as_ref() {
+            APLValue::Stream(s) if !s.borrow().is_input() => Ok(s.clone()),
+            APLValue::Stream(_) => Err(AplError::runtime(
+                "io2:write: stream is not writable".into(),
+            )),
+            other => Err(AplError::runtime(format!(
+                "Argument is not of type: binary output stream, got: {}",
+                other.class_name()
+            ))),
+        }
+    }
+
+    /// `asByteArray` (types.kt:666): rank-1 numbers (0-255) or chars → bytes.
+    fn kap_bytes(v: &AplRef<APLValue>) -> Result<Vec<u8>, AplError> {
+        match v.as_ref() {
+            APLValue::Str(s) => Ok(s.as_bytes().to_vec()),
+            APLValue::Char(c) => {
+                let mut buf = [0u8; 4];
+                Ok(c.encode_utf8(&mut buf).as_bytes().to_vec())
+            }
+            APLValue::Array(a) => {
+                if a.dimensions.len() != 1 {
+                    return Err(AplError::runtime(
+                        "Value must be a scalar or a one-dimensional array".into(),
+                    ));
+                }
+                let elems = a.elements();
+                if elems.is_empty() {
+                    return Ok(Vec::new());
+                }
+                match elems[0].as_ref() {
+                    APLValue::Number(_) => {
+                        let mut out = Vec::with_capacity(elems.len());
+                        for (i, e) in elems.iter().enumerate() {
+                            let n = match e.as_ref() {
+                                APLValue::Number(n) => n
+                                    .as_long()
+                                    .map_err(|_| AplError::runtime(format!(
+                                        "Element at index {} in array is not a byte",
+                                        i
+                                    )))?,
+                                _ => {
+                                    return Err(AplError::runtime(format!(
+                                        "Element at index {} in array is not a byte",
+                                        i
+                                    )))
+                                }
+                            };
+                            if !(0..=255).contains(&n) {
+                                return Err(AplError::runtime(format!(
+                                    "Element at index {} in array is not a byte: {}",
+                                    i, n
+                                )));
+                            }
+                            out.push(n as u8);
+                        }
+                        Ok(out)
+                    }
+                    _ => {
+                        let mut out = String::new();
+                        for e in &elems {
+                            match e.as_ref() {
+                                APLValue::Char(c) => out.push(*c),
+                                APLValue::Str(s) => out.push_str(s),
+                                _ => {
+                                    return Err(AplError::runtime(
+                                        "Value cannot be encoded as bytes".into(),
+                                    ))
+                                }
+                            }
+                        }
+                        Ok(out.into_bytes())
+                    }
+                }
+            }
+            _ => Err(AplError::runtime("Value cannot be encoded as bytes".into())),
+        }
+    }
+
+    /// `io2:open` options: scalar or rank-1 array of `:input`/`:output` keywords
+    /// (io_functions.kt:140-190). Returns true for output mode.
+    fn open_output_mode(v: &AplRef<APLValue>) -> Result<bool, AplError> {
+        let members: Vec<AplRef<APLValue>> = match v.as_ref() {
+            APLValue::Symbol { .. } => vec![v.clone()],
+            APLValue::Array(a) => {
+                if a.dimensions.len() != 1 {
+                    return Err(AplError::runtime(
+                        "Options should be a scalar or a 1-dimensional array".into(),
+                    ));
+                }
+                a.elements()
+            }
+            _ => {
+                return Err(AplError::runtime(
+                    "Options should be a scalar or a 1-dimensional array".into(),
+                ))
+            }
+        };
+        let mut mode: Option<bool> = None;
+        for m in members {
+            if let APLValue::Symbol { name, namespace } = m.as_ref() {
+                if namespace.as_deref() != Some("keyword") {
+                    continue;
+                }
+                match name.as_str() {
+                    "input" => {
+                        if mode.is_some() {
+                            return Err(AplError::runtime("Duplicate mode argument".into()));
+                        }
+                        mode = Some(false);
+                    }
+                    "output" => {
+                        if mode.is_some() {
+                            return Err(AplError::runtime("Duplicate mode argument".into()));
+                        }
+                        mode = Some(true);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(mode.unwrap_or(false))
+    }
+
+    /// `io2:open`: open a file for reading or writing.
+    fn io2_open(path: &str, output: bool) -> Result<AplRef<APLValue>, AplError> {
+        use crate::stream::{KapStream, StreamReader, StreamWriter};
+        if output {
+            let f = std::fs::File::create(path)
+                .map_err(|e| AplError::runtime(format!("Error opening file: {}", e)))?;
+            Ok(Rc::new(APLValue::Stream(Rc::new(std::cell::RefCell::new(
+                KapStream::output(StreamWriter::File(f)),
+            )))))
+        } else {
+            let f = std::fs::File::open(path)
+                .map_err(|e| AplError::runtime(format!("Error opening file: {}", e)))?;
+            Ok(Rc::new(APLValue::Stream(Rc::new(std::cell::RefCell::new(
+                KapStream::input(StreamReader::File(f)),
+            )))))
+        }
+    }
+
+    /// Dyadic `io:readdir` left arg: `:size`/`:type` keyword (scalar or rank-1).
+    fn readdir_selectors(v: &AplRef<APLValue>) -> Result<Vec<ReaddirCol>, AplError> {
+        let members: Vec<AplRef<APLValue>> = match v.as_ref() {
+            APLValue::Symbol { .. } => vec![v.clone()],
+            APLValue::Array(a) => {
+                if a.dimensions.len() != 1 {
+                    return Err(AplError::runtime(
+                        "Selector must be a scalar or a rank-1 array".into(),
+                    ));
+                }
+                a.elements()
+            }
+            _ => {
+                return Err(AplError::runtime(
+                    "Selector must be a scalar or a rank-1 array".into(),
+                ))
+            }
+        };
+        let mut out = Vec::new();
+        for m in members {
+            match m.as_ref() {
+                APLValue::Symbol { name, namespace } if namespace.as_deref() == Some("keyword") => {
+                    match name.as_str() {
+                        "size" => out.push(ReaddirCol::Size),
+                        "type" => out.push(ReaddirCol::Type),
+                        _ => {
+                            return Err(AplError::runtime(format!(
+                                "Illegal selector: :{}",
+                                name
+                            )))
+                        }
+                    }
+                }
+                APLValue::Symbol { name, namespace } => {
+                    let disp = match namespace {
+                        Some(ns) => format!("{}:{}", ns, name),
+                        None => format!("default:{}", name),
+                    };
+                    return Err(AplError::runtime(format!("Illegal selector: {}", disp)));
+                }
+                _ => {
+                    return Err(AplError::runtime("Selector must be a symbol".into()));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// `io:readdir`: N×(1+k) matrix of entry names + selected columns.
+    fn io_readdir(path: &str, selectors: &[ReaddirCol]) -> Result<AplRef<APLValue>, AplError> {
+        let rd = std::fs::read_dir(path).map_err(io_err)?;
+        let mut names: Vec<String> = Vec::new();
+        let mut sizes: Vec<i64> = Vec::new();
+        let mut kinds: Vec<AplRef<APLValue>> = Vec::new();
+        for entry in rd {
+            let entry = entry.map_err(io_err)?;
+            names.push(entry.file_name().to_string_lossy().into_owned());
+            let md = entry.metadata().map_err(io_err)?;
+            sizes.push(md.len() as i64);
+            let kw = if md.is_file() {
+                "file"
+            } else if md.is_dir() {
+                "directory"
+            } else {
+                "undefined"
+            };
+            kinds.push(Rc::new(APLValue::Symbol {
+                name: kw.to_string(),
+                namespace: Some("keyword".to_string()),
+            }));
+        }
+        let ncols = 1 + selectors.len();
+        let mut elems: Vec<AplRef<APLValue>> = Vec::with_capacity(names.len() * ncols);
+        for i in 0..names.len() {
+            elems.push(Rc::new(APLValue::Str(names[i].clone())));
+            for s in selectors {
+                match s {
+                    ReaddirCol::Size => {
+                        elems.push(Rc::new(APLValue::Number(KapNumber::Long(sizes[i]))))
+                    }
+                    ReaddirCol::Type => elems.push(kinds[i].clone()),
+                }
+            }
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![names.len(), ncols],
+            ArrayData::Nested(elems),
+        )))))
+    }
+
+    /// `io2:exec`: rank-1 string vector (command + args) → process.
+    fn io2_exec(v: &AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        let (dims, count) = match v.as_ref() {
+            APLValue::Array(a) => (a.dimensions.clone(), a.element_count()),
+            _ => {
+                return Err(AplError::runtime(
+                    "Expected an array of strings. Got dimensions: []".into(),
+                ))
+            }
+        };
+        if dims.len() != 1 || count == 0 {
+            return Err(AplError::runtime(format!(
+                "Expected an array of strings. Got dimensions: {:?}",
+                dims
+            )));
+        }
+        let mut words: Vec<String> = Vec::with_capacity(count);
+        // NOTE: `valueAt` order = ravel order; elements() matches it.
+        if let APLValue::Array(a) = v.as_ref() {
+            for e in a.elements() {
+                words.push(Self::kap_string(&e, "io2:exec")?);
+            }
+        }
+        let proc = crate::stream::KapProcess::spawn(&words[0], &words[1..]).map_err(io_err)?;
+        Ok(Rc::new(APLValue::Process(Rc::new(std::cell::RefCell::new(
+            proc,
+        )))))
     }
 
     // --- `unicode:*` builtins (Real Kap UnicodeModule) ---
@@ -12144,7 +12775,8 @@ impl Engine {
             | APLValue::Str(_)
             | APLValue::List(_) | APLValue::Map(_) | APLValue::Symbol { .. }
             | APLValue::Deferred { .. } | APLValue::UserFn { .. } | APLValue::UserOp { .. }
-            | APLValue::Escape { .. } | APLValue::NonBoundFn { .. } => {
+            | APLValue::Escape { .. } | APLValue::NonBoundFn { .. }
+            | APLValue::Stream(_) | APLValue::Process(_) => {
                 out.push(Rc::new(value.clone()));
             }
             APLValue::Array(arr) => {
@@ -14098,6 +14730,12 @@ impl Engine {
             }
             APLValue::Map(_) => {
                 Err(AplError::runtime("cannot use a map as an array element".into()))
+            }
+            APLValue::Stream(_) => {
+                Err(AplError::runtime("cannot use a stream as an array element".into()))
+            }
+            APLValue::Process(_) => {
+                Err(AplError::runtime("cannot use a process as an array element".into()))
             }
         }
     }

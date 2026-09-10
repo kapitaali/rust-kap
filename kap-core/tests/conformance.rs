@@ -120,6 +120,12 @@ fn classify_with_timeout(c: &Case) -> Outcome {
         .stack_size(64 * 1024 * 1024)
         .spawn(move || {
             let engine = Engine::new();
+            // Mirror the oracle's per-suite configuration: `SecureTest.kt` runs
+            // with `secureMode = true` (file/network natives unregistered), so
+            // those rows must fail lookup here too (Kotlin `VariableNotAssigned`).
+            if c.file.ends_with("SecureTest.kt") {
+                engine.set_secure_mode(true);
+            }
             for candidate in [
                 concat!(env!("CARGO_MANIFEST_DIR"), "/../../array"),
                 concat!(env!("CARGO_MANIFEST_DIR"), "/../array"),

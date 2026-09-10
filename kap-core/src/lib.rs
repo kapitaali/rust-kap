@@ -25,6 +25,7 @@ pub mod evaluator;
 pub mod encoder;
 pub mod map;
 pub mod session;
+pub mod stream;
 
 /// A persistent, REPL-like Kap evaluation context. State (variables, user
 /// functions) survives across `eval` calls. See [`session::Session`].
@@ -127,6 +128,16 @@ pub enum APLValue {
     /// (type-discriminating). Created by `map:with`, read by `map:get`, etc.
     /// See `map.rs` / `builtins/map.kt`.
     Map(KapMap),
+    /// An open byte stream (Kotlin `APLBinaryInputStream` /
+    /// `APLBinaryOutputStream`, `builtins/io_functions.kt:108-138`). Created by
+    /// `io2:open` / `io2:arrayStream` / process `:stream`. Interior-mutable
+    /// (read position, buffers) behind `Rc<RefCell<…>>` — D1 single-threaded.
+    /// See `stream.rs`.
+    Stream(AplRef<std::cell::RefCell<stream::KapStream>>),
+    /// A spawned OS process (Kotlin `ProcessKapValueWrapper`,
+    /// `builtins/execprocess.kt`). Created by `io2:exec`; its stdio pipes are
+    /// shared with every `⍠:stream` call. See `stream.rs`.
+    Process(AplRef<std::cell::RefCell<stream::KapProcess>>),
 }
 
 impl APLValue {
@@ -173,6 +184,12 @@ impl APLValue {
             APLValue::NonBoundFn { .. } => "function",
             APLValue::Symbol { .. } => "symbol",
             APLValue::Map(_) => "map",
+            // Kotlin `SystemClass.INTERNAL` (io_functions.kt:15-27): streams are
+            // opaque wrapped values; `typeof` renders `kap:internal`.
+            APLValue::Stream(_) => "internal",
+            // Kotlin `SystemClass.PROCESS` (execprocess.kt: `ProcessKapClass`,
+            // `ModuleClass` named "process").
+            APLValue::Process(_) => "process",
         }
     }
 
@@ -214,6 +231,10 @@ impl APLValue {
                 None => name.clone(),
             },
             APLValue::Map(m) => format!("map[size={}]", m.len()),
+            // Kotlin `formatted()` (io_functions.kt:108-138): the stream NAME.
+            APLValue::Stream(s) => s.borrow().display_name().to_string(),
+            // Kotlin `ProcessKapValueWrapper.formatted` (execprocess.kt).
+            APLValue::Process(p) => format!("MPProcess[pid={}]", p.borrow().pid),
         }
     }
 
@@ -247,6 +268,8 @@ impl APLValue {
                 None => name.clone(),
             },
             APLValue::Map(m) => format!("map[size={}]", m.len()),
+            APLValue::Stream(s) => s.borrow().display_name().to_string(),
+            APLValue::Process(p) => format!("MPProcess[pid={}]", p.borrow().pid),
         }
     }
 
@@ -310,6 +333,8 @@ impl APLValue {
                 None => name.clone(),
             },
             APLValue::Map(m) => format!("map[size={}]", m.len()),
+            APLValue::Stream(s) => s.borrow().display_name().to_string(),
+            APLValue::Process(p) => format!("MPProcess[pid={}]", p.borrow().pid),
         }
     }
 
@@ -342,6 +367,8 @@ impl APLValue {
                 None => name.clone(),
             },
             APLValue::Map(m) => format!("map[size={}]", m.len()),
+            APLValue::Stream(s) => s.borrow().display_name().to_string(),
+            APLValue::Process(p) => format!("MPProcess[pid={}]", p.borrow().pid),
         }
     }
 
@@ -1062,6 +1089,12 @@ pub struct Engine {
     /// `engine.createAnonymousSymbol("applyRef")`, engine.kt:754). Each snapshot
     /// mints a new name so closures created in a loop never share one slot.
     pub anon_syms: std::rc::Rc<std::cell::Cell<usize>>,
+    /// Secure mode (Kotlin `Engine.secureMode`): file/network natives (`io:`,
+    /// `io2:`, `http:`, `json:read`) are never registered, so resolving them
+    /// fails lookup (`VariableNotAssigned`). Off by default; the conformance
+    /// harness enables it for `SecureTest.kt` rows (the oracle runs those with
+    /// `secureMode = true`).
+    pub secure_mode: std::cell::Cell<bool>,
 }
 
 impl Engine {
@@ -1076,6 +1109,11 @@ impl Engine {
         for p in paths {
             v.push(p.as_ref().to_path_buf());
         }
+    }
+
+    /// Enable or disable secure mode (Kotlin `Engine.secureMode`).
+    pub fn set_secure_mode(&self, secure: bool) {
+        self.secure_mode.set(secure);
     }
 }
 

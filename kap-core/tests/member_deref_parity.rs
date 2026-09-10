@@ -66,6 +66,8 @@ fn format_value(v: &APLValue) -> String {
         },
         APLValue::List(_) => "list".to_string(),
         APLValue::Map(_) => "map".to_string(),
+        APLValue::Stream(s) => s.borrow().display_name().to_string(),
+        APLValue::Process(p) => format!("MPProcess[pid={}]", p.borrow().pid),
         APLValue::Deferred { .. } => "<deferred>".to_string(),
         APLValue::UserFn { .. } => "<fn>".to_string(),
         APLValue::Escape { .. } => "<fn>".to_string(),

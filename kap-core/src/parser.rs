@@ -190,6 +190,8 @@ impl<'a> Parser<'a> {
             // P2: bare-namespace natives registered in the DEFAULT namespace
             // (engine.kt registers `sysparam` without a module qualifier).
             || (name == "sysparam")
+            // P3 `close` (engine.kt:1163, default namespace).
+            || (name == "close" && namespace.is_none())
             // Namespaced native builtins (`io:print`, `unicode:enc`, …) are resolved at
             // runtime in `eval_apply`; treat them as functions so the parser builds the
             // dyadic `L f R` form (preserving any left operand).
@@ -238,6 +240,15 @@ impl<'a> Parser<'a> {
                             && matches!(
                                 base,
                                 "with" | "get" | "remove" | "entries" | "size" | "keys" | "appendTo"
+                            ))
+                        // P3 `io:` / `io2:` file + stream natives (engine.kt:361-404,
+                        // builtins/io_functions.kt + execprocess.kt).
+                        || (ns == "io" && matches!(base, "read" | "readFile" | "readdir"))
+                        || (ns == "io2"
+                            && matches!(
+                                base,
+                                "open" | "read" | "readLine" | "lines" | "arrayStream"
+                                    | "write" | "flush" | "exec"
                             ))
                 }
                 None => false,
@@ -4119,7 +4130,7 @@ impl<'a> Parser<'a> {
     /// Higher-order operators (adverbs) that take a *function* as one operand:
     /// `/` reduce, `\\` scan, `¨` each, `catch` (Kotlin CatchOperator, engine.kt:412).
     fn is_adverb(name: &str) -> bool {
-        matches!(name, "/" | "reduce" | "\\" | "scan" | "⌿" | "⍀" | "¨" | "each" | "⍨" | "commute" | "∵" | "bitwise" | "⌸" | "key" | "⌻" | "˝" | "inverse" | "⍰" | "∥" | "catch")
+        matches!(name, "/" | "reduce" | "\\" | "scan" | "⌿" | "⍀" | "¨" | "each" | "⍨" | "commute" | "∵" | "bitwise" | "⌸" | "key" | "⌻" | "˝" | "inverse" | "⍰" | "∥" | "catch" | "atLeave")
     }
 
     /// Pure adverbs that ALWAYS need a left function — invalid as a bare RHS
