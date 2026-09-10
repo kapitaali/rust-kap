@@ -3750,6 +3750,29 @@ impl Engine {
                 let text = std::fs::read_to_string(&path).map_err(io_err)?;
                 Ok(Rc::new(APLValue::Str(text)))
             }
+            "io:readCsv" => {
+                // `ReadCsvFunction` (io_functions.kt:393): path or
+                // [path, kwargs]; kwargs are alternating keyword/value.
+                let argv = right_val.force(self)?;
+                let elems: Vec<AplRef<APLValue>> = match argv.as_ref() {
+                    APLValue::List(a) => a.elements(),
+                    _ => vec![argv.clone()],
+                };
+                if elems.is_empty() || elems.len() > 2 {
+                    return Err(AplError::runtime(
+                        "io:readCsv: expected a path with optional keyword arguments".into(),
+                    ));
+                }
+                let path = Self::kap_string(&elems[0], "io:readCsv")?;
+                let mut flags = crate::csv::CsvFlags::default();
+                if elems.len() == 2 {
+                    Self::csv_kwargs(&elems[1], &mut flags)?;
+                }
+                let text = std::fs::read_to_string(&path).map_err(io_err)?;
+                let rows = crate::csv::read_rows(&text, &flags)
+                    .map_err(|e| AplError::runtime(format!("Error while parsing CSV: {}", e)))?;
+                Self::csv_table(rows, &flags)
+            }
             "io:readdir" => {
                 // `ReaddirFunction`: N×1 name matrix; dyadic `:size`/`:type`
                 // selectors add columns (engine.kt:376).
@@ -6425,7 +6448,7 @@ impl Engine {
                 // builtins/io_functions.kt + execprocess.kt) + `close`
                 // (engine.kt:1163). Two-gate rule: parser admits them via
                 // is_known_fn; listed here for the eval-time late gate.
-                | "io:read" | "io:readFile" | "io:readdir"
+                | "io:read" | "io:readFile" | "io:readdir" | "io:readCsv"
                 | "io2:open" | "io2:read" | "io2:readLine" | "io2:lines"
                 | "io2:arrayStream" | "io2:write" | "io2:flush" | "io2:exec"
                 | "close"
@@ -7472,6 +7495,92 @@ impl Engine {
             },
             _ => Err(AplError::runtime(format!("{}: cannot convert to Java", who))),
         }
+    }
+
+    /// `ReadCsvFunction` keyword args (io_functions.kt:421-444): a flat
+    /// even-length rank-1 array of alternating keyword symbols and values.
+    fn csv_kwargs(v: &AplRef<APLValue>, flags: &mut crate::csv::CsvFlags) -> Result<(), AplError> {
+        let elems: Vec<AplRef<APLValue>> = match v.as_ref() {
+            APLValue::Array(a) if a.rank() == 1 => a.elements(),
+            _ => {
+                return Err(AplError::runtime(
+                    "Keyword arguments must be a single-dimensional list with an even number of values".into(),
+                ))
+            }
+        };
+        if elems.len() % 2 != 0 {
+            return Err(AplError::runtime(
+                "Keyword arguments must be a single-dimensional list with an even number of values".into(),
+            ));
+        }
+        for (i, pair) in elems.chunks(2).enumerate() {
+            let kw = match pair[0].as_ref() {
+                APLValue::Symbol { name, namespace } if namespace.as_deref() == Some("keyword") => name.clone(),
+                _ => return Err(AplError::runtime(format!("Expected keyword at index {}", 2 * i))),
+            };
+            match kw.as_str() {
+                "separator" => flags.separator = Self::csv_char_arg(&pair[1], "Separator string must be a single BMP character")?,
+                "quoteChar" => flags.quote = Self::csv_char_arg(&pair[1], "Quote char string must be a single BMP character")?,
+                "trim" => flags.trim = Self::csv_bool_arg(&pair[1], "Trim must be the integer 0 or 1")?,
+                "parseNumbers" => {
+                    flags.parse_numbers = Self::csv_bool_arg(&pair[1], "The parseNumbers keyword value must be the integer 0 or 1")?
+                }
+                "colHeaders" => {
+                    flags.col_headers = Self::csv_bool_arg(&pair[1], "The colHeaders keyword value must be the integer 0 or 1")?
+                }
+                "rowHeaders" => {
+                    flags.row_headers = Self::csv_bool_arg(&pair[1], "The rowHeaders keyword value must be the integer 0 or 1")?
+                }
+                _ => return Err(AplError::runtime(format!("Unexpected keyword argument: {}", kw))),
+            }
+        }
+        Ok(())
+    }
+
+    /// `io:readCsv` keyword value as 0/1 boolean (io_functions.kt:454-461).
+    fn csv_bool_arg(v: &AplRef<APLValue>, msg: &str) -> Result<bool, AplError> {
+        match Self::kap_long(v, "io:readCsv") {
+            Ok(0) => Ok(false),
+            Ok(1) => Ok(true),
+            _ => Err(AplError::runtime(msg.into())),
+        }
+    }
+
+    /// `io:readCsv` keyword value as a single char (io_functions.kt:446-452).
+    fn csv_char_arg(v: &AplRef<APLValue>, msg: &str) -> Result<char, AplError> {
+        let s = Self::kap_string(v, "io:readCsv")?;
+        let mut it = s.chars();
+        match (it.next(), it.next()) {
+            (Some(c), None) => Ok(c),
+            _ => Err(AplError::runtime(msg.into())),
+        }
+    }
+
+    /// Build the result array for `io:readCsv` (`CsvReader.read`,
+    /// csv-reader.kt:25-86): nested data array + optional dimension labels.
+    fn csv_table(
+        rows: Vec<Vec<String>>,
+        flags: &crate::csv::CsvFlags,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        use crate::array::{ArrayData, AxisLabel, DimensionLabels, KapArray};
+        let t = crate::csv::build_table(&rows, flags);
+        let elems: Vec<AplRef<APLValue>> = t
+            .cells
+            .into_iter()
+            .map(|c| {
+                Rc::new(match c {
+                    crate::csv::CsvCell::Str(s) => APLValue::Str(s),
+                    crate::csv::CsvCell::Num(n) => APLValue::Number(n),
+                })
+            })
+            .collect();
+        let mut arr = KapArray::new(vec![t.nrows, t.ncols], ArrayData::Nested(elems));
+        if t.row_labels.is_some() || t.col_labels.is_some() {
+            let rl = t.row_labels.map(|v| v.into_iter().map(Some).collect::<Vec<AxisLabel>>());
+            let cl = t.col_labels.map(|v| v.into_iter().map(Some).collect::<Vec<AxisLabel>>());
+            arr.labels = Some(Box::new(DimensionLabels { labels: vec![rl, cl] }));
+        }
+        Ok(Rc::new(APLValue::Array(Rc::new(arr))))
     }
 
     /// `asByteArray` (types.kt:666): rank-1 numbers (0-255) or chars → bytes.

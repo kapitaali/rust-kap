@@ -1170,6 +1170,32 @@ fn curated_kap_parity() {
             }
         }
     }
+    // --- csv cluster (CsvTest 121-125): `io:readCsv` with kwargs; shapes,
+    // contents and labels oracle-verified (simple-csv*.txt).
+    {
+        let csv_cases: Vec<(&str, &str)> = vec![
+            ("⍴ io:readCsv (\"test-data/simple-csv.txt\"; :parseNumbers 0)", "(5 4)"),
+            ("⍴ io:readCsv (\"test-data/simple-csv.txt\"; :parseNumbers 1)", "(5 4)"),
+            ("⍴ io:readCsv (\"test-data/simple-csv-with-headers.txt\"; :colHeaders 1)", "(4 3)"),
+            ("⍴ io:readCsv (\"test-data/simple-csv-with-headers.txt\"; :rowHeaders 1)", "(5 2)"),
+            ("⍴ io:readCsv (\"test-data/simple-csv-with-headers.txt\"; :colHeaders 1 :rowHeaders 1)", "(4 2)"),
+            ("io:readCsv (\"test-data/simple-csv.txt\"; :parseNumbers 1)", "(\"foo\" \"bar\" 1234 12.25 11 \"xyz\" \"a\" \"b\" \"a\" \"\" \"b\" \"c\" \"abc\" \"  def \" 11 11.5 123456789012345678901234567890 -2 -1.5 -1234567890123456789012345678900000)"),
+            ("labels io:readCsv (\"test-data/simple-csv-with-headers.txt\"; :colHeaders 1 :rowHeaders 1)", "(\"foo\" \"abc\")"),
+        ];
+        for (expr, expected) in csv_cases {
+            match engine.eval_string(expr) {
+                Ok(v) => {
+                    let got = v.format_display();
+                    if &got != expected {
+                        failures.push(format!("MISMATCH  {expr:?}  expected {expected:?} got {got:?}"));
+                    }
+                }
+                Err(e) => {
+                    failures.push(format!("ERROR    {expr:?}  -> {e}"));
+                }
+            }
+        }
+    }
     // --- 11d `${...}` template rows (CompareTest 1368/1373/1374 +
     // EncoderAPLFunctionTest 2516/2517): every combination below was
     // verified element-for-element against kap-jvm-text (oracle uses
