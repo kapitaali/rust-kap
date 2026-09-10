@@ -5845,7 +5845,15 @@ impl<'a> Parser<'a> {
                     // atom (the caller's apply loop handles adverbs/applying).
                     Token::OpenParen => {
                         self.advance(); // consume (
+                        // Like the main-accumulator `⍞(` arm: the inner parse must
+                        // stop AT the group's `)` (Kotlin `parseValueToplevel`
+                        // ends at CloseParen, parser.kt:1194-1201). Without the
+                        // close token the accumulator runs PAST `)` and the eval
+                        // sees a misparsed right operand (e.g. `λ(⍞(i⊃(λ+)(λ÷)))`
+                        // died in ⊃ with "Mismatched dimensions").
+                        self.kotlin_close_stack.push(Token::CloseParen);
                         let inner = self.parse_value_kotlin()?;
+                        self.kotlin_close_stack.pop();
                         self.expect(Token::CloseParen, "expected ) after ⍞(…)")?;
                         // A function-shaped inner (`⍞(+)`, `⍞foo`) inlines like the
                         // main-accumulator arm; a VALUE-shaped inner (an application
@@ -6573,8 +6581,11 @@ impl<'a> Parser<'a> {
                         // operator's left operand (e.g. `(x≡y) ⌷ …`). `parse_value_kotlin`
                         // builds it via value-left bind; the result is a function-typed
                         // Instr returned as a bare atom (caller's apply loop handles
-                        // adverbs/applying).
+                        // adverbs/applying). Push the close token so the inner parse
+                        // stops AT `)` (same fix as the function-atom `⍞(` arm).
+                        self.kotlin_close_stack.push(Token::CloseParen);
                         let inner = self.parse_value_kotlin()?;
+                        self.kotlin_close_stack.pop();
                         self.expect(Token::CloseParen, "expected ) after ⍞(…)")?;
                         Ok(inner)
                     }

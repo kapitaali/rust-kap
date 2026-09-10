@@ -1058,6 +1058,10 @@ pub struct Engine {
     /// inline during lexing). Seeded empty — Kotlin's built-in glyph set needs
     /// no port equivalent since the lexer already splits non-alphanumerics.
     pub single_chars: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<char>>>,
+    /// Fresh-anonymous-symbol counter for `λ(⍞…)` capture snapshots (Kotlin
+    /// `engine.createAnonymousSymbol("applyRef")`, engine.kt:754). Each snapshot
+    /// mints a new name so closures created in a loop never share one slot.
+    pub anon_syms: std::rc::Rc<std::cell::Cell<usize>>,
 }
 
 impl Engine {

@@ -1316,13 +1316,40 @@ impl Engine {
                 if env.fn_body_depth.get() == 0 {
                     self.check_body_const_assign(body, params, env)?;
                 }
+                // `λ(⍞ref)` capture snapshot (Kotlin
+                // `DynamicFunctionDescriptor.computeClosure`, instr.kt:222-230 +
+                // `EvalLambdaFnx.evalWithContext`, instr.kt:564-570): the ref's
+                // CURRENT value is bound to a fresh anonymous name in the CREATION
+                // scope, and the closure body reads that name at call time. Without
+                // this, closures created in a loop share one late-bound ref and all
+                // see the final iteration's value (ScopeTest
+                // contribScopeWithExtraEvaluation: both lambdas read i=2 → OOB;
+                // oracle yields (4 1/4)). The name is unutterable in source
+                // (spaces/brackets never survive the lexer), mirroring Kotlin's
+                // `<anonymous: applyRef>` (engine.kt:754).
+                let closed_body: Instr = match body.as_ref() {
+                    Instr::DynamicRefExpr { expr } => {
+                        let fv = self.eval_instr(expr, env)?.force(self)?;
+                        self.bind_anon_capture(env, fv)
+                    }
+                    Instr::DynamicRef { name, namespace } => {
+                        let fv = env
+                            .lookup(name, namespace)
+                            .ok_or_else(|| {
+                                AplError::runtime(format!("undefined symbol: {}", name))
+                            })?
+                            .force(self)?;
+                        self.bind_anon_capture(env, fv)
+                    }
+                    _ => body.as_ref().clone(),
+                };
                 Ok(Rc::new(APLValue::UserFn {
                     params: params.clone(),
                     // The last param is the right argument (⍵); any preceding params are
                     // left arguments (⍺). So `λ(a)` is monadic (split 0) and `λ(a b)` is
                     // dyadic (split 1), matching Kap dfn conventions.
                     split: params.len().saturating_sub(1),
-                    body: Rc::new(*body.clone()),
+                    body: Rc::new(closed_body),
                     env: env.clone(),
                 }))
             }
@@ -2344,6 +2371,17 @@ impl Engine {
             Some(ns) => format!("{}:{}", ns, method),
             None => format!("default:{}", method),
         }
+    }
+
+    /// Bind a `λ(⍞…)` capture snapshot: define `fv` under a fresh unutterable
+    /// name in `env` and return a `DynamicRef` to it (the assignment half of
+    /// Kotlin `computeClosure`, instr.kt:222-230).
+    fn bind_anon_capture(&self, env: &AplRef<Environment>, fv: AplRef<APLValue>) -> Instr {
+        let n = self.anon_syms.get();
+        self.anon_syms.set(n + 1);
+        let anon = format!("<anonymous applyRef {}>", n);
+        env.define(&anon, &None, fv);
+        Instr::DynamicRef { name: anon, namespace: None }
     }
 
     fn eval_apply(
