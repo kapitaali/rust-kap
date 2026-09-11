@@ -28,7 +28,9 @@ import sys
 ARRAY_ROOT = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/Apps/array")
 OUT = os.path.join(os.path.dirname(__file__), "..", "conformance", "kotlin_tests.jsonl")
 
-PARSE_CALLS = ("parseAPLExpression", "parseAPLExpressionWithTest", "parseAndTestWithGeneric")
+PARSE_CALLS = ("parseAPLExpression", "parseAPLExpressionWithTest", "parseAndTestWithGeneric",
+               "parseAPLExpression2", "parseAPLExpressionWithOutput",
+               "parseAPLExpressionWithSpecialRandom")
 
 
 def find_string_literal(s: str, start: int):
@@ -184,6 +186,15 @@ def first_expr_in_call(body: str):
         j = idx + len(call) + 1
         while j < len(body) and body[j] in ' \t\n':
             j += 1
+        # Kotlin 2.x multi-dollar raw strings (`$$"..."`, `$"..."`): the `$`
+        # prefix disables interpolation, so `$foo` stays literal Kap source
+        # (FormatAPLTest `⍕` directives). The string starts at the `"`.
+        if body[j:j + 3] == '$$"':
+            text, _ = find_string_literal(body, j + 2)
+            return text
+        if body[j:j + 2] == '$"':
+            text, _ = find_string_literal(body, j + 1)
+            return text
         if j < len(body) and body[j] == '"':
             text, _ = find_string_literal(body, j)
             return text
@@ -284,6 +295,24 @@ def best_effort_expected(body: str):
     return None
 
 
+def check_comparison_rows(body: str):
+    """Yield (expr, expected) for `checkComparisonResultTypes(arrayOf(..), "expr")` calls.
+
+    SpecialisedComparisonTest routes every assertion through this private
+    helper, so the bodies contain no direct parse call. Each call site is one
+    concrete comparison with a fully-known Long-vector expectation — expand
+    each to its own row.
+    """
+    rows = []
+    for m in re.finditer(r'checkComparisonResultTypes\s*\(\s*arrayOf\(([^)]*)\)\s*,\s*"', body):
+        parts = [p.strip() for p in m.group(1).split(',') if p.strip()]
+        if not parts or not all(re.fullmatch(r'[+-]?\d+', p) for p in parts):
+            continue
+        text, _ = find_string_literal(body, m.end() - 1)
+        rows.append((text, '(' + ' '.join(parts) + ')'))
+    return rows
+
+
 def main():
     records = []
     for root, _dirs, files in os.walk(ARRAY_ROOT):
@@ -303,11 +332,26 @@ def main():
             # the Kotlin runner (e.g. FfiApiTest).
             class_ignored = bool(re.search(r'@Ignore\s+(?:abstract\s+|open\s+)?(?:class|object)\s', src))
             for name, body in extract_method_bodies(src, class_ignored):
+                # Helper-routed assertions first (bodies with no direct parse
+                # call, e.g. SpecialisedComparisonTest): one row per call site.
+                for cexpr, cexp in check_comparison_rows(body):
+                    records.append({
+                        'file': os.path.relpath(path, ARRAY_ROOT),
+                        'test': name,
+                        'kind': 'eval',
+                        'expr': cexpr,
+                        'expected': cexp,
+                    })
                 expr = first_expr_in_call(body)
                 if expr is None:
                     continue
                 kind = 'fails' if detect_fails(body) else 'eval'
                 expected = best_effort_expected(body) if kind == 'eval' else None
+                # RandomTest's fake-RNG helper: asserted values depend on the
+                # stub RNG (nextLong=until/10, nextDouble=5.5), unreproducible
+                # by a real engine — score eval-OK only, never against stub values.
+                if 'parseAPLExpressionWithSpecialRandom(' in body:
+                    expected = None
                 # `{GENERIC}` is a test-harness backend marker (APLTest.kt
                 # `parseAndTestWithGeneric` runs the expr twice: with `{GENERIC}`
                 # removed, and replaced by `int:ensureGeneric`). The port has one

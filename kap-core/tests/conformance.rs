@@ -203,9 +203,13 @@ fn classify_with_timeout(c: &Case) -> Outcome {
             // H2 (narrow, fn `classify` documents why): `io:toHex/fromHex/`
             // `base64Encode` are stdlib-defined and non-recursive, so preload
             // stdlib for exactly the Simple suite (never Math — row 998).
+            // Base64EncodingTest.kt runs every call with `withStandardLib =
+            // true` in Kotlin and exercises the same stdlib-defined
+            // `io:base64Encode/Decode` (io.kap), so it rides the same preload.
             // Rows that `use()` themselves (formatterTest) are left alone:
             // a second load fails re-assigning `:const math:pi`.
-            let src = if c.file.contains("StandardLibSimpleFunctionsTest")
+            let src = if (c.file.contains("StandardLibSimpleFunctionsTest")
+                || c.file.contains("Base64EncodingTest"))
                 && !c.expr.trim_start().starts_with("use(")
             {
                 format!("use(\"standard-lib.kap\")\n{}", c.expr)

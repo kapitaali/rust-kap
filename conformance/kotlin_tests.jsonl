@@ -48,6 +48,7 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CaseTest.kt", "test": "contentArrayInvalidDimension4", "kind": "fails", "expr": "(2 2 ⍴ 0 0 1 0) % (2 2 ⍴ 1 2 3 4) (4 5 6 7)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CaseTest.kt", "test": "contentArrayInvalidDimension5", "kind": "fails", "expr": "(2 2 ⍴ 0 0 1 0) % (1 2 3 4) (2 2 ⍴ 4 5 6 7)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CaseTest.kt", "test": "twoDimensionalCase", "kind": "eval", "expr": "(2 2 ⍴ 0 0 1 0) % (2 2 ⍴ ⍳4) (2 2 ⍴ 100+⍳4)", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CaseTest.kt", "test": "caseWithLazy", "kind": "eval", "expr": "0 0 1 1 1 1 % (io:print¨0 1 2 3 4 5) (io:print¨100 101 102 103 104 105)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CaseTest.kt", "test": "multiSelection", "kind": "eval", "expr": "0 10 2 2 % (100×⍳11) + 11 ⍴ (⊂0 1 2 3)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CaseTest.kt", "test": "caseWithScalarArg0", "kind": "eval", "expr": "0 1 1 % 9 (5 6 7)", "expected": "(9 6 7)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CaseTest.kt", "test": "caseWithScalarArg1", "kind": "eval", "expr": "0 1 1 % (5 6 7) 9", "expected": "(5 9 9)"}
@@ -114,6 +115,7 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ConcatenateTest.kt", "test": "joinByLaminateWithInvalidAxisShouldFail", "kind": "fails", "expr": "(2 2 ⍴ ⍳4) , [2.5] 2 2 ⍴ 11 22 33 44", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ConcatenateTest.kt", "test": "joinByLaminateWithMismatchedDimensionsShouldFail", "kind": "fails", "expr": "(2 2 ⍴ ⍳4) , [0.5] 2 3 ⍴ 11 22 33 44 55 66", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ConcatenateTest.kt", "test": "joinByAxisWithMismatchedRanksShouldFail", "kind": "fails", "expr": "(2 2 ⍴ ⍳4) , 2 2 2 2 ⍴ 11 22 33 44", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ConcatenateTest.kt", "test": "addUnderOneArgCatenate", "kind": "eval", "expr": "{io:print¨ ⍴⍵ ⋄ 1+⍵}⍢, 2 3 ⍴ ⍳6", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ConcatenateTest.kt", "test": "replaceValueUnderOneArgCatenate", "kind": "eval", "expr": "{100,↓⍵}⍢, 2 3 ⍴ 10+⍳6", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ConcatenateTest.kt", "test": "monadicRavelShouldNotSupportAxisArguments", "kind": "fails", "expr": ",[0] 1 2 3 4", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ConcatenateTest.kt", "test": "monadicTableShouldNotSupportAxisArguments", "kind": "fails", "expr": "⍪[0] 1 2 3 4", "expected": null}
@@ -124,9 +126,14 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CsvTest.kt", "test": "parseWithColHeaders", "kind": "eval", "expr": "io:readCsv (\"test-data/simple-csv-with-headers.txt\"; :colHeaders 1)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CsvTest.kt", "test": "parseWithRowHeaders", "kind": "eval", "expr": "io:readCsv (\"test-data/simple-csv-with-headers.txt\"; :rowHeaders 1)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CsvTest.kt", "test": "parseWithRowAndColHeaders", "kind": "eval", "expr": "io:readCsv (\"test-data/simple-csv-with-headers.txt\"; :colHeaders 1 :rowHeaders 1)", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DeferComputationTest.kt", "test": "simpleLazyEvaluation", "kind": "eval", "expr": "∇ foo (a) {\n  io:print a\n  a + 5\n}\n((foo defer 10) (foo defer 20) (foo defer 30))[2]", "expected": "35"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DeferComputationTest.kt", "test": "simpleLazyEvaluationFailsWith2Arg", "kind": "fails", "expr": "∇ foo (a) {\n  io:print a\n  a + 5\n}\n((1 foo defer 10) (1 foo defer 20) (1 foo defer 30))[2]", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DeferComputationTest.kt", "test": "simpleEagerEvaluation", "kind": "eval", "expr": "∇ foo (a) {\n  io:print a\n  a + 5\n}\n((foo 10) (foo 20) (foo 30))[2]", "expected": "35"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DeferComputationTest.kt", "test": "simpleLazyEvaluation2Arg", "kind": "eval", "expr": "∇ (a) foo (b) {\n  io:print b\n  a + b + 5\n}\n((100 foo defer 10) (100 foo defer 20) (100 foo defer 30))[2]", "expected": "135"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DeferComputationTest.kt", "test": "simpleLazyEvaluation2ArgFailsWith1Arg", "kind": "fails", "expr": "∇ (a) foo (b) {\n  io:print b\n  a + b + 5\n}\n((foo defer 10) (foo defer 20) (foo defer 30))[2]", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DeferComputationTest.kt", "test": "simpleEagerEvaluation2Arg", "kind": "eval", "expr": "∇ (a) foo (b) {\n  io:print b\n  a + b + 5\n}\n((100 foo 10) (100 foo 20) (100 foo 30))[2]", "expected": "135"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DeferComputationTest.kt", "test": "deferInOperator", "kind": "eval", "expr": "∇ (f OrNull) x {\n  (x (⍞f defer null))[x≡null]\n}\n{10} OrNull null", "expected": "10"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DeferComputationTest.kt", "test": "deferWithCollapseAndDiscard", "kind": "eval", "expr": "⊣ io:print defer 1 2 3", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DivisorsListTest.kt", "test": "simpleDivisors", "kind": "eval", "expr": "math:divisors 8", "expected": "(2 4)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DivisorsListTest.kt", "test": "smallDivisors", "kind": "eval", "expr": "math:divisors 0 1", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DivisorsListTest.kt", "test": "smallDivisorsBigint", "kind": "eval", "expr": "math:divisors (int:asBigint 0) (int:asBigint 1)", "expected": null}
@@ -138,37 +145,24 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DivisorsListTest.kt", "test": "divisorsOfComplexShouldFail", "kind": "fails", "expr": "math:divisors 1j4", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DivisorsListTest.kt", "test": "divisorsOfRationalShouldFail", "kind": "fails", "expr": "math:divisors 1r2", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DivisorsListTest.kt", "test": "divisorsOfIntegerRational", "kind": "eval", "expr": "math:divisors int:asBigint 12", "expected": "(2 3 4 6)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DynAssignTest.kt", "test": "simpleDynamicAssign", "kind": "eval", "expr": "a ← 1\nb dynamicequal a+1\nio:print b", "expected": "2"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DynAssignTest.kt", "test": "simpleDynamicAssignWithUpdate", "kind": "eval", "expr": "a ← 1\nb dynamicequal a+1\nio:print b\na ← 3\nio:print b", "expected": "4"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DynAssignTest.kt", "test": "simpleDynamicAssignWithUpdateChain", "kind": "eval", "expr": "a ← 1\nb dynamicequal a+1\nio:print b\nc dynamicequal b+2\nio:print c\na ← 3\nio:print b\nio:print c\na ← 4\nio:print b\nio:print c", "expected": "7"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DynAssignTest.kt", "test": "dynamicChangedToNormal0", "kind": "eval", "expr": "a ← 1\nb dynamicequal a+1\nio:print b\nb ← 3\nio:print b\na ← 4\nio:print b", "expected": "3"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DynAssignTest.kt", "test": "dynamicChangedToNormal1", "kind": "eval", "expr": "a ← 1\nb dynamicequal a+1\nio:print b\nc dynamicequal b+2\nio:print b\nio:print c\nb ← 5\nio:print b\nio:print c", "expected": "7"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DynAssignTest.kt", "test": "simpleDynamicAssignWithMultipleUpdate", "kind": "eval", "expr": "a ← 1\nb dynamicequal a+1\nio:print b\na ← 3\nio:print b\na ← 5\nio:print b", "expected": "6"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DynAssignTest.kt", "test": "simpleDynamicAssignWithInternalVar", "kind": "eval", "expr": "a ← 1\nb dynamicequal a + (c × c←2)\nio:print b", "expected": "5"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DynAssignTest.kt", "test": "simpleDynamicAssignMultipleVariables", "kind": "eval", "expr": "a ← 1\nb ← 2\nc dynamicequal a+b+1\nio:print c", "expected": "4"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DynAssignTest.kt", "test": "simpleDynamicAssignMultipleVariablesWithUpdates", "kind": "eval", "expr": "a ← 1\nb ← 2\nc dynamicequal a+b+1\na ← 5\nb ← 6\nio:print c", "expected": "12"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DynAssignTest.kt", "test": "dynamicAssignChange", "kind": "eval", "expr": "a ← 1\nb ← 2\nc dynamicequal a+b+1\nio:print c\na ← 3\nb ← 6\nio:print c\nc dynamicequal a+b+100\nio:print c\na ← 10\nb ← 9\nio:print c", "expected": "119"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DynAssignTest.kt", "test": "dynamicAssignWithSideEffects0", "kind": "eval", "expr": "a ← 1\nb dynamicequal 20+io:print a\nio:print b\na ← 3\nio:print b\nio:print b", "expected": "23"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DynAssignTest.kt", "test": "dynamicAssignWithSideEffects1", "kind": "eval", "expr": "{\n  a ← 1\n  b dynamicequal 20+io:print a\n  io:print b\n  a ← 3\n  io:print b\n  io:print b\n} 0", "expected": "23"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DynAssignTest.kt", "test": "dynamicAssignMultiAssignWithSideEffects", "kind": "eval", "expr": "a ← 1\nb dynamicequal 20+io:print a\nio:print b\nio:print b\na ← 2\nio:print b\nio:print b\nb dynamicequal 30+io:print 100+a\nio:print b\na ← 3\nio:print b", "expected": "133"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DynAssignTest.kt", "test": "readResultFromFn", "kind": "eval", "expr": "∇ foo {\n  q ← 10+⍵\n  1+q\n}\na ← 1\nb dynamicequal a+20\nio:print foo b\na ← 30\nio:print foo b", "expected": "61"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DynAssignTest.kt", "test": "circularDependency", "kind": "fails", "expr": "a ← 1\nb dynamicequal a+1\na dynamicequal b+2\nb", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "simpleEncode", "kind": "eval", "expr": "10 ⊥ 1 2 3", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "oneDigitEncode", "kind": "eval", "expr": "10 ⊥ 2", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "encodeEmptyArray", "kind": "eval", "expr": "9 ⊥ ⍬", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "encodeSingleDigitOverflow", "kind": "eval", "expr": "10 ⊥ 33", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "encodeOverflowInElement", "kind": "eval", "expr": "10 ⊥ 1 33 3", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "differentBases", "kind": "eval", "expr": "2 4 5 ⊥ 1 1 1", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "floatingPointArguments", "kind": "eval", "expr": "10 ⊥ 2 3.1 3.1", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "mismatchedSizes", "kind": "fails", "expr": "2 2 2 ⊥ 1 1 0 1 0", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "invalidDimensions0", "kind": "fails", "expr": "(2 2 ⍴ 2) ⊥ 1 1 1 1", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "invalidDimensions1", "kind": "fails", "expr": "(2 2 ⍴ 2) ⊥ 2 2 ⍴ 0 1 0 1", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "invalidDimensions2", "kind": "fails", "expr": "2 2 2 2 ⊥ 2 2 ⍴ 1 1 1 1", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "encodeInvalidTypeSingleValue", "kind": "fails", "expr": "10 ⊥ @a", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "encodeInvalidTypeArrayMember", "kind": "fails", "expr": "10 ⊥ 9 @a", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "encodeMultipleValues0", "kind": "eval", "expr": "2 2 ⊥ 2 5 ⍴ 1 1 0 0 1 0 1 0 1 0", "expected": "(2 3 0 1 2)"}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "encodeMultipleValues1", "kind": "eval", "expr": "2 3 4 ⊥ 3 100 ⍴ 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 1 1 1 1 2 2 2 2 0 0 0 0 1 1 1 1 2 2 2 2 0 0 0 0 1 1 1 1 2 2 2 2 0 0 0 0 1 1 1 1 2 2 2 2 0 0 0 0 1 1 1 1 2 2 2 2 0 0 0 0 1 1 1 1 2 2 2 2 0 0 0 0 1 1 1 1 2 2 2 2 0 0 0 0 1 1 1 1 2 2 2 2 0 0 0 0 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3", "expected": "(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 0 1 2 3)"}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeSimple", "kind": "eval", "expr": "(3⍴2) ⊤ 3", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeOversized", "kind": "eval", "expr": "(2⍴2) ⊤ 7", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeDifferentValues", "kind": "eval", "expr": "2 3 6 ⊤ 15", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeSingleValue", "kind": "eval", "expr": "(,3) ⊤ 7", "expected": "(1)"}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeZero", "kind": "eval", "expr": "2 3 6 ⊤ 0", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeOutsideRangeOfInteger", "kind": "eval", "expr": "(40⍴10) ⊤ 12", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeNegative", "kind": "eval", "expr": "(10⍴10) ⊤ ¯10", "expected": "(9 9 9 9 9 9 9 9 9 0)"}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeBigInt", "kind": "eval", "expr": "(100⍴10) ⊤ 10000000000000000000000000000000000000000", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeNegativeBigInt", "kind": "eval", "expr": "(40⍴10) ⊤ ¯123456789012345678901234567890", "expected": "(9 9 9 9 9 9 9 9 9 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 1 0)"}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeMultiDimensional", "kind": "eval", "expr": "(2⍴2) ⊤ 2 3 ⍴ 10+⍳6", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeScalarLeftArg0", "kind": "eval", "expr": "2 ⊤ 100", "expected": "(1 1 0 0 1 0 0)"}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeScalarLeftArg1", "kind": "eval", "expr": "2 ⊤ 256", "expected": "(1 0 0 0 0 0 0 0 0)"}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeScalarLeftArg2", "kind": "eval", "expr": "10 ⊤ 1234", "expected": "(1 2 3 4)"}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeScalarLeftArg3", "kind": "eval", "expr": "10 ⊤ 1234 100 23456", "expected": null}
-{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeScalarLeftArg4", "kind": "eval", "expr": "8 ⊤ 123456789012345678901234567890123456789012345", "expected": "(5 4 2 2 3 3 3 4 5 1 1 7 2 6 5 4 7 4 7 5 4 1 6 5 2 4 4 5 6 7 5 3 3 3 7 0 7 2 3 6 1 7 0 5 5 7 5 7 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DynAssignTest.kt", "test": "dynamicAssignLexicalScopeVariable", "kind": "eval", "expr": "a ← 1\n{\n    b dynamicequal a+2\n    io:print b\n    a ← 3\n    io:print b\n} 1", "expected": "5"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DynAssignTest.kt", "test": "dynamicEqualWithInnerRef0", "kind": "eval", "expr": "a ← 1\nb dynamicequal { a + ⍵ } 2\nio:print b\na ← 3\nio:print b", "expected": "5"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DynAssignTest.kt", "test": "dynamicEqualWithInnerRef1", "kind": "eval", "expr": "a ← 1\nb dynamicequal { { a + ⍵ } 2 + ⍵ } 4\nio:print b\na ← 3\nio:print b", "expected": "9"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EnlistTest.kt", "test": "enlistSimple", "kind": "eval", "expr": "∊ (1 2 (3 4)) 5 6", "expected": "(1 2 3 4 5 6)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EnlistTest.kt", "test": "enlistWithHigherDimension", "kind": "eval", "expr": "∊ 2 3 ⍴ 1 (10 20) 3 ((41 42) (43 44)) 5 6", "expected": "(1 10 20 3 41 42 43 44 5 6)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EnlistTest.kt", "test": "enlistWithMixedDatatypes", "kind": "eval", "expr": "∊ (1 2) (3 4 (5 @a @b @c))", "expected": null}
@@ -190,12 +184,17 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EnlistTest.kt", "test": "enlistNested2DArraysWithLongs", "kind": "eval", "expr": "∊2 3 ⍴ (3 4 ⍴ 10+⍳12) 2 3 4 5 6", "expected": "(10 11 12 13 14 15 16 17 18 19 20 21 2 3 4 5 6)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EnlistTest.kt", "test": "enlistNested2DArraysWithDoubles", "kind": "eval", "expr": "∊0.0+2 3 ⍴ (3 4 ⍴ 10+⍳12) 2 3 4 5 6", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EvaluationOrderTest.kt", "test": "expressionEvaluationOrder", "kind": "eval", "expr": "a + 1 + a←2", "expected": "5"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EvaluationOrderTest.kt", "test": "collapseResultWhenNotUsed0", "kind": "eval", "expr": "∇ printx (v) {\n  io:print v\n  v\n}\n\nprintx¨11 22\n33", "expected": "33"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EvaluationOrderTest.kt", "test": "collapseResultWhenNotUsed1", "kind": "eval", "expr": "∇ (x) printx (y) {\n  io:print x\n  io:print y\n  x,y\n}\n\n1000 2000 printx¨1 2\n33", "expected": "33"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EvaluationOrderTest.kt", "test": "discardedResults0", "kind": "eval", "expr": "io:print io:print¨ 1 2 3", "expected": "(1 2 3)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EvaluationOrderTest.kt", "test": "discardedResults1", "kind": "eval", "expr": "io:print 1000 2000 3000 {io:print ⍺ \":\" ⍵ ⋄ ⍺ + ⍵}¨ 1 2 3", "expected": "(1001 2002 3003)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EvaluationOrderTest.kt", "test": "logicalOpAndTuples0", "kind": "eval", "expr": "1 and 2 ; 10 or 11", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EvaluationOrderTest.kt", "test": "logicalOpAndTuples1", "kind": "eval", "expr": "1 and 2 ; 10 and 11", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EvaluationOrderTest.kt", "test": "logicalOpAndTuples2", "kind": "eval", "expr": "1 and 2 and 3 ; 100 or 200 or 300", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EvaluationOrderTest.kt", "test": "logicalOpAndTuples4", "kind": "eval", "expr": "1 and 2 ; 10 or 11 ; 100 or 101", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ExceptionsTest.kt", "test": "simpleException", "kind": "eval", "expr": "{'foo throw 1}catch 1 2 ⍴ 'foo λ{2+⍺}", "expected": "3"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ExceptionsTest.kt", "test": "simpleExceptionWithSingleDimensionCatch", "kind": "eval", "expr": "{'foo throw 1}catch 'foo λ{2+⍺}", "expected": "3"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ExceptionsTest.kt", "test": "exceptionHandlerTagCheck", "kind": "eval", "expr": "{'foo throw 1}catch 1 2 ⍴ 'foo λ{⍵}", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ExceptionsTest.kt", "test": "multipleTagHandlers", "kind": "eval", "expr": "{'foo throw 1}catch 4 2 ⍴ 'xyz λ{2+⍺} 'test123 λ{3+⍺} 'bar λ{4+⍺} 'foo λ{5+⍺}", "expected": "6"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ExceptionsTest.kt", "test": "multipleTagHandlersSingleDimensionCatch", "kind": "eval", "expr": "{'foo throw 1}catch 'xyz λ{2+⍺} 'test123 λ{3+⍺} 'bar λ{4+⍺} 'foo λ{5+⍺}", "expected": "6"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ExceptionsTest.kt", "test": "unmatchedTag", "kind": "fails", "expr": "{'foo throw 1}catch 1 2 ⍴ 'bar λ{2+⍺}", "expected": null}
@@ -230,6 +229,8 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FindIndexTest.kt", "test": "indexNoIndexFound", "kind": "eval", "expr": "10 20 30 40 ⍳ 1", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FindIndexTest.kt", "test": "indexNotFoundMultiArg", "kind": "eval", "expr": "10 20 30 40 ⍳ 1 2", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FindIndexTest.kt", "test": "indexWithMultiDimensionalLeftArg", "kind": "eval", "expr": "9 6 1 2 0 ⍳ (2 2 ⍴ ⍳4)", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FindIndexTest.kt", "test": "indexWithOptimisation0", "kind": "eval", "expr": "a ⇐ { io:print ⍵ }\n(a¨ 10 11 12 13 14 15 16) ⍳ 12", "expected": "2"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FindIndexTest.kt", "test": "indexWithOptimisation1", "kind": "eval", "expr": "a ⇐ { io:print ⍵ }\n(a¨ 10 11 12 13 14 15 16) ⍳ 11 12", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FindIndexTest.kt", "test": "indexWithStringArrayRef", "kind": "eval", "expr": "foo ← \"jkc\" ⋄ \"abc\" ⍳ foo[2]", "expected": "2"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FindIndexTest.kt", "test": "indexWithString", "kind": "eval", "expr": "\"abc\" ⍳ @c", "expected": "2"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FindIndexTest.kt", "test": "indexWithDifferentTypes0", "kind": "eval", "expr": "\"abc\" ⍳ 0", "expected": "3"}
@@ -295,6 +296,9 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/GroupTest.kt", "test": "arraySizeMismatch1", "kind": "fails", "expr": "0 1 0 0 ⫇ 100 200 300", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/GroupTest.kt", "test": "rightArgHigherDimension0", "kind": "eval", "expr": "1 1 0 ⫇ 3 3 2 ⍴ ⍳18", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/GroupTest.kt", "test": "rightArgHigherDimension1", "kind": "eval", "expr": "2 3 3 ⫇ 3 3 2 ⍴ ⍳18", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/IOAPLTest.kt", "test": "plainPrint", "kind": "eval", "expr": "io:print 10", "expected": "10"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/IOAPLTest.kt", "test": "printWithArrayArgument", "kind": "eval", "expr": "io:print 2 5 ⍴ 1 2 3 4 5 6 7 8 9 10", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/IOAPLTest.kt", "test": "testPlainPrintln", "kind": "eval", "expr": "io:println 10", "expected": "10"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/IOAPLTest.kt", "test": "plainReaddir", "kind": "eval", "expr": "x ← io:readdir \"test-data/readdir-test/\" ◊ x[⍋x;]", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/IOAPLTest.kt", "test": "readdirWithSize", "kind": "eval", "expr": "x ← :size io:readdir \"test-data/readdir-test/\" ◊ x[⍋x;]", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/IOAPLTest.kt", "test": "readCharacterFile", "kind": "eval", "expr": "io:read \"test-data/multi.txt\"", "expected": null}
@@ -306,8 +310,13 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/IOAPLTest.kt", "test": "readSingleString", "kind": "eval", "expr": "io:readFile \"test-data/multi.txt\"", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/IdentityTest.kt", "test": "monadicRightTack", "kind": "eval", "expr": "⊢ 1 2 3 4 5", "expected": "(1 2 3 4 5)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/IdentityTest.kt", "test": "dyadicRightTack", "kind": "eval", "expr": "1 2 ⊢ 3 4 5 6", "expected": "(3 4 5 6)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/IdentityTest.kt", "test": "dyadicRightTackShouldNotCollapse0", "kind": "eval", "expr": "(io:print¨ 1 2) ⊢ (io:print¨ 3 4 5 6)", "expected": "(3 4 5 6)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/IdentityTest.kt", "test": "dyadicRightTackShouldNotCollapse1", "kind": "eval", "expr": "1↑ (io:print¨ 1 2) ⊢ (io:print¨ 3 4 5 6)", "expected": "(3)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/IdentityTest.kt", "test": "monadicLeftTack", "kind": "eval", "expr": "⊣ 1 2 3 4 5", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/IdentityTest.kt", "test": "monadicLeftTackShouldCollapse", "kind": "eval", "expr": "⊣ io:print¨ 1 2 3 4 5", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/IdentityTest.kt", "test": "dyadicLeftTack", "kind": "eval", "expr": "1 2 ⊣ 3 4 5 6", "expected": "(1 2)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/IdentityTest.kt", "test": "dyadicLeftTackShouldNotCollapse0", "kind": "eval", "expr": "(io:print¨ 1 2) ⊣ (io:print¨ 3 4 5 6)", "expected": "(1 2)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/IdentityTest.kt", "test": "dyadicLeftTackShouldNotCollapse1", "kind": "eval", "expr": "1↑ (io:print¨ 1 2) ⊣ (io:print¨ 3 4 5 6)", "expected": "(1)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/IdentityTest.kt", "test": "testInverseIdentity", "kind": "eval", "expr": "⊢˝ 1234", "expected": "1234"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/IdentityTest.kt", "test": "testRightTackInverse", "kind": "eval", "expr": "9 ⊢˝ 1234", "expected": "1234"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/IdentityTest.kt", "test": "testRightTackSwappedAndInversedShouldFail", "kind": "fails", "expr": "9 ⊢⍨˝ 1234", "expected": null}
@@ -620,6 +629,9 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/MemberTest.kt", "test": "findString", "kind": "eval", "expr": "(⊂\"bar\") ∊ \"foo\" \"bar\" \"test\" \"longerstring\"", "expected": "1"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/MemberTest.kt", "test": "findMultipleStrings", "kind": "eval", "expr": "\"foo\" \"xyz\" \"test\" ∊ \"foo\" \"abc\" \"xyz\" \"somestring\"", "expected": "(1 1 0)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/MemberTest.kt", "test": "findWithHigherRankLeftArg", "kind": "eval", "expr": "(2 2 ⍴ \"foo\" \"bar\" \"abc\" \"def\") ∊ \"foo\" \"abcde\" \"xyz\" \"def\"", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/MemberTest.kt", "test": "optimisedFind0", "kind": "eval", "expr": "2 ∊ {io:print ⍵}¨ 0 1 2 3 4", "expected": "1"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/MemberTest.kt", "test": "optimisedFind1", "kind": "eval", "expr": "34 35 ∊ io:print¨ 30+⍳7", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/MemberTest.kt", "test": "optimisedFind2", "kind": "eval", "expr": "1 ∊ io:print¨ 10+⍳6", "expected": "0"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/MemberTest.kt", "test": "compareDoubleInteger0", "kind": "eval", "expr": "3.0 ∊ 2 3", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/MemberTest.kt", "test": "compareDoubleInteger1", "kind": "eval", "expr": "3 ∊ 2 3.0", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/MemberTest.kt", "test": "compareDoubleInteger2", "kind": "eval", "expr": "3 ∊ 2 3J0", "expected": null}
@@ -646,14 +658,17 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ModifiedAssignmentTest.kt", "test": "modifiedAssignmentWithFunctionRightArg", "kind": "fails", "expr": "foo ← 8 ⋄ foo +← %", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ModifiedAssignmentTest.kt", "test": "modifiedAssignmentWithNonLvalue", "kind": "fails", "expr": "foo ← 8 ⋄ (foo + 1) +← 2", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ModifiedAssignmentTest.kt", "test": "simpleDfn", "kind": "eval", "expr": "foo ← 8 ⋄ foo {⍺+⍵}← 3 ⋄ foo+10", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ModifiedAssignmentTest.kt", "test": "simpleDfnWithOperator", "kind": "eval", "expr": "foo ← 10 20 30⋄ foo {io:println ⍺ @, ⍵ ⋄ ⍺+⍵}¨← 8 ⋄ foo + 100", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ModifiedAssignmentTest.kt", "test": "modifiedAssignmentReturnValue", "kind": "eval", "expr": "foo ← 8 ⋄ foo +← 3", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ModifiedAssignmentTest.kt", "test": "arrayLeftArgument0", "kind": "eval", "expr": "bar←1 ⋄ foo ← 8 ⋄ bar foo +← 3", "expected": "(1 11)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ModifiedAssignmentTest.kt", "test": "arrayLeftArgument1", "kind": "eval", "expr": "bar←1 ⋄ foo ← 8 ⋄ bar foo +← 3 ⋄ bar foo", "expected": "(1 11)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/NilTest.kt", "test": "nilBooleanValue", "kind": "eval", "expr": "null and 5", "expected": "5"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/NilTest.kt", "test": "nilDimensions", "kind": "eval", "expr": "⍴ null", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/NilTest.kt", "test": "nilType", "kind": "eval", "expr": "typeof null", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/NilTest.kt", "test": "compareNil", "kind": "eval", "expr": "null≡null", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/NilTest.kt", "test": "dimensionsNil", "kind": "eval", "expr": "⍴ null", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/NilTest.kt", "test": "nilKeyInMap", "kind": "eval", "expr": "a ← map:with null 1 :abc 2 ⋄ a map:get null", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/NilTest.kt", "test": "mathsWithNilShouldFail", "kind": "fails", "expr": "null - 8", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/NilTest.kt", "test": "scalarFunctionsWithNull", "kind": "eval", "expr": "null + null", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/NilTest.kt", "test": "addWithNull", "kind": "eval", "expr": "⦻ 2 + 1 ⦻", "expected": "(1 2)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/NilTest.kt", "test": "mulWithNull", "kind": "eval", "expr": "⦻ 3 × 4 ⦻", "expected": "(4 3)"}
@@ -690,6 +705,9 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/OutputFormatterTest.kt", "test": "readableComplex", "kind": "eval", "expr": "3j4 ¯3j¯4 1.5j10.5 ¯1.5j¯10.5", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/OutputFormatterTest.kt", "test": "readableString", "kind": "eval", "expr": "\"a1\\nb1\" \"a2\\\"b2\" \"a3\\\\b3\"", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/OutputFormatterTest.kt", "test": "readableChar", "kind": "eval", "expr": "@a @b @\\n @≢ @\\uD835\\uDC9F", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/OutputFormatterTest.kt", "test": "renderMapWithHorizontalOverflow", "kind": "eval", "expr": "'kap:altVectorOutput sysparam 0 ⋄ 'kap:rendererParameters sysparam (40 5) (10 5) ⋄ io:print o3:format map:with (⍪⍳90) , ⊂⍳100", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/OutputFormatterTest.kt", "test": "formatRegexpMatcher", "kind": "eval", "expr": "io:print o3:format regex:compile \"test\"", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/OutputFormatterTest.kt", "test": "formatPlainString", "kind": "eval", "expr": "io:print o3:format \"foo\"", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/OverAPLTest.kt", "test": "simpleOverTwoArg", "kind": "eval", "expr": "11 (,⍥-) 22", "expected": "(-11 -22)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/OverAPLTest.kt", "test": "simpleOverOneArg", "kind": "eval", "expr": "({2×⍵}⍥-) 22", "expected": "-44"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PairTest.kt", "test": "pairTwo1DArrays", "kind": "eval", "expr": "1 2 3 4 5 ⍮ 10 11", "expected": null}
@@ -702,11 +720,15 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PairTest.kt", "test": "singletonAtomicValue", "kind": "eval", "expr": "⍮ 1", "expected": "(1)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PairTest.kt", "test": "singletonEnclosedValue", "kind": "eval", "expr": "⍮⊂1 2 3", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ParallelTest.kt", "test": "singletonForeach", "kind": "eval", "expr": "{1+⍵}¨∥ 10", "expected": "11"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ParallelTest.kt", "test": "singletonForeachIsCollapsed", "kind": "eval", "expr": "{io:print ⍵ ⋄ 1+⍵}¨∥ 10", "expected": "11"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ParallelTest.kt", "test": "singletonForeachWithEnclosedIsCollapsed", "kind": "eval", "expr": "{10+⍵}¨∥ ⊂{io:print ⍵ ⋄ 1+⍵}¨10 20 30", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ParallelTest.kt", "test": "arraySmallerThanTasks", "kind": "eval", "expr": "{1+⍵}¨∥ 10 11 12 13 14 15", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ParallelTest.kt", "test": "largeArray", "kind": "eval", "expr": "{1+⍵}¨∥ ⍳10000", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ParallelTest.kt", "test": "exceptionInParallelTask", "kind": "fails", "expr": "{if(⍵=30) { io:print (1 2)[5] } ⋄ 1+⍵}¨∥ ⍳100", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ParallelTest.kt", "test": "exceptionInSingletonForeach", "kind": "fails", "expr": "{io:print (1 2)[5] ⋄ 1+⍵}¨∥ 10", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ParallelTest.kt", "test": "singletonForeachTwoArg", "kind": "eval", "expr": "11 {⍺+⍵}¨∥ 10", "expected": "21"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ParallelTest.kt", "test": "singletonForeachTwoArgIsCollapsed", "kind": "eval", "expr": "11 {io:print ⍺ ⋄ io:print ⍵ ⋄ ⍺+⍵}¨∥ 10", "expected": "21"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ParallelTest.kt", "test": "singletonForeachWithEnclosedTwoArgIsCollapsed", "kind": "eval", "expr": "100 {⍺+⍵}¨∥ ⊂{io:print ⍵ ⋄ 1+⍵}¨10 20 30", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ParallelTest.kt", "test": "arraySmallerThanTasksTwoArg", "kind": "eval", "expr": "100 200 300 400 500 600 {⍺+⍵}¨∥ 10 20 30 40 50 60", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ParallelTest.kt", "test": "largeArrayTwoArg", "kind": "eval", "expr": "(1+⍳10000) {⍺+⍵}¨∥ ⍳10000", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ParallelTest.kt", "test": "parallelWithLocalFn", "kind": "eval", "expr": "a ⇐ { 1+⍵ } ◊ a¨∥ 10 20 30 40 50", "expected": "(11 21 31 41 51)"}
@@ -756,6 +778,8 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickScalarEntryResultIsArray", "kind": "fails", "expr": "{,6}⍢(1⊇) 1 2 3 4 5", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithUnderInvalidDimension0", "kind": "fails", "expr": "(0 1 1) (2 1) (2 2) (1 2) (0 3) -⍢⊇ 3 4 ⍴ 10×⍳100", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithUnderInvalidDimension1", "kind": "fails", "expr": "(0 1) (2 1) (2 2) (1 2) (0 3) {1 2 3 4}⍢⊇ 3 4 ⍴ 10×⍳100", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithUnderAndSideEffect", "kind": "eval", "expr": "(0 1) (2 1) (2 2) (1 2) (0 3) {0 1 2 3 4}⍢⊇ io:print¨ 3 4 ⍴ 10×⍳100", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithUnderAndSideEffectGeneric", "kind": "eval", "expr": "(0 1) (2 1) (2 2) (1 2) (0 3) {0 1 2 3 4}⍢⊇ int:ensureGeneric io:print¨ 3 4 ⍴ 10×⍳100", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithUnderAndScalarExt", "kind": "eval", "expr": "{9}⍢(2 5⊇)  10 20 30 40 50 60", "expected": "(10 20 9 40 50 9)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithEmptyArray", "kind": "eval", "expr": "⍬ ⊇ 2 3 4", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "structuralUnderPickWithEmptyArray", "kind": "eval", "expr": "⍬ {1}⍢⊇ 2 3 4", "expected": "(2 3 4)"}
@@ -771,10 +795,13 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithNegativeAxisMultiDimensionOutOfRangeMultiElement", "kind": "fails", "expr": "(0 0) (¯1 ¯1) (¯5 ¯1) ⊇ 4 5 ⍴ ⍳100", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithNestedValue", "kind": "eval", "expr": "2 ⊇ (1 2) (3 4) (5 6)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PickTest.kt", "test": "pickWithMultiDimensionalNestedArray", "kind": "eval", "expr": "(⊂1 2) ⊇ 3 3 ⍴ (1 2) (2 3) (3 4) (4 5) (5 6) (6 7) 1 2 3", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PowerTest.kt", "test": "simpleCount", "kind": "eval", "expr": "({(⍵-1) ⊣ io:print ⍵}⍣{⍵=0}) 9", "expected": "-1"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PowerTest.kt", "test": "simpleCountCheckRightArg", "kind": "eval", "expr": "({(⍵-1) ⊣ io:print ⍵}⍣{⍺=1}) 9", "expected": "1"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PowerTest.kt", "test": "powerWithNumericArg", "kind": "eval", "expr": "({⍵+10}⍣3) 5", "expected": "35"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PowerTest.kt", "test": "powerWithZeroArg", "kind": "eval", "expr": "({⍵+10}⍣0) 5", "expected": "5"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PowerTest.kt", "test": "powerWithOneArg", "kind": "eval", "expr": "({⍵+200}⍣1) 5", "expected": "205"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PowerTest.kt", "test": "powerWithNegativeValueIsAnError", "kind": "fails", "expr": "(×⍣¯1)5", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PowerTest.kt", "test": "powerWithParenthesisedRightValueArgument", "kind": "eval", "expr": "(io:print⍣(3)) 10", "expected": "10"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PrimeTest.kt", "test": "primesKapTest", "kind": "eval", "expr": "math:primes 89", "expected": "(2 3 5 7 11 13 17 19 23 29 31 37 41 43 47 53 59 61 67 71 73 79 83 89)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PrimeTest.kt", "test": "primesDoubleKapTest", "kind": "eval", "expr": "math:primes 89.0", "expected": "(2 3 5 7 11 13 17 19 23 29 31 37 41 43 47 53 59 61 67 71 73 79 83 89)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PrimeTest.kt", "test": "primesWithNonScalarArgShouldFail", "kind": "fails", "expr": "math:primes 1 2 3 4 5", "expected": null}
@@ -801,6 +828,39 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PrototypeValuesTest.kt", "test": "characterProto1", "kind": "eval", "expr": "5 (↑ int:proto @X) \"bar\"", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PrototypeValuesTest.kt", "test": "prototypesArePreservedWhileResizing", "kind": "eval", "expr": "3 3 (↑ int:proto 9) 2 2 ⍴ 1 2 3 4", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/PrototypeValuesTest.kt", "test": "prototypesArePreservedWhileResizingEmptyValue", "kind": "eval", "expr": "3 (⍴ int:proto 9) 0⍴1", "expected": "(9 9 9)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "simpleLong", "kind": "eval", "expr": "?1000", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "simpleDouble", "kind": "eval", "expr": "?0", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "longArray", "kind": "eval", "expr": "?1000 1000 2000 3000", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "doubleArray", "kind": "eval", "expr": "?100⍴0", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "mixedLongAndDoubleInitialLong", "kind": "eval", "expr": "?100 100 0", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "mixedLongAndDoubleInitialDouble", "kind": "eval", "expr": "?0 0 100 0 300", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "floatValueInArg0", "kind": "fails", "expr": "?10 10 1.2", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "floatValueInArg1", "kind": "fails", "expr": "?0 0 1.2", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "floatValueInArg2", "kind": "fails", "expr": "?1.2 10 10", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "charValueInArg0", "kind": "fails", "expr": "?@a 10 10", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "charValueInArg1", "kind": "fails", "expr": "?10 10 @a", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "charValueInArg2", "kind": "fails", "expr": "?0 0 @a", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "charValueInArg3", "kind": "fails", "expr": "?10 10 0 @a", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "highRankInputLong", "kind": "eval", "expr": "?3 4⍴10×1+⍳12", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "highRankInputDouble", "kind": "eval", "expr": "?3 4⍴0", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "highRankInputMixedInitialLong", "kind": "eval", "expr": "?3 4⍴(10×1+⍳10),0 0", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "highRankInputMixedInitialDouble", "kind": "eval", "expr": "?3 4⍴0 0,(10×1+⍳10)", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "nestedArrays0", "kind": "eval", "expr": "?(10 10) (20 20)", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "nestedArrays1", "kind": "eval", "expr": "?(0 0) (100 200)", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "nestedArrays2", "kind": "eval", "expr": "? 2 2 ⍴ 0 0 (3 2 ⍴ 100 200 300 400 500 600) (1000 2000 (2 4 ⍴ 110 120 0 0 130 140 150 160))", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "negativeScalar", "kind": "fails", "expr": "?¯6", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "negativeScalarWithLong", "kind": "fails", "expr": "?10 10 ¯6", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "negativeScalarWithDouble", "kind": "fails", "expr": "?0 0 ¯6", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "negativeScalarWithMixed", "kind": "fails", "expr": "?0 10 10 ¯6", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "simpleBigintFitsInLong", "kind": "eval", "expr": "? int:asBigint 100", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "simpleBigintZero", "kind": "eval", "expr": "? int:asBigint 0", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "bigintFitsInLongInLongArray0", "kind": "eval", "expr": "?100 200 (int:asBigint 300)", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "bigintFitsInLongInLongArray1", "kind": "eval", "expr": "?0 0 (int:asBigint 0)", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "bigintFitsInLongInLongArray2", "kind": "eval", "expr": "?0 0 100 (int:asBigint 0)", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "bigintFitsInLongInLongArray3", "kind": "eval", "expr": "?0 0 100 (int:asBigint 200)", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "largeBigint", "kind": "fails", "expr": "?100000000000000000000000000000000000000", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "binaryRandom", "kind": "eval", "expr": "?200⍴2", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RandomTest.kt", "test": "emptyResultList", "kind": "eval", "expr": "0?3", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RangeTest.kt", "test": "scalarToScalarRange", "kind": "eval", "expr": "2 … 9", "expected": "(2 3 4 5 6 7 8 9)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RangeTest.kt", "test": "specialisedTypeLong", "kind": "eval", "expr": "2 … 9", "expected": "(2 3 4 5 6 7 8 9)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RangeTest.kt", "test": "specialisedTypeCombinedLong", "kind": "eval", "expr": "2 10 20 … 25 27", "expected": "(2 10 20 21 22 23 24 25 27)"}
@@ -889,9 +949,13 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RemoveTest.kt", "test": "removeWithHigherDimensionEnclosedRightArgument0", "kind": "eval", "expr": "(⍳ 10 3) ~ ⊂(2 0) (2 1) (2 2)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RemoveTest.kt", "test": "removeWithHigherDimensionEnclosedRightArgument1", "kind": "fails", "expr": "({⍵ , (null 1)↑⍵} 3 2 ⍴ {1 ⍵ 1}¨ ⍳9) ~ ⊂(0 1 0) (1 1 1)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RemoveTest.kt", "test": "removeWithHigherDimensionEnclosedRightArgument2", "kind": "eval", "expr": "(1 2 ⍴ (100 200) (300 400)) ~ ⊂(100 200) (300 400)", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ReturnTest.kt", "test": "simpleReturn", "kind": "eval", "expr": "∇ foo {\n    io:print \"a\"\n    →⍵+10\n    io:print \"b\"\n    ⍵+20\n}\nfoo 100", "expected": "110"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ReturnTest.kt", "test": "multiReturn", "kind": "eval", "expr": "∇ foo {\n    io:print \"a\"\n    →⍵+10\n    io:print \"b\"\n    →⍵+20\n}\nfoo 100", "expected": "110"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ReturnTest.kt", "test": "innerScopeReturn", "kind": "eval", "expr": "∇ foo {\n    io:print \"a\"\n    bar ⇐ { io:print \"b\" ◊ →⍵+10 ◊ io:print \"c\" ◊ ⍵+20 }\n    io:print \"d\"\n    x ← ⍵ + bar 1\n    io:print \"e\"\n    x\n}\nfoo 30", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ReturnTest.kt", "test": "returnInIf", "kind": "eval", "expr": "∇ foo {\n    result ← if (⍵≡0) {\n        →10\n    } else {\n        20\n    }\n    result + 1\n}\na ← foo 0\nb ← foo 1\na b", "expected": "(10 21)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ReturnTest.kt", "test": "returnOutsideFunctionScopeIsParseError", "kind": "fails", "expr": "→10", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ReturnTest.kt", "test": "returnFromNestedFunction", "kind": "eval", "expr": "∇ foo {\n    {\n        bar ⇐ { →⍵+100 ◊ ⍵+200 }\n        1 + bar ⍵\n    } ⍵+2\n}\nfoo 3", "expected": "106"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ReturnTest.kt", "test": "twoArgReturn", "kind": "eval", "expr": "∇ foo {\n    io:print ⍺\n    io:print \"a\"\n    ⍵ → 2\n    io:print ⍺\n    io:print \"b\"\n    1\n}\n(3 foo 0) (4 foo 1)", "expected": "(1 2)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ReturnTest.kt", "test": "capturedFrameWithCollapse", "kind": "eval", "expr": "{S ⇐ → ⋄ comp {(S⍣(81=×⍨⍵)) ⍵}¨⍳10} 0", "expected": "9"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ReturnTest.kt", "test": "capturedFrameNoCollapse", "kind": "fails", "expr": "{S ⇐ → ⋄ {(S⍣(81=×⍨⍵)) ⍵}¨⍳10} 0", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ReturnTest.kt", "test": "capturedFrameNoLazyEvaluation", "kind": "eval", "expr": "{ S ⇐ → ◊ 100 + { S ⍵+20 ◊ ⍵+1 } 10 } 0", "expected": "30"}
@@ -918,11 +982,13 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ScopeTest.kt", "test": "axisAssignedFunctionWithDifferentEnv1", "kind": "eval", "expr": "a ⇐ 'array≡typeof\nabc ⇐ +[1]\n∇ foo (v) {\n  abc¨ v\n}\n{comp ⍵} foo 4 5 6", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ScopeTest.kt", "test": "axisAssignedFunctionWithDifferentEnv2", "kind": "eval", "expr": "a ⇐ 'array≡typeof\ny ← 1\nabc ⇐ { +[y] ⍵ }\n∇ foo (v) {\n  abc¨ v\n}\n{comp ⍵} foo 4 5 6", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ScopeTest.kt", "test": "axisAssignedFunctionWithDifferentEnv3", "kind": "fails", "expr": "{\n  a ⇐ 'array≡typeof\n  y ← 1\n  abc ⇐ { +[y] ⍵ }\n  ∇ foo (v) {\n    abc¨ v\n  }\n  {comp ⍵} foo 4 5 6\n} 0", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ScopeTest.kt", "test": "axisAssignedFunctionWithDifferentEnv4", "kind": "eval", "expr": "{\n  a ⇐ 'array≡typeof\n  y ← 1\n  abc ← λ{ +[y] ⍵ }\n  foo ⇐ {\n    io:print \"foo\"\n    ⍞abc¨ ⍵\n  }\n  {comp ⍵} foo 4 5 6\n} 0", "expected": "(4 5 6)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ScopeTest.kt", "test": "axisAssignedFunctionWithDifferentEnv5", "kind": "eval", "expr": "abc ⇐ 10 20 30+[1]\n{comp ⍵} abc 2 3 ⍴ 1+⍳6", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ScopeTest.kt", "test": "axisAssignedFunctionWithDifferentEnv6", "kind": "eval", "expr": "a ⇐ 'array≡typeof\nabc ⇐ 10 20+[1]\n∇ foo (v) {\n  abc v\n}\n{comp ⍵} foo 3 2 ⍴ 1+⍳6", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ScopeTest.kt", "test": "axisAssignedFunctionWithDifferentEnv7", "kind": "eval", "expr": "{\n  abc ⇐ 10 20 30+[1]\n  {comp ⍵} abc 2 3 ⍴ 1+⍳6\n} 0", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ScopeTest.kt", "test": "axisAssignedFunctionWithDiscardResult", "kind": "eval", "expr": "1 + 2\n10 100 1000 +[0] 3 3 ⍴ ⍳9\n3", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ScopeTest.kt", "test": "axisAssignedFunctionWithDiscardResultAndLeftAssigned", "kind": "eval", "expr": "1 + 2\n(10 100 1000 +[0]) 3 3 ⍴ ⍳9\n3", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ScopeTest.kt", "test": "leftBoundFunctionInDfn", "kind": "eval", "expr": "foo ⇐ { a ← λ{ 1 2 3 +[io:print 1] ⍵ } ◊ io:print 2 ◊ a }\nio:print 3\n⍞(foo 0) 2 3 ⍴ 1+⍳6", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ScopeTest.kt", "test": "escapingForEachScope", "kind": "eval", "expr": "a0←10 ⋄ { a←⍵ ⋄ { { a + ⍵ }¨ ⍵+1 } 101 201 301 401 }¨ 10 20 30 40", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ScopeTest.kt", "test": "contribScopeWithExtraEvaluation", "kind": "eval", "expr": "fns ← ⍬\ni ← 0\nwhile (i<2) {\n  fns ← fns , λ(⍞(i ⊃ (λ+) (λ÷)))\n  i ← i+1\n}\n{⍞⍵ 4}¨ fns", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ScopeTest.kt", "test": "contribScopeWithNoExtraEvaluation", "kind": "eval", "expr": "fns ← ⍬\ni ← 0\nwhile (i<2) {\n  fns ← fns , i ⊃ (λ+) (λ÷)\n  i ← i+1\n}\n{⍞⍵ 4}¨ fns", "expected": null}
@@ -995,6 +1061,102 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedArrayTest.kt", "test": "ravelResultDouble", "kind": "eval", "expr": ",2 3 ⍴ 1.0 2.0 3.0 4.0 5.0 6.0", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedArrayTest.kt", "test": "ravelSingleElementInt", "kind": "eval", "expr": ",5", "expected": "(5)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedArrayTest.kt", "test": "ravelSingleElementDouble", "kind": "eval", "expr": ",5.5", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToMixed", "kind": "eval", "expr": "1 2 = 1 1.2", "expected": "(1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToMixed", "kind": "eval", "expr": "1 2 ≠ 1 1.2", "expected": "(0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToMixed", "kind": "eval", "expr": "1 2 < 1 1.2", "expected": "(0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToMixed", "kind": "eval", "expr": "1 2 ≤ 1 1.2", "expected": "(1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToMixed", "kind": "eval", "expr": "1 2 > 1 1.2", "expected": "(0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToMixed", "kind": "eval", "expr": "1 2 ≥ 1 1.2", "expected": "(1 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToLong", "kind": "eval", "expr": "1 1.2 = 1 2", "expected": "(1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToLong", "kind": "eval", "expr": "1 1.2 ≠ 1 2", "expected": "(0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToLong", "kind": "eval", "expr": "1 1.2 < 1 2", "expected": "(0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToLong", "kind": "eval", "expr": "1 1.2 ≤ 1 2", "expected": "(1 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToLong", "kind": "eval", "expr": "1 1.2 > 1 2", "expected": "(0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToLong", "kind": "eval", "expr": "1 1.2 ≥ 1 2", "expected": "(1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareScalarLongToMixed", "kind": "eval", "expr": "3 = 1 2 3 1.1 1.2", "expected": "(0 0 1 0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareScalarLongToMixed", "kind": "eval", "expr": "3 ≠ 1 2 3 1.1 1.2", "expected": "(1 1 0 1 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareScalarLongToMixed", "kind": "eval", "expr": "3 < 1 2 3 1.1 1.2 4 4.1", "expected": "(0 0 0 0 0 1 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareScalarLongToMixed", "kind": "eval", "expr": "3 ≤ 1 2 3 1.1 1.2 4 4.1", "expected": "(0 0 1 0 0 1 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareScalarLongToMixed", "kind": "eval", "expr": "3 > 1 2 3 1.1 1.2 4 4.1", "expected": "(1 1 0 1 1 0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareScalarLongToMixed", "kind": "eval", "expr": "3 ≥ 1 2 3 1.1 1.2 4 4.1", "expected": "(1 1 1 1 1 0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToScalarLong", "kind": "eval", "expr": "1 2 3 1.1 1.2 = 3", "expected": "(0 0 1 0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToScalarLong", "kind": "eval", "expr": "1 2 3 1.1 1.2 ≠ 3", "expected": "(1 1 0 1 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToScalarLong", "kind": "eval", "expr": "1 2 3 1.1 1.2 4 4.1 < 3", "expected": "(1 1 0 1 1 0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToScalarLong", "kind": "eval", "expr": "1 2 3 1.1 1.2 4 4.1 ≤ 3", "expected": "(1 1 1 1 1 0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToScalarLong", "kind": "eval", "expr": "1 2 3 1.1 1.2 4 4.1 > 3", "expected": "(0 0 0 0 0 1 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToScalarLong", "kind": "eval", "expr": "1 2 3 1.1 1.2 4 4.1 ≥ 3", "expected": "(0 0 1 0 0 1 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareScalarDoubleToMixed", "kind": "eval", "expr": "1.1 = 1 2 3 1.1 1.2", "expected": "(0 0 0 1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareScalarDoubleToMixed", "kind": "eval", "expr": "1.1 ≠ 1 2 3 1.1 1.2", "expected": "(1 1 1 0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareScalarDoubleToMixed", "kind": "eval", "expr": "1.1 < 1 2 3 1.1 1.2", "expected": "(0 1 1 0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareScalarDoubleToMixed", "kind": "eval", "expr": "1.1 ≤ 1 2 3 1.1 1.2", "expected": "(0 1 1 1 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareScalarDoubleToMixed", "kind": "eval", "expr": "1.1 > 1 2 3 1.1 1.2", "expected": "(1 0 0 0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareScalarDoubleToMixed", "kind": "eval", "expr": "1.1 ≥ 1 2 3 1.1 1.2", "expected": "(1 0 0 1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToScalarDouble", "kind": "eval", "expr": "1 2 3 1.1 1.2 = 1.1", "expected": "(0 0 0 1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToScalarDouble", "kind": "eval", "expr": "1 2 3 1.1 1.2 ≠ 1.1", "expected": "(1 1 1 0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToScalarDouble", "kind": "eval", "expr": "1 2 3 1.1 1.2 < 1.1", "expected": "(1 0 0 0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToScalarDouble", "kind": "eval", "expr": "1 2 3 1.1 1.2 ≤ 1.1", "expected": "(1 0 0 1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToScalarDouble", "kind": "eval", "expr": "1 2 3 1.1 1.2 > 1.1", "expected": "(0 1 1 0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToScalarDouble", "kind": "eval", "expr": "1 2 3 1.1 1.2 ≥ 1.1", "expected": "(0 1 1 1 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToMixed", "kind": "eval", "expr": "1 2 1.1 = 1 1.2 1.1", "expected": "(1 0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToMixed", "kind": "eval", "expr": "1 2 1.1 ≠ 1 1.2 1.1", "expected": "(0 1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToMixed", "kind": "eval", "expr": "1 2 1.1 < 1 1.2 1.1", "expected": "(0 0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToMixed", "kind": "eval", "expr": "1 2 1.1 ≤ 1 1.2 1.1", "expected": "(1 0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToMixed", "kind": "eval", "expr": "1 2 1.1 > 1 1.2 1.1", "expected": "(0 1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareMixedToMixed", "kind": "eval", "expr": "1 2 1.1 ≥ 1 1.2 1.1", "expected": "(1 1 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareBooleanToBoolean", "kind": "eval", "expr": "1 1 0 0 = 1 0 0 1", "expected": "(1 0 1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareBooleanToBoolean", "kind": "eval", "expr": "1 1 0 0 ≠ 1 0 0 1", "expected": "(0 1 0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareBooleanToBoolean", "kind": "eval", "expr": "1 1 0 0 < 1 0 0 1", "expected": "(0 0 0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareBooleanToBoolean", "kind": "eval", "expr": "1 1 0 0 ≤ 1 0 0 1", "expected": "(1 0 1 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareBooleanToBoolean", "kind": "eval", "expr": "1 1 0 0 > 1 0 0 1", "expected": "(0 1 0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareBooleanToBoolean", "kind": "eval", "expr": "1 1 0 0 ≥ 1 0 0 1", "expected": "(1 1 1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToLong", "kind": "eval", "expr": "1 2 3 0 0 = 2 2 1 0 5", "expected": "(0 1 0 1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToLong", "kind": "eval", "expr": "1 2 3 0 0 ≠ 2 2 1 0 5", "expected": "(1 0 1 0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToLong", "kind": "eval", "expr": "1 2 3 0 0 < 2 2 1 0 5", "expected": "(1 0 0 0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToLong", "kind": "eval", "expr": "1 2 3 0 0 ≤ 2 2 1 0 5", "expected": "(1 1 0 1 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToLong", "kind": "eval", "expr": "1 2 3 0 0 > 2 2 1 0 5", "expected": "(0 0 1 0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToLong", "kind": "eval", "expr": "1 2 3 0 0 ≥ 2 2 1 0 5", "expected": "(0 1 1 1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongScalarToLong", "kind": "eval", "expr": "3 = 1 3", "expected": "(0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongScalarToLong", "kind": "eval", "expr": "3 ≠ 1 3", "expected": "(1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongScalarToLong", "kind": "eval", "expr": "3 < 1 3", "expected": "(0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongScalarToLong", "kind": "eval", "expr": "3 ≤ 1 3", "expected": "(0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongScalarToLong", "kind": "eval", "expr": "3 > 1 3", "expected": "(1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongScalarToLong", "kind": "eval", "expr": "3 ≥ 1 3", "expected": "(1 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToLongScalar", "kind": "eval", "expr": "1 3 = 3", "expected": "(0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToLongScalar", "kind": "eval", "expr": "1 3 ≠ 3", "expected": "(1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToLongScalar", "kind": "eval", "expr": "1 3 < 3", "expected": "(1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToLongScalar", "kind": "eval", "expr": "1 3 ≤ 3", "expected": "(1 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToLongScalar", "kind": "eval", "expr": "1 3 > 3", "expected": "(0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToLongScalar", "kind": "eval", "expr": "1 3 ≥ 3", "expected": "(0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleToDouble", "kind": "eval", "expr": "1.2 1.1 = 1.1 1.1", "expected": "(0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleToDouble", "kind": "eval", "expr": "1.2 1.1 ≠ 1.1 1.1", "expected": "(1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleToDouble", "kind": "eval", "expr": "1.2 1.1 < 1.1 1.1", "expected": "(0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleToDouble", "kind": "eval", "expr": "1.2 1.1 ≤ 1.1 1.1", "expected": "(0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleToDouble", "kind": "eval", "expr": "1.2 1.1 > 1.1 1.1", "expected": "(1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleToDouble", "kind": "eval", "expr": "1.2 1.1 ≥ 1.1 1.1", "expected": "(1 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleScalarToDouble", "kind": "eval", "expr": "1.2 = 1.1 1.2", "expected": "(0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleScalarToDouble", "kind": "eval", "expr": "1.2 ≠ 1.1 1.2", "expected": "(1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleScalarToDouble", "kind": "eval", "expr": "1.2 < 1.1 1.2", "expected": "(0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleScalarToDouble", "kind": "eval", "expr": "1.2 ≤ 1.1 1.2", "expected": "(0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleScalarToDouble", "kind": "eval", "expr": "1.2 > 1.1 1.2", "expected": "(1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleScalarToDouble", "kind": "eval", "expr": "1.2 ≥ 1.1 1.2", "expected": "(1 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleToScalarDouble", "kind": "eval", "expr": "1.1 1.2 = 1.2", "expected": "(0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleToScalarDouble", "kind": "eval", "expr": "1.1 1.2 ≠ 1.2", "expected": "(1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleToScalarDouble", "kind": "eval", "expr": "1.1 1.2 < 1.2", "expected": "(1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleToScalarDouble", "kind": "eval", "expr": "1.1 1.2 ≤ 1.2", "expected": "(1 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleToScalarDouble", "kind": "eval", "expr": "1.1 1.2 > 1.2", "expected": "(0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleToScalarDouble", "kind": "eval", "expr": "1.1 1.2 ≥ 1.2", "expected": "(0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToDouble", "kind": "eval", "expr": "1 2 = 1.1 1.2", "expected": "(0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToDouble", "kind": "eval", "expr": "1 2 ≠ 1.1 1.2", "expected": "(1 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToDouble", "kind": "eval", "expr": "1 2 < 1.1 1.2", "expected": "(1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToDouble", "kind": "eval", "expr": "1 2 ≤ 1.1 1.2", "expected": "(1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToDouble", "kind": "eval", "expr": "1 2 > 1.1 1.2", "expected": "(0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareLongToDouble", "kind": "eval", "expr": "1 2 ≥ 1.1 1.2", "expected": "(0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleToLong", "kind": "eval", "expr": "1.1 1.2 = 1 2", "expected": "(0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleToLong", "kind": "eval", "expr": "1.1 1.2 ≠ 1 2", "expected": "(1 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleToLong", "kind": "eval", "expr": "1.1 1.2 < 1 2", "expected": "(0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleToLong", "kind": "eval", "expr": "1.1 1.2 ≤ 1 2", "expected": "(0 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleToLong", "kind": "eval", "expr": "1.1 1.2 > 1 2", "expected": "(1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SpecialisedComparisonTest.kt", "test": "specialisedCompareDoubleToLong", "kind": "eval", "expr": "1.1 1.2 ≥ 1 2", "expected": "(1 0)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/StandardLibMathTest.kt", "test": "testSimpleMatrixInverse", "kind": "eval", "expr": "⌹ 5 5 ⍴ 1 0 0 0 0 0", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/StandardLibMathTest.kt", "test": "testMatrixDivision", "kind": "eval", "expr": "(4 4⍴12 1 4 10 ¯6 ¯5 4 7 ¯4 9 3 4 ¯2 ¯6 7 7)⌹93 81 93.5 120.5", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/StandardLibMathTest.kt", "test": "matrixInverseContrib", "kind": "eval", "expr": "⌹3 3⍴1 2 3 4 15 16 7 18 9", "expected": null}
@@ -1006,6 +1168,8 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/StandardLibSimpleFunctionsTest.kt", "test": "fromHex", "kind": "eval", "expr": "io:fromHex¨ \"0\" \"1\" \"1ff\" \"1ABCDEF\" \"123456abcdef0123456789\" \"10000000000000000000000000000000000000\"", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/StandardLibSimpleFunctionsTest.kt", "test": "fromHexInvalidCharacters", "kind": "fails", "expr": "io:fromHex \"qwetest\"", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/StandardLibSimpleFunctionsTest.kt", "test": "base64EncodeTest", "kind": "eval", "expr": "io:base64Encode io:encodeUtf8 \"teststring1234\"", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/StandardLibSimpleFunctionsTest.kt", "test": "qprint", "kind": "eval", "expr": "⎕p 1 2 3", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/StandardLibSimpleFunctionsTest.kt", "test": "qprintWithNewline", "kind": "eval", "expr": "⎕pl 10", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/StandardLibSimpleFunctionsTest.kt", "test": "upperCaseChars", "kind": "eval", "expr": "⎕A", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/StandardLibSimpleFunctionsTest.kt", "test": "lowerCaseChars", "kind": "eval", "expr": "⎕a", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/StandardLibSimpleFunctionsTest.kt", "test": "digits", "kind": "eval", "expr": "⎕d", "expected": null}
@@ -1468,6 +1632,8 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComplexExpressionsTest.kt", "test": "nestedTwoArgFunctions", "kind": "eval", "expr": "200 {⍺+⍵+10 {1+⍺+⍵} 4} 5 ", "expected": "220"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComplexExpressionsTest.kt", "test": "bareFunctionCall", "kind": "fails", "expr": "-", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComplexExpressionsTest.kt", "test": "bareFunctionCallWithNewline", "kind": "fails", "expr": "-\nfoo", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComplexExpressionsTest.kt", "test": "multilineExpression", "kind": "eval", "expr": "io:print 3\n2", "expected": "2"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComplexExpressionsTest.kt", "test": "multilineExpressionWithBlankLines", "kind": "eval", "expr": "io:print 3\n\n2", "expected": "2"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComplexExpressionsTest.kt", "test": "functionInParens", "kind": "eval", "expr": "8 16 32 (÷) 2", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComplexExpressionsTest.kt", "test": "functionAndOperatorInParen", "kind": "eval", "expr": "2 (↑¨) (1 2 3 4) (4 5 6 7)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComplexExpressionsTest.kt", "test": "functionInParenWithOperator", "kind": "eval", "expr": "(⊂)¨ (0 1 2) (3 4 5)", "expected": null}
@@ -1496,6 +1662,7 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "integerOptimisedArrays", "kind": "eval", "expr": "(int:ensureLong 301 ¯302 303 ¯304 305) (+∘×) (int:ensureLong ¯10 ¯11 12 13 14)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "doubleOptimisedArrays", "kind": "eval", "expr": "(int:ensureDouble 301.0 ¯302.0 303.0 ¯304.0 305.0) (+∘×) (int:ensureDouble ¯10.0 ¯11.0 12.0 13.0 14.0)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "composeMonadicArg", "kind": "eval", "expr": "{200+⍺-⍵}∘{1+⍵} 1000", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "composeMonadicArgEvaluationOrder", "kind": "eval", "expr": "{io:print 5000+⍺-⍵}∘{io:print 4+⍵} 1000", "expected": "4996"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "composeDyadicRightFunctionShouldFail", "kind": "fails", "expr": "{10+⍺+⍵}∘{1+⍺+⍵} 1", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "composeWithCustomFunction0", "kind": "eval", "expr": "∇ a (x) { x+100 }\n∇ (x) b (y) { y+1000+x }\n1000 (b∘a) 2000", "expected": "4100"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "composeWithCustomFunction1", "kind": "eval", "expr": "∇ a (x) { x+100 }\n∇ (x) b (y) { y+1000+x }\n1000 b∘a 2000", "expected": "4100"}
@@ -1515,22 +1682,42 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "nested2ChainWithFunction1", "kind": "eval", "expr": "a ⇐ -÷ ⋄ 7 3 (a⌈) 4", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "nested3Chain0", "kind": "eval", "expr": "10 11 (-«+»(÷⌈)) 3", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "nested3ChainWithFunction", "kind": "eval", "expr": "a ⇐ ÷⌈ ⋄ 10 11 -«+»a 3", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "contribTest0", "kind": "eval", "expr": "${makeFunctions()}\n(A(B C))@y ⋄ 3", "expected": "3"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "contribTest1", "kind": "eval", "expr": "${makeFunctions()}\n@x(A(B C))@y ⋄ 3", "expected": "3"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "contribTest2", "kind": "eval", "expr": "${makeFunctions()}\n(A(B C)«D» E)@y ⋄ 3", "expected": "3"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "contribTest3", "kind": "eval", "expr": "${makeFunctions()}\n@x(A(B C)«D» E)@y ⋄ 3", "expected": "3"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "chainWithAxisTest0", "kind": "eval", "expr": "a ⇐ ({9,⊂⍵}+[1]) ◊ 1 2 a 2 2 ⍴ ⍳4", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "chainWithAxisTest1", "kind": "eval", "expr": "curr ← 0\na ⇐ {curr ← curr+1 ◊ ⍵}+[io:print 0]\nres ← (100 200 a 2 2 ⍴ ⍳4) (300 400 a 2 2 ⍴ ⍳4)\ncurr res", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "chainWithDfns0", "kind": "eval", "expr": "({io:print ⍵+1} «{io:print ⍺+⍵+10}» {io:print ⍵+3}) 1", "expected": "16"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "chainWithDfns1", "kind": "eval", "expr": "(+ «{io:print ⍺+⍵+10}» +) 1", "expected": "12"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "chainWithDfns2", "kind": "eval", "expr": "10 ({io:print ⍺+⍵+1} «{io:print ⍺+⍵+10}» {io:print ⍺+⍵+3}) 100", "expected": "234"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "chainWithDfns3", "kind": "eval", "expr": "10 (+ «{io:print ⍺+⍵+10}» +) 9", "expected": "48"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "chainWithDfns4", "kind": "eval", "expr": "({io:print ⍵+1} «+» +) 1", "expected": "3"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "chainWithDfns5", "kind": "eval", "expr": "(+ «+» {io:print ⍵+1}) 1", "expected": "3"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "reverseCompose0", "kind": "eval", "expr": "10 (-⍛+) 100", "expected": "90"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "reverseComposeDyadicRightFunctionShouldFail", "kind": "fails", "expr": "{10+⍺+⍵}⍛{1+⍺+⍵} 1", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "simpleReverseComposeMonadic", "kind": "eval", "expr": "((1+)⍛-) 1", "expected": "1"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "reverseComposeMonadicEvaluationOrder", "kind": "eval", "expr": "{io:print 100+⍵}⍛{io:print 200+⍺+⍵} 3", "expected": "306"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindSimpleFunction", "kind": "eval", "expr": "(10+) 1", "expected": "11"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindToDfn", "kind": "eval", "expr": "(5 {⍺+⍵+50}) 4", "expected": "59"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindToNamedFunction", "kind": "eval", "expr": "a ⇐ 10+\na 1", "expected": "11"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindDfnToNamed", "kind": "eval", "expr": "a ⇐ 5 {⍺+⍵+50}\na 4", "expected": "59"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindWithClosure0", "kind": "eval", "expr": "i ← 0\na ⇐ 5 { ⍺+⍵+i←io:print i+1 }\n(a 1) + (a 2)", "expected": "16"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindWithClosure1", "kind": "eval", "expr": "i ← 0\na ⇐ 5 { ⍺+⍵+i←io:print i+1 }\n{\n  (a 1) + (a 2)\n} 0", "expected": "16"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindWithClosure2", "kind": "eval", "expr": "i ← 0\n{\n  a ⇐ 5 { ⍺+⍵+i←io:print i+1 }\n  (a 1) + (a 2)\n} 0", "expected": "16"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindWithLeftVariable", "kind": "eval", "expr": "x ← 10\na ⇐ x+\ny ← a 1\nx ← 20\nz ← a 6\ny z", "expected": "(11 16)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindWithTrain", "kind": "eval", "expr": "foo ⇐ 2 (+⊢)\nfoo 4", "expected": "4"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindWithOutput0", "kind": "eval", "expr": "foo ⇐ (io:print 2)+\n(foo 100) (foo 101)", "expected": "(102 103)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindWithOutput1", "kind": "eval", "expr": "foo ⇐ (io:print 2)+\n1", "expected": "1"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindWithScope", "kind": "eval", "expr": "foo ⇐ {\n  λ((10+⍵)+)\n}\na ⇐ ⍞(foo 1)\na 5", "expected": "16"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindWithTrainArgument", "kind": "eval", "expr": "(1(-÷)) 4", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindArgumentIsFirstArgInTrain", "kind": "eval", "expr": "((3-)÷) 8", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindMultipleFunctions0", "kind": "eval", "expr": "((11+)(22+)) 44", "expected": "77"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindMultipleFunctions1", "kind": "eval", "expr": "(((io:print 11)+)((io:print 22)+)) 44", "expected": "77"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindMultipleFunctions2", "kind": "eval", "expr": "(((io:print 11)+)«×»((io:print 22)+)) 100", "expected": "13542"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindChain0", "kind": "eval", "expr": "(1+10+) 4", "expected": "15"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindChain1", "kind": "eval", "expr": "(1+2+4+) 10", "expected": "17"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindChain2", "kind": "eval", "expr": "((io:print 1)+(io:print 2)+(io:print 4)+) 10", "expected": "17"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindChain3", "kind": "eval", "expr": "((1+2+)«×»(5+20+)) 1", "expected": "104"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindWithLocalFunction", "kind": "eval", "expr": "a ⇐ { (⍺+) ⍵ } ⋄ 3 a 1 2 3", "expected": "(4 5 6)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ComposeTest.kt", "test": "leftBindWithLocalFunctionAndEach", "kind": "eval", "expr": "a ⇐ { (⍺+)¨ ⍵ } ⋄ 3 a 1 2 3", "expected": "(4 5 6)"}
@@ -1643,6 +1830,10 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CustomFunctionTest.kt", "test": "shortFormWithLeftArgAndFork", "kind": "eval", "expr": "foo ⇐ 10 (÷«⊢»⊣)\nfoo 20", "expected": "10"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CustomFunctionTest.kt", "test": "shortFormWithLeftArgArray", "kind": "eval", "expr": "foo ⇐ 10 11 12 13+\nfoo 10", "expected": "(20 21 22 23)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CustomFunctionTest.kt", "test": "shortFormWithSimpleOperator", "kind": "eval", "expr": "foo ⇐ ×/ ⋄ foo 1 2 3", "expected": "6"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CustomFunctionTest.kt", "test": "redefineStdToShortForm", "kind": "eval", "expr": "∇ foo (x) { x+10 }\nio:print foo 100\nfoo ⇐ { ⍵+20 }\nio:print foo 101", "expected": "121"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CustomFunctionTest.kt", "test": "redefineShortToStdForm", "kind": "eval", "expr": "foo ⇐ { ⍵+10 }\nio:print foo 100\n∇ foo (x) { x+20 }\nio:print foo 160", "expected": "170"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CustomFunctionTest.kt", "test": "localScopeFunction", "kind": "eval", "expr": "∇ foo (x) { x+50 }\n∇ bar (x) {\n  foo ⇐ { ⍵+100 }\n  foo x\n}\n∇ xyz (x) {\n  io:print foo x+200\n  io:print bar x+1000\n}\nxyz 8", "expected": "1108"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CustomFunctionTest.kt", "test": "localScopeFunctionWithLambda", "kind": "eval", "expr": "∇ foo (x) {x+50 }\n∇ bar (x) {\n  foo ⇐ { ⍵+100 }\n  (foo x) λfoo\n}\n∇ xyz (x) {\n  io:print foo x+200\n  a ← bar x+1000\n  io:print a[0]\n  b ← a[1]\n  io:print ⍞b 31\n}\nxyz 100", "expected": "131"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CustomFunctionTest.kt", "test": "localScopeNesting", "kind": "eval", "expr": "∇ foo (x) {\n  a ← 1\n  bar ⇐ {\n    b ← ⍵\n    barInternal ⇐ {\n      a + 2 + ⍵ + b\n    }\n    λbarInternal\n  }\n  bar 3 + x\n}\nc ← foo 4\n⍞c 5", "expected": "15"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CustomFunctionTest.kt", "test": "shortFormWithIllegalSymbol0", "kind": "fails", "expr": "1 ⇐ {⍺+⍵}", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CustomFunctionTest.kt", "test": "shortFormWithIllegalSymbol1", "kind": "fails", "expr": "1 foo ⇐ {⍺+⍵}", "expected": null}
@@ -1652,7 +1843,9 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CustomFunctionTest.kt", "test": "shortFormWithIllegalSymbol5", "kind": "fails", "expr": "(a) ⇐ {⍺+⍵}", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CustomFunctionTest.kt", "test": "shortFormWithIllegalSymbol6", "kind": "fails", "expr": "(a;b) ⇐ {⍺+⍵}", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CustomFunctionTest.kt", "test": "functionAssignmentReturnsNull", "kind": "eval", "expr": "1 , (a ⇐ +[2])", "expected": "(1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CustomFunctionTest.kt", "test": "functionAssignmentReturnsNullWithSideEffect", "kind": "eval", "expr": "1 , (a ⇐ +[io:print 2])", "expected": "(1)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CustomFunctionTest.kt", "test": "lambdaWithAssignment", "kind": "eval", "expr": "q ← λ(+[0])\n10 20 ⍞q 2 2 ⍴ ⍳4", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CustomFunctionTest.kt", "test": "lambdaWithAssignmentWithSideEffect", "kind": "eval", "expr": "q ← λ(+[io:print 0])\nio:print 2\n10 20 ⍞q 2 2 ⍴ ⍳4", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CustomFunctionTest.kt", "test": "nestedDfns", "kind": "eval", "expr": "{ ⍵ + { ⍵ + { ⍵ + { 1 + ⍵ } 2 } 4 } 8 } 16", "expected": "31"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CustomFunctionTest.kt", "test": "nestedDnfsOuterRef", "kind": "eval", "expr": "q ⇐ { a ← 1 ◊ { a + ⍵ } ⍵ } ◊ { { ⍵ + q 2 } 4 } 100", "expected": "7"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/CustomFunctionTest.kt", "test": "redefineLocalFunction", "kind": "eval", "expr": "foo ⇐ { 1 + ⍵ }\n∇ bar (x) {\n  foo 100+x\n}\nfoo ⇐ { 21 + ⍵ }\nbar 300", "expected": "421"}
@@ -1721,6 +1914,7 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DiscloseTest.kt", "test": "disclosePreservesSpecialisedTypeDouble", "kind": "eval", "expr": "⊃ (1.5 2.5) (3.5 4.0)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DiscloseTest.kt", "test": "disclosePreservesSpecialisedTypeDoubleWithFill", "kind": "eval", "expr": "⊃ (1.5 2.5 3.0 4.0) (5.0 6.0)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DiscloseTest.kt", "test": "disclosePreservesSpecialisedTypeDoubleWithDoubleFill", "kind": "eval", "expr": "(⊃ int:proto 5.5) (1.5 2.5 3.0 4.0) (5.0 6.0)", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DiscloseTest.kt", "test": "discloseEvaluatesOnlyOnce", "kind": "eval", "expr": "⊃ (io:print¨ 1 2 3 4 5 6) (io:print¨ 7 8 9 10 11 12)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DiscloseTest.kt", "test": "discloseWithOversizedArray", "kind": "fails", "expr": "⊃ 200000 ⍴ (⊂1000000 ⍴ 1)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/DiscloseTest.kt", "test": "enclosedValueShouldNotHaveASpecialisedType", "kind": "eval", "expr": "({0⍳⍨(↑⍵)=⍵}⍤1) ⍉(30⍴2)⊤10 11 12", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncloseTest.kt", "test": "encloseArrayTest", "kind": "eval", "expr": "⊂1 2 3 4", "expected": null}
@@ -1776,16 +1970,26 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "testIfElseInExpressionLeftSide", "kind": "eval", "expr": "1000 + if (1) { 10 } else { 20 }", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "testIfElseInExpressionRightSide", "kind": "eval", "expr": "if (1) { 4 } else { 5 } + 1000", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "testIfElseInExpressionBothSides", "kind": "eval", "expr": "10000 + if (1) { 4 } else { 5 } + 1000", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "testSideEffectsInIf", "kind": "eval", "expr": "io:print 10 ◊ if (1) { io:print 2 } ◊ io:print 3 ◊ 100", "expected": "100"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "testSideEffectsInIfElse", "kind": "eval", "expr": "io:print 10 ◊ if (1) { io:print 2 } else { io:print 4 } ◊ io:print 3 ◊ 100", "expected": "100"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "testMultilineIf", "kind": "eval", "expr": "if (1) {\n    10\n}", "expected": "10"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "testMultilineIfWithElse", "kind": "eval", "expr": "if (1) {\n    10\n} else {\n    20\n}", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "testIfWithArrayArgument", "kind": "eval", "expr": "if (,1) { 10 } else { 20 }", "expected": "10"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "testIfWithArrayArgumentTrue", "kind": "eval", "expr": "if (,0) { 10 } else { 20 }", "expected": "10"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "testIfWithArrayArgumentMultiValue", "kind": "eval", "expr": "if (1 1 1 1) { 10 } else { 20 }", "expected": "10"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "testIfWithArrayArgumentMultiValueTrue", "kind": "eval", "expr": "if (0 0 0 0 0 0 0) { 10 } else { 20 }", "expected": "10"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "recursionTest", "kind": "eval", "expr": "∇ foo (x) { if (x>0) { io:print x ◊ foo x-1 } else { 123 } }\nfoo 10", "expected": "123"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "lambdaRecursionTest", "kind": "eval", "expr": "foo ← λ{ x←⍵ ◊ if(x>0) { io:print x ◊ ⍞foo x-1 } else { 123 } }\n⍞foo 10", "expected": "123"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "scopeTest0", "kind": "eval", "expr": "∇ foo (x) { λ{⍵+x} }\nx ← foo 2\n⍞x 100", "expected": "102"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "scopeTest1", "kind": "fails", "expr": "foo ← λ{ x + ⍵ }\nbar ← λ{ x ← 10 ◊ (⍞foo 1) - ⍵ }\n⍞bar 20", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "scopeTestLocalVars", "kind": "eval", "expr": "foo ← λ{ x ← 1 + ⍵ }\nbar ← λ{ x ← 100 ◊ y ← (⍞foo 2) ◊ y + x + ⍵ }\n⍞bar 150", "expected": "253"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "scopeTestExplicitLocal", "kind": "eval", "expr": "foo ← λ{ x ← 1 + ⍵ ◊ y ← { declare(:local x) x ← 2 ◊ x+50+⍵ } 190 ◊ y+x }\n⍞foo 60", "expected": "303"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "whileLoopTest", "kind": "eval", "expr": "i←0 ◊ while (i<10) {io:print i ◊ prev←i ◊ i←i+1 ◊ prev+5}", "expected": "14"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "whileWithZeroIterations", "kind": "eval", "expr": "io:print \"a\" ◊ while (0) { io:print \"b\" }", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "defsyntaxScope", "kind": "eval", "expr": "{ if(⍵<10) { io:print ⍵+100 ◊ 3 } } 4", "expected": "3"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "unwindWithNoErrorTest", "kind": "eval", "expr": "int:unwindProtect λ{io:print \"bar\" ◊ io:print \"foo\" ◊ 9} λ{io:print \"qwe\"}", "expected": "9"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "atLeaveTest0", "kind": "eval", "expr": "{ { io:print 1+⍵ } atLeave 100 } 0", "expected": "100"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "atLeaveTest1", "kind": "eval", "expr": "{ { io:print 1+⍵ } atLeave 100 ◊ 'foo throw 1 } catch 1 2 ⍴ 'foo λ{50+⍺}", "expected": "51"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "testSimpleWhen", "kind": "eval", "expr": "foo ⇐ {\n  a ← ⍵\n  when {\n    (a=0) { 10 }\n    (a<3) { 11 }\n    (1)   { a+1000 }\n  }\n}\nfoo¨ 0 1 2 3 4", "expected": "(10 11 11 1003 1004)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "testWhenScope", "kind": "eval", "expr": "foo ⇐ {\n  when {\n    (⍵=0) { 10 }\n    (⍵<3) { 11 }\n    (1)   { ⍵+1000 }\n  }\n}\nfoo 100", "expected": "1100"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/FlowControlTest.kt", "test": "testWhenInnerFunctionAllocatesInnerScope", "kind": "fails", "expr": "foo ⇐ {\n  when {\n    (⍵=0) { 10 }\n    (⍵<3) { 11 }\n    (1)   { a←1 ⋄ ⍵+1000 }\n  }\n}\nfoo 100\na", "expected": null}
@@ -1841,6 +2045,7 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ListTest.kt", "test": "toListWithSymbolScalar", "kind": "eval", "expr": "≬ 1", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ListTest.kt", "test": "toListWithListArgument", "kind": "eval", "expr": "toList (1;2;3)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ListTest.kt", "test": "reshapeList", "kind": "eval", "expr": "2 2 ⍴ (1;2)", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ListTest.kt", "test": "testCollapseList", "kind": "eval", "expr": "comp toList (io:print¨ 2 3) 6", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ListTest.kt", "test": "functionExpressionsInListShouldFail0", "kind": "fails", "expr": "+ ; 3 ; 4 ; 5", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ListTest.kt", "test": "functionExpressionsInListShouldFail1", "kind": "fails", "expr": "1 ; + ; 2", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ListTest.kt", "test": "testUnderToList", "kind": "eval", "expr": "addOneToListElements ⇐ { toList 1+fromList ⍵ }\n{ addOneToListElements ⍵ }⍢toList 100 200", "expected": "(101 201)"}
@@ -1992,6 +2197,7 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/NumbersTest.kt", "test": "divisionByZeroYieldsInfinityGenericArray", "kind": "eval", "expr": "¯1.0 1.0 (2⋆300) ÷ 0.0", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ObjectsTest.kt", "test": "simpleObjectDefinition", "kind": "eval", "expr": "objects:defclass 'foo\n'foo objects:make 1 2", "expected": "(1 2)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ObjectsTest.kt", "test": "extractValue", "kind": "eval", "expr": "objects:defclass 'foo\na ← 'foo objects:make 1 2\nobjects:extract a", "expected": "(1 2)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ObjectsTest.kt", "test": "findClassFromInstance", "kind": "eval", "expr": "objects:defclass 'foo\na ← 'foo objects:make 1 2\nobjects:classof a", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ObjectsTest.kt", "test": "createInstanceWithIllegalClass", "kind": "fails", "expr": "'nonexistentClass objects:make 1 2 3 4 5", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ObjectsTest.kt", "test": "functionCallUnderExtraction", "kind": "eval", "expr": "objects:defclass 'foo\na ← 'foo objects:make 1000×1+⍳8\n(10+)⍢objects:extract a", "expected": "(1010 2010 3010 4010 5010 6010 7010 8010)"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/OperatorsTest.kt", "test": "commuteTwoArgs", "kind": "eval", "expr": "4÷⍨160", "expected": "40"}
@@ -2099,6 +2305,10 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ReduceTest.kt", "test": "reduceWithAxisArgumentFromVariableWithParen1", "kind": "eval", "expr": "{ a←0 ⋄ (+[a])⌿ ⍵ ⍴ ⊂1 2 }¨ 3 4", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ReduceTest.kt", "test": "reduceWithAxisArgumentFromFunction", "kind": "eval", "expr": "{ a←0 ⋄ b⇐+[a] ⋄ b/ ⍵ ⍴ ⊂1 2 }¨ 3 4", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ReduceTest.kt", "test": "reduceWithAxisArgumentFromFunctionB", "kind": "eval", "expr": "{ a←0 ⋄ b⇐+[a] ⋄ b⌿ ⍵ ⍴ ⊂1 2 }¨ 3 4", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ReduceTest.kt", "test": "orReduceWithOptimisation", "kind": "eval", "expr": "∨/ int:ensureBoolean io:print¨ 0 0 1 0 0 0 1 0", "expected": "1"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ReduceTest.kt", "test": "orReduceWithOptimisationReturnFalse", "kind": "eval", "expr": "∨/ int:ensureBoolean io:print¨ 0 0 0 0", "expected": "0"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ReduceTest.kt", "test": "andReduceWithOptimisation", "kind": "eval", "expr": "∧/ int:ensureBoolean io:print¨ 1 1 0 1 1 0 1 0", "expected": "0"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ReduceTest.kt", "test": "andReduceWithOptimisationReturnTrue", "kind": "eval", "expr": "∧/ int:ensureBoolean io:print¨ 1 1 1 1", "expected": "1"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ReduceTest.kt", "test": "reductionWithIncompatibleEmptyDimensions", "kind": "fails", "expr": "⍪/ (0 5 ⍴ 1) (2 6 ⍴ 10 20 30 40 50 60)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ReduceTest.kt", "test": "reductionWithIncompatibleDimensions", "kind": "fails", "expr": "⍪/ (2 5 ⍴ 1) (2 6 ⍴ 10 20 30 40 50 60)", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RegexpTest.kt", "test": "plainRegexpMatches", "kind": "eval", "expr": "\"abc\" regex:match \"qweabcasd\"", "expected": "1"}
@@ -2110,6 +2320,8 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RegexpTest.kt", "test": "plainWithMatcher0", "kind": "eval", "expr": "(regex:compile \"abc\") regex:match \"qweabcasd\"", "expected": "1"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RegexpTest.kt", "test": "plainWithMatcher1", "kind": "eval", "expr": "(regex:compile \"abc\") regex:match \"xyztestcxz\"", "expected": "0"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RegexpTest.kt", "test": "finderrorWithMatcher", "kind": "eval", "expr": "r←regex:compile \"n([0-9]+),([0-9]+)\" ⋄ (r regex:finderror \"foon98765,0test\") (r regex:finderror \"xn4,11x\")", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RegexpTest.kt", "test": "regexpFind0", "kind": "eval", "expr": "\"^zx:([a-z]+):x$\" regex:find \"zx:test:x\"", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RegexpTest.kt", "test": "regexpFind1", "kind": "eval", "expr": "\"^zx:(foo)?:x$\" regex:find \"zx::x\"", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RegexpTest.kt", "test": "regexpTestMultiline", "kind": "eval", "expr": "(:multiLine regex:compile \"^foo\") regex:match \"a\nfooa\na\na\"", "expected": "1"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RegexpTest.kt", "test": "regexpTestCase", "kind": "eval", "expr": "(:ignoreCase regex:compile \"^foo$\") regex:match \"foO\"", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/RegexpTest.kt", "test": "regexpWithIllegalFlags0", "kind": "fails", "expr": ":foo regex:compile \"foo\"", "expected": null}
@@ -2299,6 +2511,12 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ScalarTest.kt", "test": "scalarFunctionOnEnclosedArrayWithNoCollapse", "kind": "eval", "expr": "| ⊂ 1 2 3", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ScalarTest.kt", "test": "scalarFunctionOnEnclosedArrayWithExplicitCollapse", "kind": "eval", "expr": "comp | ⊂ 1 2 3", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/ScalarTest.kt", "test": "genericLookupFromDoubleArraySum2ArgsRightScanar", "kind": "eval", "expr": "1.0 ∊ 1.0 1.1 × 2.8", "expected": "0"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/StringsTest.kt", "test": "testPrint", "kind": "eval", "expr": "io:print 200", "expected": "200"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/StringsTest.kt", "test": "testPrintPretty", "kind": "eval", "expr": ":pretty io:print \"a\"", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/StringsTest.kt", "test": "testPrintString", "kind": "eval", "expr": "io:print \"a\"", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/StringsTest.kt", "test": "readableNumber", "kind": "eval", "expr": ":read io:print 1", "expected": "1"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/StringsTest.kt", "test": "readableString", "kind": "eval", "expr": ":read io:print \"foo\"", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/StringsTest.kt", "test": "readableComplex", "kind": "eval", "expr": ":read io:print 1J2", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/StringsTest.kt", "test": "readCharsAsString", "kind": "eval", "expr": "@a @b", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/StringsTest.kt", "test": "nonBmpCharsInString", "kind": "eval", "expr": "\"\\uD835\\uDC9F\"", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/StringsTest.kt", "test": "nonBmpExplicitCharacter", "kind": "eval", "expr": "@\\uD835\\uDC9F", "expected": null}
@@ -2339,10 +2557,12 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SyntaxTest.kt", "test": "ifTestWithElse0", "kind": "eval", "expr": "defsyntax xif (:value cond :function thenStatement :optional (:constant xelse :function elseStatement)) {\n  ⍞((cond ≡ 1) ⌷ (⍞((isLocallyBound 'elseStatement) ⌷ λ{λ{⍬}} λ{elseStatement}) ⍬) thenStatement) cond\n}\n(xif (1) { 10 } xelse { 20 }) (xif (0) { 11 } xelse { 22 })", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SyntaxTest.kt", "test": "ifTestWithElse1", "kind": "eval", "expr": "defsyntax xif (:value cond :function thenStatement :optional (:constant xelse :function elseStatement)) {\n  ⍞((cond ≡ 1) ⌷ (⍞((isLocallyBound 'elseStatement) ⌷ λ{λ{⍬}} λ{elseStatement}) ⍬) thenStatement) cond\n}\n\n∇ foo {\n  (xif (1) { 10 } xelse { 20 }) (xif (0) { 11 } xelse { 22 })\n}\n\nfoo 3", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SyntaxTest.kt", "test": "ifTest", "kind": "eval", "expr": "defsyntax xif (:value cond :function thenStatement :constant xelse :function elseStatement) {\n  ⍞((cond ≡ 1) ⌷ elseStatement thenStatement) cond\n}\n(xif (1) { 10 } xelse { 11 }) (xif (0) { 100 } xelse { 101 })", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SyntaxTest.kt", "test": "xifWithSideEffect", "kind": "eval", "expr": "defsyntax xif (:value cond :function thenStatement :constant xelse :function elseStatement) {\n  ⍞((cond ≡ 1) ⌷ elseStatement thenStatement) cond\n}\nxif (1) { io:print \"aa\" ◊ 10 } xelse { io:print \"bb\" ◊ 11 }", "expected": "10"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SyntaxTest.kt", "test": "nonBindingDefinedFunction", "kind": "eval", "expr": "defsyntax foo (:nfunction a) { ⍞a 2 }\n{ x←1 ◊ foo { x } } 0", "expected": "1"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SyntaxTest.kt", "test": "nonBindingDefinedFunctionWithArg", "kind": "eval", "expr": "defsyntax foo (:nfunction a) { ⍞a 2 }\n{ x←1+⍵ ◊ foo { x+⍵ } } 3", "expected": "7"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SyntaxTest.kt", "test": "bindingDefinedFunctionWithArg", "kind": "eval", "expr": "defsyntax foo (:function a) { ⍞a 2 }\n{ x←1+⍵ ◊ foo { x+⍵ } } 3", "expected": "6"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SyntaxTest.kt", "test": "exprFunction", "kind": "eval", "expr": "defsyntax foo (:exprfunction a) { 1+⍞a 0 }\nfoo (2)", "expected": "3"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SyntaxTest.kt", "test": "optionalExprFunction", "kind": "eval", "expr": "defsyntax foo (:value x :optional (:exprfunction a)) { x+(⍞a 0)+(⍞a 0) }\nfoo (10) (io:print 9)", "expected": "28"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SyntaxTest.kt", "test": "defsyntaxRepeat", "kind": "eval", "expr": "defsyntaxsub bar (:constant ab :value x) {\n  x + 1\n}\n\ndefsyntax foo (:repeat (y bar)) {\n  +/y\n}\n\nfoo ab (10) ab (20)", "expected": "32"}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SyntaxTest.kt", "test": "customSingleCharSymbols", "kind": "eval", "expr": "declare(:singleCharExported \"a\")\na←1\nb←2\nbb←3\naaaa bb", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/SyntaxTest.kt", "test": "unknownDeclarationShouldFail", "kind": "fails", "expr": "declare(:foo 1)\n'a", "expected": null}
@@ -2500,6 +2720,43 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/TransposeTest.kt", "test": "multiDimensionTransposeWithTooLargeLeftArg", "kind": "fails", "expr": "0 1 2 3 4 ⍉ 2 3 4 5 ⍴ ⍳100", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/TransposeTest.kt", "test": "multiDimensionTransposeWithShortLeftArgAndInvalidAxis0", "kind": "fails", "expr": "0 8 2 ⍉ 2 3 4 5 ⍴ ⍳100", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/TransposeTest.kt", "test": "multiDimensionTransposeWithShortLeftArgAndInvalidAxis1", "kind": "fails", "expr": "0 ¯6 2 ⍉ 2 3 4 5 ⍴ ⍳100", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/Base64EncodingTest.kt", "test": "encodeBlank", "kind": "eval", "expr": "io:base64Encode ⍬", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/Base64EncodingTest.kt", "test": "encodeNumberSequences", "kind": "eval", "expr": "io:base64Encode ⍳${i + 1}", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/Base64EncodingTest.kt", "test": "decodeBlank", "kind": "eval", "expr": "io:base64Decode ⍬", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/Base64EncodingTest.kt", "test": "decodeExamples", "kind": "eval", "expr": "io:base64Decode \"${strings[i]}\"", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/Base64EncodingTest.kt", "test": "decodeWithNewlines", "kind": "eval", "expr": "io:base64Decode \"ajna3/HG7MI\nlFA==\"", "expected": "(106 57 218 223 241 198 236 194 37 20)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "simpleEncode", "kind": "eval", "expr": "10 ⊥ 1 2 3", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "oneDigitEncode", "kind": "eval", "expr": "10 ⊥ 2", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "encodeEmptyArray", "kind": "eval", "expr": "9 ⊥ ⍬", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "encodeSingleDigitOverflow", "kind": "eval", "expr": "10 ⊥ 33", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "encodeOverflowInElement", "kind": "eval", "expr": "10 ⊥ 1 33 3", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "differentBases", "kind": "eval", "expr": "2 4 5 ⊥ 1 1 1", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "floatingPointArguments", "kind": "eval", "expr": "10 ⊥ 2 3.1 3.1", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "mismatchedSizes", "kind": "fails", "expr": "2 2 2 ⊥ 1 1 0 1 0", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "invalidDimensions0", "kind": "fails", "expr": "(2 2 ⍴ 2) ⊥ 1 1 1 1", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "invalidDimensions1", "kind": "fails", "expr": "(2 2 ⍴ 2) ⊥ 2 2 ⍴ 0 1 0 1", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "invalidDimensions2", "kind": "fails", "expr": "2 2 2 2 ⊥ 2 2 ⍴ 1 1 1 1", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "encodeInvalidTypeSingleValue", "kind": "fails", "expr": "10 ⊥ @a", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "encodeInvalidTypeArrayMember", "kind": "fails", "expr": "10 ⊥ 9 @a", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "encodeMultipleValues0", "kind": "eval", "expr": "2 2 ⊥ 2 5 ⍴ 1 1 0 0 1 0 1 0 1 0", "expected": "(2 3 0 1 2)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "encodeMultipleValues1", "kind": "eval", "expr": "2 3 4 ⊥ 3 100 ⍴ 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 1 1 1 1 2 2 2 2 0 0 0 0 1 1 1 1 2 2 2 2 0 0 0 0 1 1 1 1 2 2 2 2 0 0 0 0 1 1 1 1 2 2 2 2 0 0 0 0 1 1 1 1 2 2 2 2 0 0 0 0 1 1 1 1 2 2 2 2 0 0 0 0 1 1 1 1 2 2 2 2 0 0 0 0 1 1 1 1 2 2 2 2 0 0 0 0 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3 0 1 2 3", "expected": "(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 0 1 2 3)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeSimple", "kind": "eval", "expr": "(3⍴2) ⊤ 3", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeOversized", "kind": "eval", "expr": "(2⍴2) ⊤ 7", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeDifferentValues", "kind": "eval", "expr": "2 3 6 ⊤ 15", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeSingleValue", "kind": "eval", "expr": "(,3) ⊤ 7", "expected": "(1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeZero", "kind": "eval", "expr": "2 3 6 ⊤ 0", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeOutsideRangeOfInteger", "kind": "eval", "expr": "(40⍴10) ⊤ 12", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeNegative", "kind": "eval", "expr": "(10⍴10) ⊤ ¯10", "expected": "(9 9 9 9 9 9 9 9 9 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeBigInt", "kind": "eval", "expr": "(100⍴10) ⊤ 10000000000000000000000000000000000000000", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeNegativeBigInt", "kind": "eval", "expr": "(40⍴10) ⊤ ¯123456789012345678901234567890", "expected": "(9 9 9 9 9 9 9 9 9 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 0 9 8 7 6 5 4 3 2 1 1 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeMultiDimensional", "kind": "eval", "expr": "(2⍴2) ⊤ 2 3 ⍴ 10+⍳6", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeScalarLeftArg0", "kind": "eval", "expr": "2 ⊤ 100", "expected": "(1 1 0 0 1 0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeScalarLeftArg1", "kind": "eval", "expr": "2 ⊤ 256", "expected": "(1 0 0 0 0 0 0 0 0)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeScalarLeftArg2", "kind": "eval", "expr": "10 ⊤ 1234", "expected": "(1 2 3 4)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeScalarLeftArg3", "kind": "eval", "expr": "10 ⊤ 1234 100 23456", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "decodeScalarLeftArg4", "kind": "eval", "expr": "8 ⊤ 123456789012345678901234567890123456789012345", "expected": "(5 4 2 2 3 3 3 4 5 1 1 7 2 6 5 4 7 4 7 5 4 1 6 5 2 4 4 5 6 7 5 3 3 3 7 0 7 2 3 6 1 7 0 5 5 7 5 7 1)"}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "encodeWithScalarLeftArgAndNegativeRightArg", "kind": "fails", "expr": "2 ⊤ ¯5", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/EncodeTest.kt", "test": "encodeWithScalarLeftArgAndArrayAndNegativeValueRightArg", "kind": "fails", "expr": "2 ⊤ 1 ¯2", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/dates/KapDatesTest.kt", "test": "convertToTimestamp", "kind": "eval", "expr": "time:toTimestamp 1654321234599", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/dates/KapDatesTest.kt", "test": "convertFromTimestamp", "kind": "eval", "expr": "time:fromTimestamp time:toTimestamp 1654321234599", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/dates/KapDatesTest.kt", "test": "formatTimestamp", "kind": "eval", "expr": "time:format time:toTimestamp 1654355533333", "expected": null}
@@ -2516,6 +2773,17 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/encoder/EncoderAPLFunctionTest.kt", "test": "encodeEnclosed", "kind": "eval", "expr": "x ← encoder:encode ⊂1 2  ⋄ encoder:decode x", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/encoder/EncoderAPLFunctionTest.kt", "test": "encodeLargePositiveIntegers", "kind": "eval", "expr": "x ← encoder:encode 2 ⋆ ⍳ 300 ⋄ encoder:decode x", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/encoder/EncoderAPLFunctionTest.kt", "test": "encodeLargeNegativeIntegers", "kind": "eval", "expr": "x ← encoder:encode -2 ⋆ ⍳ 300 ⋄ encoder:decode x", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/feeder/PlainFeederTest.kt", "test": "simpleFeeder", "kind": "eval", "expr": "feeder:make 'a λ{x ← ⍵+10 ⋄ io:print \"x\" x ⋄ x}\n'a feeder:put 100", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/feeder/PlainFeederTest.kt", "test": "simpleAttachedFeeders", "kind": "eval", "expr": "feeder:make 'a λ{x ← ⍵+10 ⋄ io:print \"a-\" x ⋄ x}\nfeeder:make 'b λ{x ← ⍵+100 ⋄ io:print \"b-\" x ⋄ x}\nfeeder:make 'c λ{x ← ⍵+1000 ⋄ io:print \"c-\" x ⋄ x}\nfeeder:att 'a 'b\nfeeder:att 'b 'c\n'a feeder:put 20000", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/feeder/PlainFeederTest.kt", "test": "feedersWithSplitPaths", "kind": "eval", "expr": "feeder:make 'a λ{x ← ⍵+10 ⋄ io:print \"a-\" x ⋄ x}\nfeeder:make 'b λ{x ← ⍵+100 ⋄ io:print \"b-\" x ⋄ x}\nfeeder:make 'c λ{x ← ⍵+1000 ⋄ io:print \"c-\" x ⋄ x}\nfeeder:make 'd λ{x ← ⍵+2000 ⋄ io:print \"d-\" x ⋄ x}\nfeeder:make 'e λ{x ← ⍵+8000 ⋄ io:print \"e-\" x ⋄ x}\nfeeder:att 'a 'b\nfeeder:att 'b 'c\nfeeder:att 'b 'd\nfeeder:att 'c 'e\n'a feeder:put 20000", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/formatter/FormatAPLTest.kt", "test": "simpleArguments", "kind": "eval", "expr": "\"a$sfoo$sbar\" ⍕ 1 2", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/formatter/FormatAPLTest.kt", "test": "singleElementList", "kind": "eval", "expr": "\"a$sfoo\" ⍕ ⍮1", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/formatter/FormatAPLTest.kt", "test": "scalarArgument", "kind": "eval", "expr": "\"a$sfoo\" ⍕ 1", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/formatter/FormatAPLTest.kt", "test": "twoDimensionalArgument", "kind": "eval", "expr": "\"a$sfoo$sbar\" ⍕ 3 2 ⍴ ⍳6", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/formatter/FormatAPLTest.kt", "test": "threeDimensionalArgument", "kind": "eval", "expr": "\"a$sfoo$sbar\" ⍕ 2 2 2 ⍴ ⍳8", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/formatter/FormatAPLTest.kt", "test": "formatPatternSyntaxError", "kind": "fails", "expr": "\"fooabc$\" ⍕ 1 2 3 4", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/formatter/FormatAPLTest.kt", "test": "tooFewElementsWithSingleDimensionalArgument", "kind": "fails", "expr": "\"a$sfoo$sX$sbar\" ⍕ 1 2", "expected": null}
+{"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/formatter/FormatAPLTest.kt", "test": "tooFewElementsWithTwoDimensionalArgument", "kind": "fails", "expr": "\"a$sfoo$sX$sbar\" ⍕ 3 2 ⍴ ⍳6", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/htmlconverter/ParseHtmlFunctionTest.kt", "test": "simpleHtmlMonadicCall", "kind": "eval", "expr": "io:fromHtmlTable \"<html><body>Foo<table><thead><th>Foo</th><th>Bar</th></thead><tbody><tr><td>1</td><td>10</td></tr><tr><td>abctest</td><td>123foo</td></tr><tr><td>2</td><td>3</td></tr></tbody></table></body></html>\"", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/htmlconverter/ParseHtmlFunctionTest.kt", "test": "simpleHtmlDyadicCall", "kind": "eval", "expr": "1 io:fromHtmlTable \"<html><body>Foo<table><tr><td>1</td><td>10</td></tr><tr><td>abctest</td><td>123foo</td></tr><tr><td>2</td><td>3</td></tr></table><table><tr><td>10</td><td>11</td></tr><tr><td>12</td><td>13</td></tr></table></body></html>\"", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/htmlconverter/ParseHtmlFunctionTest.kt", "test": "noTableInHtmlContent", "kind": "fails", "expr": "io:fromHtmlTable \"foo\"", "expected": null}
@@ -2579,8 +2847,11 @@
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/thread/LockTest.kt", "test": "lockWithThreads", "kind": "eval", "expr": "a ← 0\nlock ← thread:makeLock 0\nx ← {\n  threads ← { n←⍵ ⋄ thread:makeThread λ{ ({ ({a ← a+1}⍣100) 0 ⋄ ⍵} thread:withHeldLock lock) n } }¨ ⍳10\n  results ← thread:joinThread¨ threads\n  ∧ results\n}¨ ⍳100\nx a", "expected": null}
 {"file": "array/src/commonTest/kotlin/com/dhsdevelopments/kap/thread/LockTest.kt", "test": "lockWithThreadsAndCustomSyntax", "kind": "eval", "expr": "a ← 0\nlock ← thread:makeLock 0\nx ← {\n  threads ← { n←⍵ ⋄ thread:makeThread λ{ thread:withLock (lock) { { ({a ← a+1}⍣100) 0 ⋄ ⍵} n } } }¨ ⍳10\n  results ← thread:joinThread¨ threads\n  ∧ results\n}¨ ⍳100\nx a", "expected": null}
 {"file": "array/src/jsTest/kotlin/com/dhsdevelopments/kap/FilesystemTest.kt", "test": "writeFileWithStreamApi", "kind": "eval", "expr": "f ← io2:open⟦\"/foo\" ; :output⟧\nio2:write⟦f ; \"abc\\n\"⟧\nio2:write⟦f ; \"line2\\n\"⟧\nclose f\nf ← io2:open⟦\"/foo\" ; :input⟧\nio2:readLine f", "expected": null}
+{"file": "array/src/jsTest/kotlin/com/dhsdevelopments/kap/SystemParamsJsTest.kt", "test": "platformParam", "kind": "eval", "expr": "sysparam 'kap:platform", "expected": null}
+{"file": "array/src/jvmTest/kotlin/com/dhsdevelopments/kap/SystemParamsJvmTest.kt", "test": "platformParam", "kind": "eval", "expr": "sysparam 'kap:platform", "expected": null}
 {"file": "array/src/jvmTest/kotlin/com/dhsdevelopments/kap/XmlParserTest.kt", "test": "simpleParseString", "kind": "eval", "expr": "use(\"xml.kap\")\nxml ← \"<foo><bar>xyz</bar><bar>testing</bar></foo>\"\nxml:readString xml", "expected": null}
 {"file": "array/src/jvmTest/kotlin/com/dhsdevelopments/kap/XmlParserTest.kt", "test": "simpleParseFile", "kind": "eval", "expr": "use(\"xml.kap\")\nxml:readFile \"test-data/foo.xml\"", "expected": null}
+{"file": "array/src/jvmTest/kotlin/com/dhsdevelopments/kap/XmlParserTest.kt", "test": "nodeTypes", "kind": "eval", "expr": "use(\"xml.kap\")\ndoc ← xml:readFile \"test-data/foo.xml\"\nchildren ← xml:childNodes doc\nroot ← children.(0)\nrootChildren ← xml:childNodes root\n(xml:nodeType doc) , (xml:nodeType root) , {xml:nodeType rootChildren.(⍵)}¨ ⍳4", "expected": null}
 {"file": "array/src/jvmTest/kotlin/com/dhsdevelopments/kap/XmlParserTest.kt", "test": "testAttributes", "kind": "eval", "expr": "use(\"xml.kap\")\ndoc ← xml:readFile \"test-data/foo.xml\"\nchildren ← xml:childNodes doc\nroot ← children.(0)\nrootChildren ← xml:childNodes root\nxml:attributes rootChildren.(3)", "expected": null}
 {"file": "array/src/jvmTest/kotlin/com/dhsdevelopments/kap/XmlParserTest.kt", "test": "testNodeText", "kind": "eval", "expr": "use(\"xml.kap\")\ndoc ← xml:readFile \"test-data/foo.xml\"\nchildren ← xml:childNodes doc\nroot ← ↑children\nrootChildren ← xml:childNodes root\nxml:nodeText ↑xml:childNodes rootChildren.(3)", "expected": null}
 {"file": "array/src/jvmTest/kotlin/com/dhsdevelopments/kap/XmlParserTest.kt", "test": "testXpathSimpleStringResult", "kind": "eval", "expr": "use(\"xml.kap\")\ndoc ← xml:readFile \"test-data/foo.xml\"\nxml:xpathEvalToString (\"/foo/bar\"; doc)", "expected": null}
@@ -2606,6 +2877,7 @@
 {"file": "array/src/jvmTest/kotlin/com/dhsdevelopments/kap/jvmmod/JvmMethodCallsTest.kt", "test": "callMethod", "kind": "eval", "expr": "fooClass ← jvm:findClass \"com.dhsdevelopments.kap.jvmmod.Foo\"\nconstructor ← jvm:findConstructor fooClass\nmethod ← jvm:findMethod (fooClass ; \"standardTest\")\na ← jvm:createInstance constructor\njvm:callMethod (method ; a)", "expected": null}
 {"file": "array/src/jvmTest/kotlin/com/dhsdevelopments/kap/jvmmod/JvmMethodCallsTest.kt", "test": "callStatic", "kind": "eval", "expr": "fooClass ← jvm:findClass \"com.dhsdevelopments.kap.jvmmod.Foo\"\nmethod ← jvm:findMethod (fooClass ; \"staticTest\" ; jvm:findClass \"java.lang.String\")\njvm:callMethod (method ; null ; \"qwe\")", "expected": null}
 {"file": "array/src/jvmTest/kotlin/com/dhsdevelopments/kap/jvmmod/JvmMethodCallsTest.kt", "test": "catchException", "kind": "eval", "expr": "fooClass ← jvm:findClass \"com.dhsdevelopments.kap.jvmmod.Foo\"\nmethod ← jvm:findMethod (fooClass ; \"throwExceptionsTest\")\n{ jvm:callMethod (method ; null) } catch 'jvm:jvmMethodCallException λ{ 1 }", "expected": "1"}
+{"file": "array/src/linuxTest/kotlin/com/dhsdevelopments/kap/SystemParamsLinuxTest.kt", "test": "platformParam", "kind": "eval", "expr": "sysparam 'kap:platform", "expected": null}
 {"file": "contrib/arrow/src/jvmTest/kotlin/com/dhsdevelopments/kap/arrow/CreateArrayTest.kt", "test": "simpleBigIntArray", "kind": "eval", "expr": "arrow:makeVector (1 2 100 200 ; 'arrow:bigint)", "expected": null}
 {"file": "contrib/arrow/src/jvmTest/kotlin/com/dhsdevelopments/kap/arrow/CreateArrayTest.kt", "test": "simpleIntArray", "kind": "eval", "expr": "arrow:makeVector (10 20 30 40 50 6 ; 'arrow:int)", "expected": null}
 {"file": "contrib/sql/src/jvmTest/kotlin/com/dhsdevelopments/kap/sql/SQLTest.kt", "test": "connectTest", "kind": "eval", "expr": "sql:connect \"jdbc:sqlite::memory:\"", "expected": null}

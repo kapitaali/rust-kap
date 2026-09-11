@@ -10,3 +10,6 @@
 # OS / editor cruft
 .DS_Store
 *.swp
+
+# Local planning doc (untracked for now)
+/20260910_RENEWED_ARCHITECTURE.md

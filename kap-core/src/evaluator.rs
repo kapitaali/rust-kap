@@ -105,12 +105,7 @@ impl Environment {
         if direct.is_some() {
             return direct;
         }
-        // 3. HOME-NAMESPACE ANCHOR. A function defined inside a `use(...)`d file
-        // carries a closure env anchored to that file's namespace; after `use()`
-        // returns, the registry's current ns is restored to the CALLER's. A bare
-        // reference inside the fn body (`helper` from `class ⇐ {helper ⍵}`) must
-        // still resolve in the DEFINING namespace (Kotlin scopes a namespace()
-        // directive to its defining file). Walk up for the first anchor.
+        // 3. HOME-NAMESPACE ANCHOR. ... [existing comment unchanged]
         if ns.is_none() {
             let mut anc: Option<&Environment> = Some(self);
             while let Some(e) = anc {
@@ -122,7 +117,12 @@ impl Environment {
                 anc = e.parent.as_deref();
             }
         }
-        None
+        // 4. ENGINE-GLOBAL user-defined function table (Kotlin `engine.functions`).
+        // `∇` tradfns register here. Checked AFTER namespace table so a `⇐` binding
+        // (namespace table) correctly shadows a `∇` binding (here) — matching
+        // Kotlin's findLocalFunction (namespace) vs findGlobalScopedLocalFunction
+        // (engine.functions) lookup order.
+        self.engine_fns.borrow().get(name).cloned()
     }
 
     /// Define a symbol. Routes to the namespace table when the binding is module-scoped
@@ -1709,7 +1709,10 @@ impl Engine {
                     body: Rc::new(*body.clone()),
                     env: env.clone(),
                 });
-                env.define(name, namespace, v.clone());
+                // ∇ tradfn registers in the ENGINE-GLOBAL function table
+                // (Kotlin `engine.registerFunction`), NOT the namespace table.
+                // `⇐` bindings go to the namespace table and shadow these.
+                env.engine_fns.borrow_mut().insert(name.clone(), v.clone());
                 // Track this name as a function definition (∇), so the parser
                 // treats later uses as applicable. See PROBLEM.md (A2).
                 env.function_defs.borrow_mut().insert(name.clone());
@@ -23279,6 +23282,12 @@ impl Engine {
                 APLValue::Number(n) => n.as_long().map_err(|e| AplError::runtime(e))?,
                 _ => return Err(AplError::runtime("⊤ radix must be an integer".into())),
             };
+            // math-kap.kap `scalarEncode` (upstream 9c3bc9aa): `1 ∊ B<0` throws
+            // IllegalArgumentException "B must be positive". Vector-radix
+            // `vectorEncode` has no such guard — scope this to scalar A only.
+            if b_elems.iter().any(|&v| v < 0) {
+                return Err(AplError::runtime("B must be positive".into()));
+            }
             let radix = if radix == 0 { 1 } else { radix };
             // Digit count = enough to represent the largest |B| element (min 1).
             let max_abs: i64 = b_elems.iter().map(|v| v.unsigned_abs() as i64).max().unwrap_or(0);
@@ -23431,6 +23440,11 @@ impl Engine {
                 APLValue::Number(n) => n.as_long().map_err(|e| AplError::runtime(e))?,
                 _ => return Err(AplError::runtime("⊤ radix must be an integer".into())),
             };
+            // Same `1 ∊ B<0` guard as the i64 scalar path (math-kap.kap
+            // `scalarEncode`, upstream 9c3bc9aa) for BigInt B elements.
+            if b_big.iter().any(|v| *v < BigInt::from(0)) {
+                return Err(AplError::runtime("B must be positive".into()));
+            }
             let radix = if radix == 0 { 1 } else { radix };
             let zero = BigInt::from(0);
             let rb = BigInt::from(radix);

@@ -1154,6 +1154,12 @@ pub struct Environment {
     /// (`Variable not assigned: ns:name`), and assigning it binds in the marking
     /// scope and clears the mark. Key = (name, namespace), like `symbols`.
     pub unassigned_locals: RefCell<HashSet<(String, Option<String>)>>,
+    /// Engine-global user-defined function table (Kotlin `engine.functions`).
+    /// `∇` tradfns register here; `⇐` bindings go to the namespace table.
+    /// Lookup checks lexical scope → namespace table → home-ns anchor → THIS,
+    /// so a `⇐` binding (namespace table) correctly shadows a `∇` binding (here).
+    /// Shared via `Rc` clone from parent so all scopes see the same table.
+    pub engine_fns: Rc<RefCell<HashMap<String, AplRef<APLValue>>>>,
     /// Parent scope for lexical lookup.
     pub parent: Option<AplRef<Environment>>,
     /// Shared namespace registry (module-level symbol table + import/export metadata).
@@ -1203,6 +1209,7 @@ impl Environment {
             symbols: RefCell::new(HashMap::new()),
             function_defs: parent.function_defs.clone(),
             unassigned_locals: RefCell::new(HashSet::new()),
+            engine_fns: parent.engine_fns.clone(),
             parent: Some(parent.clone()),
             ns_registry: parent.ns_registry.clone(),
             home_ns: RefCell::new(None),
