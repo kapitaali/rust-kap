@@ -77,6 +77,10 @@ fn format_value(v: &APLValue) -> String {
         APLValue::SuspendedReturn { .. } => "[return]".to_string(),
         APLValue::SqlConn { url, .. } => format!("Connection(url={})", url),
         APLValue::SqlPrepared { sql, .. } => format!("PreparedStatement({})", sql),
+        APLValue::ArrowVec { elems, .. } => format!(
+            "[{}]",
+            elems.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(", ")
+        ),
         APLValue::Deferred { .. } => "<deferred>".to_string(),
         APLValue::UserFn { .. } => "<fn>".to_string(),
         APLValue::Escape { .. } => "<fn>".to_string(),

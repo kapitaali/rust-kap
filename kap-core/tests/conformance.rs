@@ -200,7 +200,18 @@ fn classify_with_timeout(c: &Case) -> Outcome {
             // (0,1)↓(2 2⍴…) must be a 2×1 per-axis drop (drop.kt:328 axisArray);
             // the port currently does NOT drop (a1 keeps B's full shape), so
             // QR/Rinv recurse on wrong shapes.
-            let src = c.expr.clone();
+            // H2 (narrow, fn `classify` documents why): `io:toHex/fromHex/`
+            // `base64Encode` are stdlib-defined and non-recursive, so preload
+            // stdlib for exactly the Simple suite (never Math — row 998).
+            // Rows that `use()` themselves (formatterTest) are left alone:
+            // a second load fails re-assigning `:const math:pi`.
+            let src = if c.file.contains("StandardLibSimpleFunctionsTest")
+                && !c.expr.trim_start().starts_with("use(")
+            {
+                format!("use(\"standard-lib.kap\")\n{}", c.expr)
+            } else {
+                c.expr.clone()
+            };
             let o =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| classify_str(&engine, &src, &c)))
                     .unwrap_or(Outcome::Unsupported);

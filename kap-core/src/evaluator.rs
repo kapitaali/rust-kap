@@ -2106,6 +2106,7 @@ impl Engine {
             APLValue::Thread { .. } => true,
             APLValue::SuspendedReturn { .. } => true,
             APLValue::SqlConn { .. } | APLValue::SqlPrepared { .. } => true,
+            APLValue::ArrowVec { .. } => true,
         }
     }
 
@@ -4308,6 +4309,80 @@ impl Engine {
                 let conn = conn_rc.borrow();
                 crate::sql::run_query(&conn, &sql, &params)
                     .map_err(|e| AplError::runtime(crate::sql::sql_error("sql:queryPrepared", e)))
+            }
+            // `arrow:makeVector` (contrib/arrow `ArrowCreateVectorFunction`):
+            // 2-list (src rank-1 numbers ; type-symbol) or 3-list (+ name,
+            // default `"kap-array"`). Validates and stores the i64 elements
+            // with their kind; no columnar backend (values are exact).
+            "arrow:makeVector" => {
+                let a = right_val.force(self)?;
+                let parts: Vec<AplRef<APLValue>> = match a.as_ref() {
+                    APLValue::List(l) | APLValue::Array(l) => l.elements(),
+                    _ => vec![a.clone()],
+                };
+                if parts.len() < 2 || parts.len() > 3 {
+                    return Err(AplError::runtime(format!(
+                        "makeVector: expected 2 or 3 arguments, got {}",
+                        parts.len()
+                    )));
+                }
+                let src = parts[0].force(self)?;
+                let src_els: Vec<AplRef<APLValue>> = match src.as_ref() {
+                    APLValue::Array(sa) if sa.dimensions.len() == 1 => sa.elements(),
+                    _ => {
+                        return Err(AplError::runtime(
+                            "makeVector: Source array must be rank 1".into(),
+                        ))
+                    }
+                };
+                let int32 = match parts[1].force(self)?.as_ref() {
+                    APLValue::Symbol { name, namespace }
+                        if namespace.as_deref() == Some("arrow") && name == "int" =>
+                    {
+                        true
+                    }
+                    APLValue::Symbol { name, namespace }
+                        if namespace.as_deref() == Some("arrow") && name == "bigint" =>
+                    {
+                        false
+                    }
+                    other => {
+                        return Err(AplError::runtime(format!(
+                            "makeVector: Invalid array type name: {}",
+                            other.format_value()
+                        )))
+                    }
+                };
+                let vecname = if parts.len() == 3 {
+                    Self::kap_string(&parts[2].force(self)?, "arrow:makeVector")?
+                } else {
+                    "kap-array".to_string()
+                };
+                let mut elems = Vec::with_capacity(src_els.len());
+                for e in &src_els {
+                    let n = match e.force(self)?.as_ref() {
+                        APLValue::Number(KapNumber::Long(x)) => *x,
+                        APLValue::Number(KapNumber::Double(x)) if x.fract() == 0.0 => *x as i64,
+                        APLValue::Number(KapNumber::BigInt(x)) => {
+                            use num_traits::ToPrimitive;
+                            x.to_i64().ok_or_else(|| {
+                                AplError::runtime("makeVector: integer out of range".into())
+                            })?
+                        }
+                        _ => {
+                            return Err(AplError::runtime(
+                                "makeVector: source must contain numbers".into(),
+                            ))
+                        }
+                    };
+                    if int32 && (n < i32::MIN as i64 || n > i32::MAX as i64) {
+                        return Err(AplError::runtime(
+                            "makeVector: value out of int range".into(),
+                        ));
+                    }
+                    elems.push(n);
+                }
+                Ok(Rc::new(APLValue::ArrowVec { int32, name: vecname, elems }))
             }
             "thread:makeThread" => {
                 // `MakeThreadFunctionImpl` (thread.kt:49-60): the argument must
@@ -6869,6 +6944,8 @@ impl Engine {
                 // the port only registers them in the default engine).
                 | "sql:connect" | "sql:query" | "sql:update" | "sql:prepare"
                 | "sql:updatePrepared" | "sql:queryPrepared" | "cm:connect"
+                // `arrow:` module (contrib/arrow): typed vector construction.
+                | "arrow:makeVector"
         )
     }
 
@@ -13973,6 +14050,9 @@ impl Engine {
             | APLValue::SqlConn { .. } | APLValue::SqlPrepared { .. } => {
                 out.push(Rc::new(value.clone()));
             }
+            | APLValue::ArrowVec { .. } => {
+                out.push(Rc::new(value.clone()));
+            }
             APLValue::Array(arr) => {
                 for e in arr.elements() {
                     Self::enlist_recurse(out, e.as_ref(), level + 1, limit);
@@ -15948,6 +16028,9 @@ impl Engine {
             }
             APLValue::SqlConn { .. } | APLValue::SqlPrepared { .. } => {
                 Err(AplError::runtime("cannot use a SQL handle as an array element".into()))
+            }
+            APLValue::ArrowVec { .. } => {
+                Err(AplError::runtime("cannot use an Arrow vector as an array element".into()))
             }
             APLValue::Process(_) => {
                 Err(AplError::runtime("cannot use a process as an array element".into()))

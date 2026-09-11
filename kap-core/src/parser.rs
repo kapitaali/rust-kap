@@ -268,6 +268,8 @@ impl<'a> Parser<'a> {
                         || (ns == "sql"
                             && matches!(base, "connect" | "query" | "update" | "prepare" | "updatePrepared" | "queryPrepared"))
                         || (ns == "cm" && matches!(base, "connect"))
+                        // `arrow:` module (contrib/arrow): typed vectors.
+                        || (ns == "arrow" && matches!(base, "makeVector"))
                         // 11a Tier-1 `jvm:` emulation (jvmmod/jvm-module.kt, no-JVM subset).
                         || (ns == "jvm"
                             && matches!(base, "toJvmString" | "toJvmShort" | "toJvmInt" | "toJvmLong"

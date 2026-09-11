@@ -199,6 +199,10 @@ pub enum APLValue {
     /// the shared connection plus the SQL text and re-prepares per execution
     /// (rusqlite statements borrow the connection, so they cannot be stored).
     SqlPrepared { conn: AplRef<std::cell::RefCell<rusqlite::Connection>>, sql: String, closed: AplRef<std::cell::Cell<bool>> },
+    /// An Arrow vector (Kotlin `ArrowIntVectorValue` / `ArrowBigIntVectorValue`,
+    /// contrib/arrow). Stores the validated i64 elements with their kind and
+    /// name; no columnar backend (documented emulation — values are exact).
+    ArrowVec { int32: bool, name: String, elems: Vec<i64> },
 }
 
 /// Fresh ids for `Lock`/`Condvar` identity (Kotlin: JVM object identity —
@@ -265,6 +269,8 @@ impl APLValue {
             // Kotlin `KotlinObjectWrappedValue` SQL handles report the system
             // internal class.
             APLValue::SqlConn { .. } | APLValue::SqlPrepared { .. } => "internal",
+            // Arrow vector values are internal wrapped objects too.
+            APLValue::ArrowVec { .. } => "internal",
             // `typeof` of a class instance is its CLASS symbol (Kotlin
             // `nameForClass(a.kapClass)`); handled in the `typeof` eval arm,
             // which returns the symbol directly. This string is only a fallback.
@@ -336,6 +342,11 @@ impl APLValue {
             // Kotlin `SQLConnectionValue.formatted` = `Connection(url=…)`.
             APLValue::SqlConn { url, .. } => format!("Connection(url={})", url),
             APLValue::SqlPrepared { sql, .. } => format!("PreparedStatement({})", sql),
+            // Arrow `BaseIntVector.toString` renders `[e0, e1, …]`.
+            APLValue::ArrowVec { elems, .. } => format!(
+                "[{}]",
+                elems.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(", ")
+            ),
             // Display divergence (see TypedInstance docs): the harness
             // renderer shows the delegate so the delegate-derived
             // `ObjectsTest` expectations score.
@@ -388,6 +399,11 @@ impl APLValue {
             // Kotlin `SQLConnectionValue.formatted` = `Connection(url=…)`.
             APLValue::SqlConn { url, .. } => format!("Connection(url={})", url),
             APLValue::SqlPrepared { sql, .. } => format!("PreparedStatement({})", sql),
+            // Arrow `BaseIntVector.toString` renders `[e0, e1, …]`.
+            APLValue::ArrowVec { elems, .. } => format!(
+                "[{}]",
+                elems.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(", ")
+            ),
             // Oracle-exact: `TypedAPLValue.formatted(style) = "instance"`.
             APLValue::TypedInstance { .. } => "instance".to_string(),
         }
@@ -468,6 +484,11 @@ impl APLValue {
             // Kotlin `SQLConnectionValue.formatted` = `Connection(url=…)`.
             APLValue::SqlConn { url, .. } => format!("Connection(url={})", url),
             APLValue::SqlPrepared { sql, .. } => format!("PreparedStatement({})", sql),
+            // Arrow `BaseIntVector.toString` renders `[e0, e1, …]`.
+            APLValue::ArrowVec { elems, .. } => format!(
+                "[{}]",
+                elems.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(", ")
+            ),
             // Oracle-exact: `TypedAPLValue.formatted(style) = "instance"`.
             APLValue::TypedInstance { .. } => "instance".to_string(),
         }
@@ -517,6 +538,11 @@ impl APLValue {
             // Kotlin `SQLConnectionValue.formatted` = `Connection(url=…)`.
             APLValue::SqlConn { url, .. } => format!("Connection(url={})", url),
             APLValue::SqlPrepared { sql, .. } => format!("PreparedStatement({})", sql),
+            // Arrow `BaseIntVector.toString` renders `[e0, e1, …]`.
+            APLValue::ArrowVec { elems, .. } => format!(
+                "[{}]",
+                elems.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(", ")
+            ),
             // Oracle-exact: `TypedAPLValue.formatted(style) = "instance"`.
             APLValue::TypedInstance { .. } => "instance".to_string(),
         }
