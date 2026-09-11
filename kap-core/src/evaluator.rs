@@ -249,6 +249,13 @@ impl Environment {
             cur = env.parent.as_deref();
         }
         self.ns_registry.collect_function_names(&mut names);
+        // Engine-global ∇ tradfns (Kotlin engine.getFunction). These live on the
+        // root environment's engine_fns, not in function_defs per-scope.
+        for name in self.engine_fns.borrow().keys() {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
         names
     }
 

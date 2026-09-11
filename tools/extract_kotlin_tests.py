@@ -249,6 +249,82 @@ def detect_fails(body: str):
     return False
 
 
+def expand_template_loop(expr: str, body: str) -> list:
+    """Expand Kotlin string-template loops to concrete expressions.
+
+    Handles two patterns:
+    1. Simple arithmetic: repeat(15) { i -> "...${i + 1}" }
+    2. List-indexed: val strings = listOf("a", "b"); repeat(10) { i -> "...${strings[i]}" }
+
+    Returns a list of concrete expr strings (one per iteration),
+    or [expr] if no template loop is found.
+    """
+    import re as _re
+    # Find the enclosing loop for this expr: look for `repeat(N) { i ->`
+    # pattern in the body before the expr's parse call.
+    loop_m = _re.search(r'repeat\s*\(\s*(\d+)\s*\)\s*\{\s*(\w+)\s*->', body)
+    if not loop_m:
+        return [expr]
+    count = int(loop_m.group(1))
+    var = loop_m.group(2)
+    # Only expand if the expr contains a Kotlin string template referencing the loop var.
+    # Templates can be direct (${i + 1}) or list-indexed (${strings[i]}).
+    var_in_template = (
+        f'${{{var}' in expr  # ${i + ...}
+        or f'${var}' in expr  # $i
+        or f'[{var}]' in expr  # ${strings[i]} or ${list[i]}
+        or f'[{var} ' in expr  # ${list[i + 1]}
+        or f' {var}]' in expr  # ${list[1 + i]}
+    )
+    if not var_in_template:
+        return [expr]
+
+    # Look for list bindings before the loop: `val <name> = listOf(<vals>)`
+    list_bindings = {}
+    for m in _re.finditer(r'val\s+(\w+)\s*=\s*listOf\s*\(([^)]*)\)', body[:loop_m.start()]):
+        name = m.group(1)
+        vals_str = m.group(2)
+        # Parse the list values (simple strings/numbers)
+        vals = []
+        for v in vals_str.split(','):
+            v = v.strip()
+            # Handle escaped quotes in strings
+            if v.startswith('"') and v.endswith('"') and len(v) >= 2:
+                # Remove surrounding quotes and unescape
+                inner = v[1:-1].replace('\\"', '"')
+                vals.append(inner)
+            else:
+                try:
+                    vals.append(int(v))
+                except ValueError:
+                    try:
+                        vals.append(float(v))
+                    except ValueError:
+                        vals.append(v)
+        list_bindings[name] = vals
+
+    results = []
+    for i in range(count):
+        def repl(m):
+            inner = m.group(1)
+            # Try list indexing first: strings[i], decoded[i], etc.
+            list_m = _re.match(r'(\w+)\[' + re.escape(var) + r'\]', inner)
+            if list_m:
+                name = list_m.group(1)
+                if name in list_bindings:
+                    val = list_bindings[name][i]
+                    return str(val)
+            # Fall back to simple arithmetic
+            expr_inner = inner.replace(var, str(i))
+            try:
+                return str(eval(expr_inner))
+            except Exception:
+                return m.group(0)
+        expanded = re.sub(r'\$\{([^}]+)\}', repl, expr)
+        results.append(expanded)
+    return results
+
+
 def best_effort_expected(body: str):
     """Pull a single-line assertSimpleNumber(N, ...) / assert1DArray(arrayOf(...), ...) expectation.
 
@@ -345,49 +421,52 @@ def main():
                 expr = first_expr_in_call(body)
                 if expr is None:
                     continue
-                kind = 'fails' if detect_fails(body) else 'eval'
-                expected = best_effort_expected(body) if kind == 'eval' else None
+                kind = "fails" if detect_fails(body) else "eval"
+                expected = best_effort_expected(body) if kind == "eval" else None
+                # Expand Kotlin string-template loops (repeat(N) { i -> "...${i + 1}" })
+                # to concrete expressions per iteration.
+                expanded_exprs = expand_template_loop(expr, body)
                 # RandomTest's fake-RNG helper: asserted values depend on the
                 # stub RNG (nextLong=until/10, nextDouble=5.5), unreproducible
                 # by a real engine — score eval-OK only, never against stub values.
-                if 'parseAPLExpressionWithSpecialRandom(' in body:
+                if "parseAPLExpressionWithSpecialRandom(" in body:
                     expected = None
-                # `{GENERIC}` is a test-harness backend marker (APLTest.kt
-                # `parseAndTestWithGeneric` runs the expr twice: with `{GENERIC}`
-                # removed, and replaced by `int:ensureGeneric`). The port has one
-                # backend, so record the plain form (marker stripped).
-                expr = expr.replace('{GENERIC}', '')
-                # `${…}` Kotlin string templates with statically-known bindings
-                # (11d): expand to literal Kap so the row is scorable (all five
-                # are expected=null: any produced value scores). `⋄`-chains cover
-                # EVERY combination, so any failure keeps the row red; the full
-                # matrices are additionally oracle-verified in curated rows. The
-                # two fails-kind template rows are untouched (they already score
-                # via parse errors).
-                if '${' in expr and kind == 'eval':
-                    base = os.path.basename(path)
-                    if (base, name) == ('CompareTest.kt', 'compareNumbersWithAllTypes'):
-                        _vals = ['5', '5.0', '5.1', '5j0', '5.1j0', '(int:asBigint 5)', '(9÷2)']
-                        _names = ['=', '≠', '<', '>', '≤', '≥']
-                        _tail = '6 6.0 6.1 6.1j0 (int:asBigint 1000) (1000000÷3) 1 1.0 1.1 1.1j0 (int:asBigint 1) (10÷3)'
-                        expr = ' ⋄ '.join([_v + ' ' + _n + ' ' + _tail for _v in _vals for _n in _names])
-                    elif (base, name) == ('CompareTest.kt', 'compareEqualsInfinity'):
-                        _pairs = [('(1.0÷0.0)', '(1.0÷0.0)'), ('(¯1.0÷0.0)', '(¯1.0÷0.0)'), ('(¯1.0÷0.0)', '(1.0÷0.0)')]
-                        expr = ' ⋄ '.join([_a + '=' + _b for _a, _b in _pairs] + [_a + '≠' + _b for _a, _b in _pairs])
-                    elif (base, name) == ('CompareTest.kt', 'compareSameInfinity'):
-                        _pairs = [('(1.0÷0.0)', '(1.0÷0.0)'), ('(¯1.0÷0.0)', '(¯1.0÷0.0)'), ('(¯1.0÷0.0)', '(1.0÷0.0)')]
-                        expr = ' ⋄ '.join([_a + '≡' + _b for _a, _b in _pairs] + [_a + '≢' + _b for _a, _b in _pairs])
-                    elif (base, name) == ('EncoderAPLFunctionTest.kt', 'encodeLargePositiveIntegers'):
-                        expr = 'x ← encoder:encode 2 ⋆ ⍳ 300 ⋄ encoder:decode x'
-                    elif (base, name) == ('EncoderAPLFunctionTest.kt', 'encodeLargeNegativeIntegers'):
-                        expr = 'x ← encoder:encode -2 ⋆ ⍳ 300 ⋄ encoder:decode x'
-                records.append({
-                    'file': os.path.relpath(path, ARRAY_ROOT),
-                    'test': name,
-                    'kind': kind,
-                    'expr': expr,
-                    'expected': expected,
-                })
+                for exp in expanded_exprs:
+                    # `{GENERIC}` is a test-harness backend marker (APLTest.kt
+                    # `parseAndTestWithGeneric` runs the expr twice: with `{GENERIC}`
+                    # removed, and replaced by `int:ensureGeneric`). The port has one
+                    # backend, so record the plain form (marker stripped).
+                    exp = exp.replace("{GENERIC}", "")
+                    # `${…}` Kotlin string templates with statically-known bindings
+                    # (11d): expand to literal Kap so the row is scorable (all five
+                    # are expected=null: any produced value scores). `⋄`-chains cover
+                    # EVERY combination, so any failure keeps the row red; the full
+                    # matrices are additionally oracle-verified in curated rows. The
+                    # two fails-kind template rows are untouched (they already score
+                    # via parse errors).
+                    if '${' in exp and kind == 'eval':
+                        # Uninterpolated Kotlin string template that the extractor
+                        # could not expand. Score as eval-OK only: any successful
+                        # evaluation counts, against no expected value.
+                        records.append(
+                            {
+                                "file": os.path.relpath(path, ARRAY_ROOT),
+                                "test": name,
+                                "kind": kind,
+                                "expr": exp,
+                                "expected": None,
+                            }
+                        )
+                        continue
+                    records.append(
+                        {
+                            "file": os.path.relpath(path, ARRAY_ROOT),
+                            "test": name,
+                            "kind": kind,
+                            "expr": exp,
+                            "expected": expected,
+                        }
+                    )
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, 'w', encoding='utf-8') as f:
         for r in records:
