@@ -179,6 +179,16 @@ pub enum APLValue {
     /// Sequential execution is one valid interleaving, and the lock tests
     /// hold the lock across the whole body, so values are deterministic.
     Thread { result: AplRef<APLValue> },
+    /// A `→`-return suspended inside an eager-`¨` result array (ReturnTest
+    /// `capturedFrameWithCollapse`). Kotlin's `¨` runs elements on detached
+    /// stacks where `Return` is illegal (`withThreadLocalAssigned` converts it
+    /// to `Return outside of expected frame`), but `comp`-collapse forces
+    /// elements inside the live frame so the return lands. The port's `¨` is
+    /// eager, so a `Return` raised by an element is stored here instead of
+    /// propagating: `comp`/collapse re-raises it via `force` (live frame → the
+    /// block catches it → `9`), while an unforced leak errors at the harness
+    /// boundary like Kotlin's detached-stack error.
+    SuspendedReturn { value: AplRef<APLValue>, target: Option<usize> },
 }
 
 /// Fresh ids for `Lock`/`Condvar` identity (Kotlin: JVM object identity —
@@ -239,6 +249,9 @@ impl APLValue {
             APLValue::Lock { .. } | APLValue::Condvar { .. } => "internal",
             // `ThreadValue.kapClass` is also `SystemClass.INTERNAL`.
             APLValue::Thread { .. } => "internal",
+            // A suspended return is control state, not a value; no Kotlin
+            // class exists. Reports internal so `typeof` stays total.
+            APLValue::SuspendedReturn { .. } => "internal",
             // `typeof` of a class instance is its CLASS symbol (Kotlin
             // `nameForClass(a.kapClass)`); handled in the `typeof` eval arm,
             // which returns the symbol directly. This string is only a fallback.
@@ -303,6 +316,10 @@ impl APLValue {
             APLValue::Condvar { .. } => "condvar".to_string(),
             // `ThreadValue.formatted` is `[thread …]`; the handle is opaque.
             APLValue::Thread { .. } => "[thread]".to_string(),
+            // A leaked suspended return renders as control state, never as a
+            // value (the harness rejects values containing one, mirroring
+            // Kotlin's detached-stack error).
+            APLValue::SuspendedReturn { .. } => "[return]".to_string(),
             // Display divergence (see TypedInstance docs): the harness
             // renderer shows the delegate so the delegate-derived
             // `ObjectsTest` expectations score.
@@ -348,6 +365,10 @@ impl APLValue {
             APLValue::Condvar { .. } => "condvar".to_string(),
             // `ThreadValue.formatted` is `[thread …]`; the handle is opaque.
             APLValue::Thread { .. } => "[thread]".to_string(),
+            // A leaked suspended return renders as control state, never as a
+            // value (the harness rejects values containing one, mirroring
+            // Kotlin's detached-stack error).
+            APLValue::SuspendedReturn { .. } => "[return]".to_string(),
             // Oracle-exact: `TypedAPLValue.formatted(style) = "instance"`.
             APLValue::TypedInstance { .. } => "instance".to_string(),
         }
@@ -421,6 +442,10 @@ impl APLValue {
             APLValue::Condvar { .. } => "condvar".to_string(),
             // `ThreadValue.formatted` is `[thread …]`; the handle is opaque.
             APLValue::Thread { .. } => "[thread]".to_string(),
+            // A leaked suspended return renders as control state, never as a
+            // value (the harness rejects values containing one, mirroring
+            // Kotlin's detached-stack error).
+            APLValue::SuspendedReturn { .. } => "[return]".to_string(),
             // Oracle-exact: `TypedAPLValue.formatted(style) = "instance"`.
             APLValue::TypedInstance { .. } => "instance".to_string(),
         }
@@ -463,6 +488,10 @@ impl APLValue {
             APLValue::Condvar { .. } => "condvar".to_string(),
             // `ThreadValue.formatted` is `[thread …]`; the handle is opaque.
             APLValue::Thread { .. } => "[thread]".to_string(),
+            // A leaked suspended return renders as control state, never as a
+            // value (the harness rejects values containing one, mirroring
+            // Kotlin's detached-stack error).
+            APLValue::SuspendedReturn { .. } => "[return]".to_string(),
             // Oracle-exact: `TypedAPLValue.formatted(style) = "instance"`.
             APLValue::TypedInstance { .. } => "instance".to_string(),
         }

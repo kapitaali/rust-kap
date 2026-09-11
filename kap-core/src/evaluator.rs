@@ -304,6 +304,12 @@ impl APLValue {
                 let env = env.clone();
                 engine.eval_instr(instr, &env)
             }
+            // Forcing a suspended `→`-return re-raises it: inside a live frame
+            // (e.g. `comp`-collapse) the frame catches it; past frame exit it
+            // surfaces as an error like Kotlin's detached-stack error.
+            APLValue::SuspendedReturn { value, target } => {
+                Err(AplError::Return(value.clone(), *target))
+            }
             other => Ok(Rc::new(other.clone())),
         }
     }
@@ -2098,6 +2104,7 @@ impl Engine {
             APLValue::Lock { .. } | APLValue::Condvar { .. } => true,
             APLValue::TypedInstance { .. } => true,
             APLValue::Thread { .. } => true,
+            APLValue::SuspendedReturn { .. } => true,
         }
     }
 
@@ -3270,6 +3277,23 @@ impl Engine {
             if op_name == "int:proto" {
                 let proto_val = self.eval_instr(operand, env)?.force(self)?;
                 return self.apply_proto_op(func, &proto_val, left, right, env);
+            }
+            // `f defer arg` (Kotlin `DeferAPLOperator` → `DeferredAPLValue1Arg` /
+            // `DeferredAPLValue2Arg`, div_functions.kt:168-194): LAZY — capture
+            // the application `func(left, operand)` unevaluated. Neither the
+            // operand nor any apply-time `right` is touched; forcing the
+            // Deferred evaluates `Apply{func, left, operand}` in the captured
+            // env (call-by-need, like Kotlin's saved-stack deferred values).
+            if op_name == "defer" {
+                let deferred = Instr::Apply {
+                    fn_expr: func.clone(),
+                    left: left.clone(),
+                    right: operand.clone(),
+                };
+                return Ok(Rc::new(APLValue::Deferred {
+                    instr: Rc::new(deferred),
+                    env: env.clone(),
+                }));
             }
             // `f thread:withHeldLock lock` (Kotlin `CallWithLockOperator`,
             // thread/lock.kt:45-66): evaluate the lock instr, check it is a
@@ -13722,7 +13746,8 @@ impl Engine {
             | APLValue::Escape { .. } | APLValue::NonBoundFn { .. }
             | APLValue::Stream(_) | APLValue::Process(_) | APLValue::Timestamp(_)
             | APLValue::Jvm(_) | APLValue::Lock { .. } | APLValue::Condvar { .. }
-            | APLValue::TypedInstance { .. } | APLValue::Thread { .. } => {
+            | APLValue::TypedInstance { .. } | APLValue::Thread { .. }
+            | APLValue::SuspendedReturn { .. } => {
                 out.push(Rc::new(value.clone()));
             }
             APLValue::Array(arr) => {
@@ -15694,6 +15719,9 @@ impl Engine {
             }
             APLValue::Thread { .. } => {
                 Err(AplError::runtime("cannot use a thread as an array element".into()))
+            }
+            APLValue::SuspendedReturn { .. } => {
+                Err(AplError::runtime("cannot use a suspended return as an array element".into()))
             }
             APLValue::Process(_) => {
                 Err(AplError::runtime("cannot use a process as an array element".into()))
@@ -18857,29 +18885,30 @@ impl Engine {
                 let left_elems = self.flat_elements(&lv);
                 for (i, re) in right_elems.iter().enumerate() {
                     let le = left_elems.get(i).cloned().unwrap_or_else(|| lv.clone());
-                    out.push(
-                        self.apply_fn_instr(fn_instr, Some(&le), re, env)
-                            .map_err(|e| match e {
-                                AplError::Return(..) => AplError::runtime(
-                                    "→: Return outside of expected frame".into(),
-                                ),
-                                other => other,
-                            })?,
-                    );
+                    // A `→`-return raised by an element does NOT propagate here:
+                    // Kotlin runs `¨` elements on detached stacks (the return is
+                    // illegal there), but `comp`-collapse forces them inside the
+                    // live frame. Suspend the return as a value; `force`
+                    // re-raises it at collapse time (see `SuspendedReturn`).
+                    match self.apply_fn_instr(fn_instr, Some(&le), re, env) {
+                        Ok(v) => out.push(v),
+                        Err(AplError::Return(rv, target)) => out.push(Rc::new(
+                            APLValue::SuspendedReturn { value: rv, target },
+                        )),
+                        Err(other) => return Err(other),
+                    }
                 }
             }
             // Monadic each: apply f to each right element.
             None => {
                 for e in &right_elems {
-                    out.push(
-                        self.apply_fn_instr(fn_instr, None, e, env)
-                            .map_err(|e| match e {
-                                AplError::Return(..) => AplError::runtime(
-                                    "→: Return outside of expected frame".into(),
-                                ),
-                                other => other,
-                            })?,
-                    );
+                    match self.apply_fn_instr(fn_instr, None, e, env) {
+                        Ok(v) => out.push(v),
+                        Err(AplError::Return(rv, target)) => out.push(Rc::new(
+                            APLValue::SuspendedReturn { value: rv, target },
+                        )),
+                        Err(other) => return Err(other),
+                    }
                 }
             }
         }
@@ -19566,24 +19595,65 @@ impl Engine {
         true
     }
 
-    /// Trial-division primality (sufficient for the port's i64 domain; Kotlin uses
-    /// Miller-Rabin only for bigint inputs).
+    /// Deterministic Miller-Rabin for the full u64 domain (bases
+    /// {2, 325, 9375, 28178, 450775, 9780504, 1795265022} are exact below 2^64
+    /// — Jaeschke/Sinclair). Exact on every input (not probabilistic), so
+    /// answers match Kotlin's `isProbablePrime` everywhere while running in
+    /// microseconds: the old 6k±1 trial division needed ~16s for the PrimeTest
+    /// `isPrime 9223372036854775779+⍳10` row (past the 10s case budget).
     fn is_prime_u64(n: u64) -> bool {
         if n < 2 {
             return false;
         }
-        if n % 2 == 0 {
-            return n == 2;
-        }
-        if n % 3 == 0 {
-            return n == 3;
-        }
-        let mut d = 5u64;
-        while d * d <= n {
-            if n % d == 0 || n % (d + 2) == 0 {
+        // Small-prime short-circuit (also handles even n and the bases).
+        const SMALL: [u64; 12] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37];
+        for p in SMALL {
+            if n == p {
+                return true;
+            }
+            if n % p == 0 {
                 return false;
             }
-            d += 6;
+        }
+        // n - 1 = d * 2^r with d odd.
+        let mut d = n - 1;
+        let mut r = 0u32;
+        while d % 2 == 0 {
+            d /= 2;
+            r += 1;
+        }
+        fn modmul(a: u64, b: u64, m: u64) -> u64 {
+            ((a as u128 * b as u128) % m as u128) as u64
+        }
+        fn modpow(mut a: u64, mut e: u64, m: u64) -> u64 {
+            let mut x = 1u64;
+            a %= m;
+            while e > 0 {
+                if e & 1 == 1 {
+                    x = modmul(x, a, m);
+                }
+                a = modmul(a, a, m);
+                e >>= 1;
+            }
+            x
+        }
+        const BASES: [u64; 7] = [2, 325, 9375, 28178, 450775, 9780504, 1795265022];
+        'witness: for a in BASES {
+            let a = a % n;
+            if a == 0 {
+                continue;
+            }
+            let mut x = modpow(a, d, n);
+            if x == 1 || x == n - 1 {
+                continue 'witness;
+            }
+            for _ in 1..r {
+                x = modmul(x, x, n);
+                if x == n - 1 {
+                    continue 'witness;
+                }
+            }
+            return false;
         }
         true
     }

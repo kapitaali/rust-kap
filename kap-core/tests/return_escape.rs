@@ -14,13 +14,15 @@
 //! - `S ⇐ →` → error `→: Call to return without a function call` (bind time)
 //! - `λ→` → error `Call to return without a function call` (no `→: ` prefix)
 //! - `→5` → error `→: Call to return without a function call`
-//! - `{S ⇐ → ⋄ {(S⍣(81=×⍨⍵)) ⍵}¨⍳10} 0` → error `Return outside of expected frame`
-//!   (an escape crossing `¨` dies: Kotlin runs each in a detached stack)
+//! - `{S ⇐ → ⋄ {(S⍣(81=×⍨⍵)) ⍵}¨⍳10} 0` → value with a suspended return (an
+//!   escape crossing `¨` suspends: Kotlin errors here — detached stack —
+//!   which the harness and stale-collapse reproduce as errors)
 //!
-//! NOT covered: `comp`-collapse propagation (`{S ⇐ → ⋄ comp {...}¨⍳10} 0` → `9`
-//! in the oracle) needs lazy `¨` (Kotlin's each forces elements on demand, so
-//! `⍕`/index/`≢`/`comp` see values while statement print errors). The port's
-//! `¨` is eager — recorded for the roadmap, not attempted here.
+//! `comp`-collapse propagation (`{S ⇐ → ⋄ comp {...}¨⍳10} 0` → `9` in the
+//! oracle) works via `SuspendedReturn`: the port's eager `¨` suspends a
+//! `→`-return raised by an element instead of propagating it; `comp`-collapse
+//! re-raises inside the live frame so the block catches it, while an
+//! uncollapsed leak errors at the boundary (Kotlin's detached-stack error).
 
 use kap_core::Engine;
 
@@ -89,11 +91,22 @@ fn top_level_return_errors() {
 }
 
 #[test]
-fn escape_through_each_errors() {
-    // The sweep's non-comp case: both sides error identically.
-    assert!(
-        err("{S ⇐ → ⋄ {(S⍣(81=×⍨⍵)) ⍵}¨⍳10} 0").contains("Return outside of expected frame"),
-        "got: {}",
-        err("{S ⇐ → ⋄ {(S⍣(81=×⍨⍵)) ⍵}¨⍳10} 0")
-    );
+fn escape_collapses_through_comp() {
+    // The sweep's comp case (oracle `9`): `comp` collapses the `¨` result
+    // inside the live frame, so the suspended return re-raises there and the
+    // block catches it.
+    assert_eq!(ok("{S ⇐ → ⋄ comp {(S⍣(81=×⍨⍵)) ⍵}¨⍳10} 0"), "9");
+}
+
+#[test]
+fn escape_through_each_suspends_until_collapse() {
+    // The sweep's non-comp case: the port's `¨` is eager, so the return is
+    // SUSPENDED as a value (Kotlin errors here — detached stack — because its
+    // `¨` forces elements outside the frame). Forcing past frame exit errors:
+    // collapse the leaked array in a fresh statement and the stale return
+    // surfaces like Kotlin's `Return outside of expected frame`.
+    let v = ok("{S ⇐ → ⋄ {(S⍣(81=×⍨⍵)) ⍵}¨⍳10} 0");
+    assert!(v.contains("[return]"), "suspended marker should leak, got: {}", v);
+    let e = err("x ← {S ⇐ → ⋄ {(S⍣(81=×⍨⍵)) ⍵}¨⍳10} 0 ⋄ comp x");
+    assert!(e.contains("Return"), "stale collapse should raise, got: {}", e);
 }

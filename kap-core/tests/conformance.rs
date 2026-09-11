@@ -17,6 +17,7 @@
 //!   or with visible output: `cargo test -p kap-core --test conformance -- --nocapture`
 
 use kap_core::Engine;
+use kap_core::APLValue;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -81,11 +82,39 @@ fn classify(engine: &Engine, c: &Case) -> Outcome {
 /// Like [`classify`], but evaluates a harness-prepared source string (H2: the
 /// `StandardLib*` rows prepend `use("standard-lib.kap")` to mirror Kotlin's
 /// `withStandardLib = true` engine configuration).
+/// True if a value tree contains a `SuspendedReturn` marker anywhere (array /
+/// list elements, instance delegates). The harness treats such a leak as
+/// Kotlin's detached-stack error rather than a value.
+fn value_has_suspended(v: &APLValue) -> bool {
+    match v {
+        APLValue::SuspendedReturn { .. } => true,
+        APLValue::Array(a) | APLValue::List(a) => a.elements().iter().any(|e| value_has_suspended(e)),
+        APLValue::TypedInstance { delegate, .. } => value_has_suspended(delegate),
+        _ => false,
+    }
+}
+
 fn classify_str(engine: &Engine, src: &str, c: &Case) -> Outcome {
     // Guard against engine panics (e.g. unchecked indexing in builtins): a crash is
     // treated as "unsupported", never an abort of the whole suite.
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        engine.eval_to_string(src)
+        // Kotlin test helpers collapse deferred values before asserting
+        // (`assertSimpleNumber` → `ensureNumber` → `unwrapDeferredValue`), so
+        // the harness forces the final value too (no-op for non-deferred).
+        // A `→`-return suspended in an eager-`¨` result that was never
+        // collapsed (ReturnTest `capturedFrameNoCollapse`) is Kotlin's
+        // detached-stack error, not a value — surface it as a failure.
+        engine.eval_string(src).and_then(|v| {
+            v.force(&engine).and_then(|f| {
+                if value_has_suspended(&f) {
+                    Err(kap_core::AplError::runtime(
+                        "→: Return outside of expected frame".to_string(),
+                    ))
+                } else {
+                    Ok(f.format_value())
+                }
+            })
+        })
     }));
     let errored = match &res {
         Ok(Err(_)) | Err(_) => true,

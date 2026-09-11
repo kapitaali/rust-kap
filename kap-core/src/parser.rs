@@ -1522,6 +1522,24 @@ impl<'a> Parser<'a> {
                     };
                     continue;
                 }
+                // Native operator `f defer arg` (Kotlin `DeferAPLOperator`,
+                // engine.kt:415): one function operand, one VALUE operand —
+                // same ValueOp shape. The evaluator captures the application
+                // LAZILY (never evaluates `arg` until forced).
+                if namespace.is_none()
+                    && name == "defer"
+                    && Self::is_function_expr(&cur)
+                {
+                    self.advance(); // consume defer
+                    self.skip_newlines();
+                    let operand = self.parse_apply()?;
+                    cur = Instr::ValueOp {
+                        func: Box::new(cur),
+                        op_name: "defer".to_string(),
+                        operand: Box::new(operand),
+                    };
+                    continue;
+                }
             }
             // Compose `∘` / reverse-compose `⍛` (Kotlin parseOperator :1290 —
             // these are native two-arg operators, not symbols, so they need
