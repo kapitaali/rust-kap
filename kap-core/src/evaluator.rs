@@ -2096,6 +2096,7 @@ impl Engine {
             APLValue::Timestamp(_) => true,
             APLValue::Jvm(_) => true,
             APLValue::Lock { .. } | APLValue::Condvar { .. } => true,
+            APLValue::TypedInstance { .. } => true,
         }
     }
 
@@ -4129,6 +4130,93 @@ impl Engine {
                     _ => Err(AplError::runtime("thread:condvar: expected a condvar".into())),
                 }
             }
+            // `objects:` — user classes (objects.kt:87-143). Minimal surface:
+            // defclass / make / classof / extract (+ `⍢objects:extract` arm in
+            // `apply_under_op`). Kotlin's default `resolveMethod` throws
+            // `Invalid target object`, so method dispatch is out of scope.
+            "objects:defclass" => {
+                // `DefclassFunctionImpl`: `a.listify()`, first element must be
+                // a symbol; registers `UserDefinedClass`, returns the symbol.
+                let a = right_val.force(self)?;
+                let first = match a.as_ref() {
+                    APLValue::List(l) | APLValue::Array(l) => {
+                        l.elements().into_iter().next().unwrap_or_else(|| a.clone())
+                    }
+                    _ => a.clone(),
+                };
+                let (sym_name, sym_ns) = match first.as_ref() {
+                    APLValue::Symbol { name, namespace } => (name.clone(), namespace.clone()),
+                    other => {
+                        return Err(AplError::runtime(format!(
+                            "defclass: Value {} is not a symbol",
+                            other.format_value()
+                        )))
+                    }
+                };
+                let key = format!("{}:{}", sym_ns.as_deref().unwrap_or("default"), sym_name);
+                self.classes.borrow_mut().insert(key);
+                Ok(first)
+            }
+            "objects:make" => {
+                // `MakeClassInstanceFunctionImpl`: left must be a symbol naming
+                // a registered class (`KapClassNotFound` → oracle
+                // `make: Class not found: default:bar`).
+                let left = match left_val {
+                    Some(l) => l,
+                    None => {
+                        return Err(AplError::runtime(
+                            "make: Function cannot be called with one argument".into(),
+                        ))
+                    }
+                };
+                let (sym_name, sym_ns) = match left.as_ref() {
+                    APLValue::Symbol { name, namespace } => (name.clone(), namespace.clone()),
+                    other => {
+                        return Err(AplError::runtime(format!(
+                            "make: Value {} is not a symbol",
+                            other.format_value()
+                        )))
+                    }
+                };
+                let key = format!("{}:{}", sym_ns.as_deref().unwrap_or("default"), sym_name);
+                if !self.classes.borrow().contains(&key) {
+                    return Err(AplError::runtime(format!("make: Class not found: {}", key)));
+                }
+                Ok(Rc::new(APLValue::TypedInstance {
+                    class_name: sym_name,
+                    class_ns: sym_ns,
+                    delegate: right_val,
+                }))
+            }
+            "objects:classof" => {
+                // `TagOfFunctionImpl`: the class symbol of any value. Typed
+                // instances report their user class; anything else reports its
+                // system class exactly like `typeof` (`kap:` namespace).
+                match right_val.force(self)?.as_ref() {
+                    APLValue::TypedInstance { class_name, class_ns, .. } => {
+                        Ok(Rc::new(APLValue::Symbol {
+                            name: class_name.clone(),
+                            namespace: class_ns.clone(),
+                        }))
+                    }
+                    other => Ok(Rc::new(APLValue::Symbol {
+                        name: other.class_name().to_string(),
+                        namespace: Some("kap".to_string()),
+                    })),
+                }
+            }
+            "objects:extract" => {
+                // `ExtractFunctionImpl.eval1Arg`: unwrap or
+                // `IncompatibleTypeException` (oracle `extract: Value is not a
+                // class instance: 12` — value rendered PLAIN).
+                match right_val.force(self)?.as_ref() {
+                    APLValue::TypedInstance { delegate, .. } => Ok(delegate.clone()),
+                    other => Err(AplError::runtime(format!(
+                        "extract: Value is not a class instance: {}",
+                        other.format_plain()
+                    ))),
+                }
+            }
             // `math:*` — P2 (ROADMAP §5) port of engine.kt:436–466 registrations
             // (`SinAPLFunction` etc. in math_functions.kt, prime.kt). Monadic fns are
             // element-wise over arrays via scalar1; dyadic (atan2/hypot/gcd/lcm) via num2.
@@ -5005,6 +5093,15 @@ impl Engine {
             // a default-namespace symbol as `default:NAME` (see `format_value`).
             "typeof" => {
                 let v = right_val.force(self)?;
+                // A class instance reports its CLASS symbol (Kotlin
+                // `nameForClass(a.kapClass)`, objects.kt:121-125), not a
+                // `kap:` system name.
+                if let APLValue::TypedInstance { class_name, class_ns, .. } = v.as_ref() {
+                    return Ok(Rc::new(APLValue::Symbol {
+                        name: class_name.clone(),
+                        namespace: class_ns.clone(),
+                    }));
+                }
                 // Real Kap returns the class name as a *symbol in the `kap` namespace*
                 // (lowercase, e.g. `kap:array`, `kap:symbol`).
                 let name = v.class_name().to_string();
@@ -6534,6 +6631,10 @@ impl Engine {
                 | "json:read" | "json:readString" | "json:writeString"
                 // `time:` namespace (builtins/time-functions.kt).
                 | "time:toTimestamp" | "time:fromTimestamp" | "time:format" | "time:parse"
+                // `objects:` namespace (objects.kt:87-90): defclass / make /
+                // classof / extract. Two-gate rule: parser admits via
+                // is_known_fn; listed here for the eval-time late gate.
+                | "objects:defclass" | "objects:make" | "objects:classof" | "objects:extract"
                 // 11a Tier-1 `jvm:` emulation (jvmmod/jvm-module.kt, no-JVM subset).
                 | "jvm:toJvmString" | "jvm:toJvmShort" | "jvm:toJvmInt" | "jvm:toJvmLong"
                 | "jvm:toJvmByte" | "jvm:toJvmChar" | "jvm:toJvmFloat" | "jvm:toJvmDouble"
@@ -13582,7 +13683,8 @@ impl Engine {
             | APLValue::Deferred { .. } | APLValue::UserFn { .. } | APLValue::UserOp { .. }
             | APLValue::Escape { .. } | APLValue::NonBoundFn { .. }
             | APLValue::Stream(_) | APLValue::Process(_) | APLValue::Timestamp(_)
-            | APLValue::Jvm(_) | APLValue::Lock { .. } | APLValue::Condvar { .. } => {
+            | APLValue::Jvm(_) | APLValue::Lock { .. } | APLValue::Condvar { .. }
+            | APLValue::TypedInstance { .. } => {
                 out.push(Rc::new(value.clone()));
             }
             APLValue::Array(arr) => {
@@ -15548,6 +15650,9 @@ impl Engine {
             }
             APLValue::Lock { .. } | APLValue::Condvar { .. } => {
                 Err(AplError::runtime("cannot use a lock as an array element".into()))
+            }
+            APLValue::TypedInstance { .. } => {
+                Err(AplError::runtime("cannot use a class instance as an array element".into()))
             }
             APLValue::Process(_) => {
                 Err(AplError::runtime("cannot use a process as an array element".into()))
@@ -17558,6 +17663,37 @@ impl Engine {
                     return Ok(out.into_iter().next().unwrap_or(a));
                 }
                 return self.build_nested(&out, &a_dims);
+            }
+        }
+        // `base ⍢ objects:extract` (Kotlin `ExtractFunctionImpl.
+        // evalWithStructuralUnder1Arg`, objects.kt:137-141): unwrap the
+        // instance, apply base to the delegate, re-wrap with the same class.
+        // Non-instance argument errors exactly like `objects:extract`.
+        if let Instr::Symbol { name, namespace } = wrapper {
+            if name == "extract" && namespace.as_deref() == Some("objects") {
+                let a = self.eval_instr(right, env)?.force(self)?;
+                let (class_name, class_ns, delegate) = match a.as_ref() {
+                    APLValue::TypedInstance { class_name, class_ns, delegate } => {
+                        (class_name.clone(), class_ns.clone(), delegate.clone())
+                    }
+                    other => {
+                        return Err(AplError::runtime(format!(
+                            "extract: Value is not a class instance: {}",
+                            other.format_plain()
+                        )))
+                    }
+                };
+                let bwa = self.eval_apply(
+                    base,
+                    &None,
+                    &Box::new(Instr::Value(delegate)),
+                    env,
+                )?;
+                return Ok(Rc::new(APLValue::TypedInstance {
+                    class_name,
+                    class_ns,
+                    delegate: bwa,
+                }));
             }
         }
         // INVERSE family: res = wrapper⁻¹(res'). Reuse the port's generic inverse

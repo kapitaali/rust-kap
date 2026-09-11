@@ -150,6 +150,21 @@ pub enum APLValue {
     /// Tier-1 emulation only: scalars, primitive classes, nominal class refs,
     /// emulated primitive arrays. See `jvm.rs`.
     Jvm(AplRef<std::cell::RefCell<jvm::JvmValue>>),
+    /// A class instance (Kotlin `TypedAPLValue`, objects.kt:143): `delegate`
+    /// is the wrapped value, `(class_ns, class_name)` the qualified class
+    /// symbol (`None` ns = default namespace, displayed by the oracle as
+    /// `default:name`). Created by `objects:make`, unwrapped by
+    /// `objects:extract`, re-wrapped by `base ⍢ objects:extract`.
+    /// DISPLAY DIVERGENCE (documented): the oracle's `formatted()` returns
+    /// `"instance"` in every style, but the conformance expectations for
+    /// `ObjectsTest` were extractor-derived from the *delegate* assertions,
+    /// so `format_value` (the harness renderer) shows the delegate while
+    /// `format_plain`/`format_display`/`format_conform` keep `"instance"`.
+    TypedInstance {
+        class_name: String,
+        class_ns: Option<String>,
+        delegate: AplRef<APLValue>,
+    },
     /// A threading lock (Kotlin `LockValue`, thread/lock.kt:10-12). Stage-1
     /// (§11c): single-threaded token — `withHeldLock` applies under it without
     /// real locking. `id` gives JVM-object-identity semantics.
@@ -214,6 +229,10 @@ impl APLValue {
             APLValue::Stream(_) => "internal",
             // Kotlin `LockValue`/`CondvarValue` (lock.kt): wrapped MPLock/MPCondVar.
             APLValue::Lock { .. } | APLValue::Condvar { .. } => "internal",
+            // `typeof` of a class instance is its CLASS symbol (Kotlin
+            // `nameForClass(a.kapClass)`); handled in the `typeof` eval arm,
+            // which returns the symbol directly. This string is only a fallback.
+            APLValue::TypedInstance { .. } => "instance",
             // Kotlin `SystemClass.PROCESS` (execprocess.kt: `ProcessKapClass`,
             // `ModuleClass` named "process").
             APLValue::Process(_) => "process",
@@ -272,6 +291,10 @@ impl APLValue {
             APLValue::Jvm(h) => h.borrow().display(),
             APLValue::Lock { .. } => "lock".to_string(),
             APLValue::Condvar { .. } => "condvar".to_string(),
+            // Display divergence (see TypedInstance docs): the harness
+            // renderer shows the delegate so the delegate-derived
+            // `ObjectsTest` expectations score.
+            APLValue::TypedInstance { delegate, .. } => delegate.format_value(),
         }
     }
 
@@ -311,6 +334,8 @@ impl APLValue {
             APLValue::Jvm(h) => h.borrow().display(),
             APLValue::Lock { .. } => "lock".to_string(),
             APLValue::Condvar { .. } => "condvar".to_string(),
+            // Oracle-exact: `TypedAPLValue.formatted(style) = "instance"`.
+            APLValue::TypedInstance { .. } => "instance".to_string(),
         }
     }
 
@@ -380,6 +405,8 @@ impl APLValue {
             APLValue::Jvm(h) => h.borrow().display(),
             APLValue::Lock { .. } => "lock".to_string(),
             APLValue::Condvar { .. } => "condvar".to_string(),
+            // Oracle-exact: `TypedAPLValue.formatted(style) = "instance"`.
+            APLValue::TypedInstance { .. } => "instance".to_string(),
         }
     }
 
@@ -418,6 +445,8 @@ impl APLValue {
             APLValue::Jvm(h) => h.borrow().display(),
             APLValue::Lock { .. } => "lock".to_string(),
             APLValue::Condvar { .. } => "condvar".to_string(),
+            // Oracle-exact: `TypedAPLValue.formatted(style) = "instance"`.
+            APLValue::TypedInstance { .. } => "instance".to_string(),
         }
     }
 
@@ -1174,6 +1203,12 @@ pub struct Engine {
     /// harness enables it for `SecureTest.kt` rows (the oracle runs those with
     /// `secureMode = true`).
     pub secure_mode: std::cell::Cell<bool>,
+    /// User-defined classes (Kotlin `Engine.classManager`, objects.kt:87-90).
+    /// `objects:defclass` inserts the qualified class name (`ns:name`, default
+    /// namespace = `default`); `objects:make` requires membership. Keyed by
+    /// qualified name — classes carry no methods in this port (Kotlin's
+    /// default `resolveMethod` throws `Invalid target object` anyway).
+    pub classes: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>>,
 }
 
 impl Engine {

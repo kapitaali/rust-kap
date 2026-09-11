@@ -255,6 +255,12 @@ impl<'a> Parser<'a> {
                         // P3 `time:` namespace (builtins/time-functions.kt).
                         || (ns == "time"
                             && matches!(base, "toTimestamp" | "fromTimestamp" | "format" | "parse"))
+                        // `objects:` namespace (objects.kt:87-90): defclass /
+                        // make / classof / extract. Two-gate rule: the
+                        // eval-time late gate (`is_primitive_name`) lists the
+                        // qualified names; dispatch arms live in `eval_apply`.
+                        || (ns == "objects"
+                            && matches!(base, "defclass" | "make" | "classof" | "extract"))
                         // 11a Tier-1 `jvm:` emulation (jvmmod/jvm-module.kt, no-JVM subset).
                         || (ns == "jvm"
                             && matches!(base, "toJvmString" | "toJvmShort" | "toJvmInt" | "toJvmLong"
