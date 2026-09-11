@@ -12995,6 +12995,11 @@ impl Engine {
                     inv[p] = k;
                 }
                 let new_dims: Vec<usize> = (0..rank).map(|k| dims[inv[k]]).collect();
+                if elems.is_empty() {
+                    return Ok(Rc::new(APLValue::Array(Rc::new(
+                        KapArray::new(new_dims, ArrayData::Nested(Vec::new())),
+                    ))));
+                }
                 let old_stride = strides(&dims);
                 let new_stride = strides(&new_dims);
                 let total: usize = new_dims.iter().product();
@@ -16784,6 +16789,18 @@ impl Engine {
                 // Frame sizes must agree (Kotlin ForEachFunctionDescriptor.compute2Arg).
                 let ln: usize = lelems.len() / lcell;
                 let rn: usize = relems.len() / rcell;
+                // If either argument is empty, the result is an empty array of the
+                // non-empty frame's shape (Kotlin: an empty operand yields an empty result).
+                if lelems.is_empty() || relems.is_empty() {
+                    let frame = if lframe.is_empty() { rframe.clone() } else { lframe.clone() };
+                    return if frame.is_empty() {
+                        Ok(Rc::new(APLValue::Null))
+                    } else {
+                        Ok(Rc::new(APLValue::Array(Rc::new(
+                            KapArray::new(frame, ArrayData::Nested(Vec::new())),
+                        ))))
+                    };
+                }
                 if ln != rn && ln != 1 && rn != 1 {
                     return Err(AplError::runtime(
                         "⍤: cell frame sizes do not match".into(),
@@ -16794,14 +16811,7 @@ impl Engine {
                 for i in 0..n {
                     let li = if ln == 1 { 0 } else { i };
                     let ri = if rn == 1 { 0 } else { i };
-                    // Guard the cell slices: if an argument has no elements (e.g. the
-                    // right operand of `⍤` evaluated to an empty array), return a proper
-                    // error rather than panicking on an out-of-range slice.
-                    if lelems.is_empty() || relems.is_empty() {
-                        return Err(AplError::runtime(
-                            "⍤: rank-operator argument is empty".into(),
-                        ));
-                    }
+                    // An empty argument was already handled above.
                     let ls = li * lcell;
                     let rs = ri * rcell;
                     if ls + lcell > lelems.len() || rs + rcell > relems.len() {
