@@ -261,6 +261,13 @@ impl<'a> Parser<'a> {
                         // qualified names; dispatch arms live in `eval_apply`.
                         || (ns == "objects"
                             && matches!(base, "defclass" | "make" | "classof" | "extract"))
+                        // `sql:` module (contrib/sql, sqlite-backed) + `cm:`
+                        // Calcite-local (experimental/calcite-mod, backed by
+                        // materialising in-scope rank-2 arrays as sqlite
+                        // tables). H2 URLs map to in-memory sqlite.
+                        || (ns == "sql"
+                            && matches!(base, "connect" | "query" | "update" | "prepare" | "updatePrepared" | "queryPrepared"))
+                        || (ns == "cm" && matches!(base, "connect"))
                         // 11a Tier-1 `jvm:` emulation (jvmmod/jvm-module.kt, no-JVM subset).
                         || (ns == "jvm"
                             && matches!(base, "toJvmString" | "toJvmShort" | "toJvmInt" | "toJvmLong"

@@ -30,6 +30,7 @@ pub mod time;
 pub mod jvm;
 pub mod csv;
 pub mod html;
+pub mod sql;
 
 /// A persistent, REPL-like Kap evaluation context. State (variables, user
 /// functions) survives across `eval` calls. See [`session::Session`].
@@ -189,6 +190,15 @@ pub enum APLValue {
     /// block catches it → `9`), while an unforced leak errors at the harness
     /// boundary like Kotlin's detached-stack error.
     SuspendedReturn { value: AplRef<APLValue>, target: Option<usize> },
+    /// An open SQL connection (Kotlin `SQLConnectionValue`, contrib/sql).
+    /// `calcite` marks `cm:connect :local` handles, whose queries resolve
+    /// `kap.ns_var` table references against in-scope rank-2 arrays.
+    /// Shared `Rc` so prepared statements keep using the same connection.
+    SqlConn { url: String, conn: AplRef<std::cell::RefCell<rusqlite::Connection>>, calcite: bool, closed: AplRef<std::cell::Cell<bool>> },
+    /// A prepared SQL statement (Kotlin `SQLPreparedStatementValue`). Stores
+    /// the shared connection plus the SQL text and re-prepares per execution
+    /// (rusqlite statements borrow the connection, so they cannot be stored).
+    SqlPrepared { conn: AplRef<std::cell::RefCell<rusqlite::Connection>>, sql: String, closed: AplRef<std::cell::Cell<bool>> },
 }
 
 /// Fresh ids for `Lock`/`Condvar` identity (Kotlin: JVM object identity —
@@ -252,6 +262,9 @@ impl APLValue {
             // A suspended return is control state, not a value; no Kotlin
             // class exists. Reports internal so `typeof` stays total.
             APLValue::SuspendedReturn { .. } => "internal",
+            // Kotlin `KotlinObjectWrappedValue` SQL handles report the system
+            // internal class.
+            APLValue::SqlConn { .. } | APLValue::SqlPrepared { .. } => "internal",
             // `typeof` of a class instance is its CLASS symbol (Kotlin
             // `nameForClass(a.kapClass)`); handled in the `typeof` eval arm,
             // which returns the symbol directly. This string is only a fallback.
@@ -320,6 +333,9 @@ impl APLValue {
             // value (the harness rejects values containing one, mirroring
             // Kotlin's detached-stack error).
             APLValue::SuspendedReturn { .. } => "[return]".to_string(),
+            // Kotlin `SQLConnectionValue.formatted` = `Connection(url=…)`.
+            APLValue::SqlConn { url, .. } => format!("Connection(url={})", url),
+            APLValue::SqlPrepared { sql, .. } => format!("PreparedStatement({})", sql),
             // Display divergence (see TypedInstance docs): the harness
             // renderer shows the delegate so the delegate-derived
             // `ObjectsTest` expectations score.
@@ -369,6 +385,9 @@ impl APLValue {
             // value (the harness rejects values containing one, mirroring
             // Kotlin's detached-stack error).
             APLValue::SuspendedReturn { .. } => "[return]".to_string(),
+            // Kotlin `SQLConnectionValue.formatted` = `Connection(url=…)`.
+            APLValue::SqlConn { url, .. } => format!("Connection(url={})", url),
+            APLValue::SqlPrepared { sql, .. } => format!("PreparedStatement({})", sql),
             // Oracle-exact: `TypedAPLValue.formatted(style) = "instance"`.
             APLValue::TypedInstance { .. } => "instance".to_string(),
         }
@@ -446,6 +465,9 @@ impl APLValue {
             // value (the harness rejects values containing one, mirroring
             // Kotlin's detached-stack error).
             APLValue::SuspendedReturn { .. } => "[return]".to_string(),
+            // Kotlin `SQLConnectionValue.formatted` = `Connection(url=…)`.
+            APLValue::SqlConn { url, .. } => format!("Connection(url={})", url),
+            APLValue::SqlPrepared { sql, .. } => format!("PreparedStatement({})", sql),
             // Oracle-exact: `TypedAPLValue.formatted(style) = "instance"`.
             APLValue::TypedInstance { .. } => "instance".to_string(),
         }
@@ -492,6 +514,9 @@ impl APLValue {
             // value (the harness rejects values containing one, mirroring
             // Kotlin's detached-stack error).
             APLValue::SuspendedReturn { .. } => "[return]".to_string(),
+            // Kotlin `SQLConnectionValue.formatted` = `Connection(url=…)`.
+            APLValue::SqlConn { url, .. } => format!("Connection(url={})", url),
+            APLValue::SqlPrepared { sql, .. } => format!("PreparedStatement({})", sql),
             // Oracle-exact: `TypedAPLValue.formatted(style) = "instance"`.
             APLValue::TypedInstance { .. } => "instance".to_string(),
         }

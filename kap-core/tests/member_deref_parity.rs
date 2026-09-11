@@ -75,6 +75,8 @@ fn format_value(v: &APLValue) -> String {
         APLValue::TypedInstance { delegate, .. } => format_value(delegate),
         APLValue::Thread { .. } => "[thread]".to_string(),
         APLValue::SuspendedReturn { .. } => "[return]".to_string(),
+        APLValue::SqlConn { url, .. } => format!("Connection(url={})", url),
+        APLValue::SqlPrepared { sql, .. } => format!("PreparedStatement({})", sql),
         APLValue::Deferred { .. } => "<deferred>".to_string(),
         APLValue::UserFn { .. } => "<fn>".to_string(),
         APLValue::Escape { .. } => "<fn>".to_string(),

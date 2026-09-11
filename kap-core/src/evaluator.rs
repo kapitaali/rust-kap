@@ -2105,6 +2105,7 @@ impl Engine {
             APLValue::TypedInstance { .. } => true,
             APLValue::Thread { .. } => true,
             APLValue::SuspendedReturn { .. } => true,
+            APLValue::SqlConn { .. } | APLValue::SqlPrepared { .. } => true,
         }
     }
 
@@ -3915,6 +3916,12 @@ impl Engine {
                 if let APLValue::Stream(s) = v.as_ref() {
                     s.borrow_mut().close();
                     Ok(v.clone())
+                } else if let APLValue::SqlConn { closed, .. } = v.as_ref() {
+                    closed.set(true);
+                    Ok(v.clone())
+                } else if let APLValue::SqlPrepared { closed, .. } = v.as_ref() {
+                    closed.set(true);
+                    Ok(v.clone())
                 } else {
                     Err(AplError::runtime("close: value is not closeable".into()))
                 }
@@ -4154,6 +4161,153 @@ impl Engine {
                     APLValue::Condvar { .. } => Ok(Rc::new(APLValue::Null)),
                     _ => Err(AplError::runtime("thread:condvar: expected a condvar".into())),
                 }
+            }
+            // `sql:` module (contrib/sql, sqlite-backed) + `cm:connect :local`
+            // (experimental/calcite-mod: in-scope rank-2 arrays materialised
+            // as `kap.ns_var` temp tables). See `sql.rs`.
+            "sql:connect" => {
+                let a = right_val.force(self)?;
+                let args: Vec<AplRef<APLValue>> = match a.as_ref() {
+                    APLValue::List(l) | APLValue::Array(l) => l.elements(),
+                    _ => vec![a.clone()],
+                };
+                if args.is_empty() || args.len() > 3 {
+                    return Err(AplError::runtime(format!(
+                        "connect: expected 1 to 3 arguments, got {}",
+                        args.len()
+                    )));
+                }
+                let mut strs = Vec::with_capacity(args.len());
+                for x in &args {
+                    strs.push(Self::kap_string(x, "sql:connect")?);
+                }
+                let url = strs[0].clone();
+                let conn = crate::sql::open_url(&url)
+                    .map_err(|e| AplError::runtime(format!("connect: Exception from database engine: {}", e)))?;
+                Ok(Rc::new(APLValue::SqlConn {
+                    url,
+                    conn: Rc::new(std::cell::RefCell::new(conn)),
+                    calcite: false,
+                    closed: Rc::new(std::cell::Cell::new(false)),
+                }))
+            }
+            "cm:connect" => {
+                // `CalciteConnectFunction`: exactly one symbol arg, `:local` only.
+                let a = right_val.force(self)?;
+                match a.as_ref() {
+                    APLValue::Symbol { name, namespace }
+                        if name == "local" && namespace.as_deref() == Some("keyword") =>
+                    {
+                        let conn = crate::sql::open_url("jdbc:h2:mem:")
+                            .map_err(|e| AplError::runtime(format!("cm:connect: {}", e)))?;
+                        Ok(Rc::new(APLValue::SqlConn {
+                            url: "calcite:local".to_string(),
+                            conn: Rc::new(std::cell::RefCell::new(conn)),
+                            calcite: true,
+                            closed: Rc::new(std::cell::Cell::new(false)),
+                        }))
+                    }
+                    _ => Err(AplError::runtime("cm:connect: Currently only :local is supported".into())),
+                }
+            }
+            "sql:query" => {
+                let (conn_rc, calcite) = self.sql_conn_value(&left_val, "sql:query")?;
+                let mut sql = Self::kap_string(&right_val.force(self)?, "sql:query")?;
+                let conn = conn_rc.borrow();
+                if calcite {
+                    let tables = crate::sql::kap_tables_in_scope(env);
+                    crate::sql::materialise_kap_tables(&conn, &sql, &tables)
+                        .map_err(|e| AplError::runtime(crate::sql::sql_error("sql:query", e)))?;
+                    sql = crate::sql::rewrite_kap_refs(&sql);
+                }
+                crate::sql::run_query(&conn, &sql, &[])
+                    .map_err(|e| AplError::runtime(crate::sql::sql_error("sql:query", e)))
+            }
+            "sql:update" => {
+                let (conn_rc, calcite) = self.sql_conn_value(&left_val, "sql:update")?;
+                let mut sql = Self::kap_string(&right_val.force(self)?, "sql:update")?;
+                let conn = conn_rc.borrow();
+                if calcite {
+                    let tables = crate::sql::kap_tables_in_scope(env);
+                    crate::sql::materialise_kap_tables(&conn, &sql, &tables)
+                        .map_err(|e| AplError::runtime(crate::sql::sql_error("sql:update", e)))?;
+                    sql = crate::sql::rewrite_kap_refs(&sql);
+                }
+                let n = conn
+                    .execute(&sql, [])
+                    .map_err(|e| AplError::runtime(crate::sql::sql_error("sql:update", e)))?;
+                Ok(Rc::new(APLValue::Number(KapNumber::Long(n as i64))))
+            }
+            "sql:prepare" => {
+                let (conn_rc, _) = self.sql_conn_value(&left_val, "sql:prepare")?;
+                let sql = Self::kap_string(&right_val.force(self)?, "sql:prepare")?;
+                // Validate eagerly like `conn.prepareStatement` (bad SQL must
+                // fail HERE for the `invalidPrepared*` rows).
+                conn_rc
+                    .borrow()
+                    .prepare(&sql)
+                    .map_err(|e| AplError::runtime(crate::sql::sql_error("sql:prepare", e)))?;
+                Ok(Rc::new(APLValue::SqlPrepared {
+                    conn: conn_rc,
+                    sql,
+                    closed: Rc::new(std::cell::Cell::new(false)),
+                }))
+            }
+            "sql:updatePrepared" => {
+                let (conn_rc, sql) = self.sql_prepared_value(&left_val, "sql:updatePrepared")?;
+                let b = right_val.force(self)?;
+                let (dims, els) = Self::sql_arg_cells(&b)?;
+                let conn = conn_rc.borrow();
+                if dims.len() == 1 {
+                    let params = self.sql_bind_all(&els, "sql:updatePrepared")?;
+                    let pref: Vec<&dyn rusqlite::ToSql> =
+                        params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+                    conn.prepare(&sql)
+                        .and_then(|mut st| st.execute(pref.as_slice()))
+                        .map_err(|e| AplError::runtime(crate::sql::sql_error("sql:updatePrepared", e)))?;
+                    Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        vec![0],
+                        ArrayData::Nested(vec![]),
+                    )))))
+                } else if dims.len() == 2 {
+                    let (nrows, ncols) = (dims[0], dims[1]);
+                    let mut out = Vec::with_capacity(nrows);
+                    for r in 0..nrows {
+                        let mut params = Vec::with_capacity(ncols);
+                        for c in 0..ncols {
+                            params.push(self.sql_bind_one(&els[r * ncols + c], "sql:updatePrepared")?);
+                        }
+                        let pref: Vec<&dyn rusqlite::ToSql> =
+                            params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+                        let n = conn
+                            .prepare(&sql)
+                            .and_then(|mut st| st.execute(pref.as_slice()))
+                            .map_err(|e| {
+                                AplError::runtime(crate::sql::sql_error("sql:updatePrepared", e))
+                            })?;
+                        out.push(Rc::new(APLValue::Number(KapNumber::Long(n as i64))));
+                    }
+                    Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        vec![out.len()],
+                        ArrayData::Nested(out),
+                    )))))
+                } else {
+                    Err(AplError::runtime("sql:updatePrepared: Right value must be rank 1 or 2".into()))
+                }
+            }
+            "sql:queryPrepared" => {
+                let (conn_rc, sql) = self.sql_prepared_value(&left_val, "sql:queryPrepared")?;
+                let b = right_val.force(self)?;
+                let (dims, els) = Self::sql_arg_cells(&b)?;
+                if dims.len() > 1 {
+                    return Err(AplError::runtime(
+                        "sql:queryPrepared: Right argument to function must be a scalar or rank-1 array".into(),
+                    ));
+                }
+                let params = self.sql_bind_all(&els, "sql:queryPrepared")?;
+                let conn = conn_rc.borrow();
+                crate::sql::run_query(&conn, &sql, &params)
+                    .map_err(|e| AplError::runtime(crate::sql::sql_error("sql:queryPrepared", e)))
             }
             "thread:makeThread" => {
                 // `MakeThreadFunctionImpl` (thread.kt:49-60): the argument must
@@ -6709,6 +6863,12 @@ impl Engine {
                 // D1 cooperative threads (thread/thread.kt, engine.kt:507-515 —
                 // core-registered, outside the secure blocks, so no secure gate).
                 | "thread:makeThread" | "thread:joinThread"
+                // `sql:` module (contrib/sql) + `cm:` Calcite-local
+                // (experimental/calcite-mod). Module capabilities, not
+                // secure-gated (never registered in secure engines at all —
+                // the port only registers them in the default engine).
+                | "sql:connect" | "sql:query" | "sql:update" | "sql:prepare"
+                | "sql:updatePrepared" | "sql:queryPrepared" | "cm:connect"
         )
     }
 
@@ -7570,7 +7730,67 @@ impl Engine {
         }
     }
 
-    /// Kap string value → Rust string (`Str`, `Char`, or char array).
+    /// Unwrap a `sql:` connection from the dyadic left arg (Kotlin
+    /// `ensureSQLConnectionValue` + closed-handle check).
+    fn sql_conn_value(
+        &self,
+        left: &Option<AplRef<APLValue>>,
+        who: &str,
+    ) -> Result<(AplRef<std::cell::RefCell<rusqlite::Connection>>, bool), AplError> {
+        match left.as_ref().map(|v| v.force(self)).transpose()?.as_ref().map(|v| v.as_ref()) {
+            Some(APLValue::SqlConn { conn, calcite, closed, .. }) => {
+                if closed.get() {
+                    return Err(AplError::runtime(format!("{}: connection is closed", who)));
+                }
+                Ok((conn.clone(), *calcite))
+            }
+            _ => Err(AplError::runtime(format!("{}: Value is not a valid SQL connection", who))),
+        }
+    }
+
+    /// Unwrap a prepared statement (Kotlin `ensurePreparedStatementValue`).
+    fn sql_prepared_value(
+        &self,
+        left: &Option<AplRef<APLValue>>,
+        who: &str,
+    ) -> Result<(AplRef<std::cell::RefCell<rusqlite::Connection>>, String), AplError> {
+        match left.as_ref().map(|v| v.force(self)).transpose()?.as_ref().map(|v| v.as_ref()) {
+            Some(APLValue::SqlPrepared { conn, sql, closed }) => {
+                if closed.get() {
+                    return Err(AplError::runtime(format!("{}: prepared statement is closed", who)));
+                }
+                Ok((conn.clone(), sql.clone()))
+            }
+            _ => Err(AplError::runtime(format!("{}: Value is not a valid prepared statement", who))),
+        }
+    }
+
+    /// Prepared-statement right arg → (dims, row-major cells): scalars and
+    /// rank-1 arrays bind positionally; rank-2 binds per row (Kotlin
+    /// `arrayify` + dimension dispatch, sql.kt:312-336).
+    fn sql_arg_cells(v: &AplRef<APLValue>) -> Result<(Vec<usize>, Vec<AplRef<APLValue>>), AplError> {
+        match v.as_ref() {
+            // Rank-0 boxes disclose to a 1-element vector (Kotlin `arrayify`:
+            // the enclosed-single-arg rows bind `⊂"abc"` as one parameter).
+            APLValue::Array(a) if a.dimensions.is_empty() => Ok((vec![1], a.elements())),
+            APLValue::Array(a) => Ok((a.dimensions.clone(), a.elements())),
+            APLValue::List(a) => Ok((a.dimensions.clone(), a.elements())),
+            scalar => Ok((vec![], vec![Rc::new(scalar.clone())])),
+        }
+    }
+
+    /// Bind one cell (Kotlin binds `value.collapse()` per position).
+    fn sql_bind_one(&self, v: &AplRef<APLValue>, who: &str) -> Result<rusqlite::types::Value, AplError> {
+        let forced = v.force(self)?;
+        crate::sql::kap_to_sql(forced.as_ref(), who)
+            .map_err(|e| AplError::runtime(format!("{}: {}", who, e)))
+    }
+
+    /// Bind a whole positional arg vector.
+    fn sql_bind_all(&self, els: &[AplRef<APLValue>], who: &str) -> Result<Vec<rusqlite::types::Value>, AplError> {
+        els.iter().map(|e| self.sql_bind_one(e, who)).collect()
+    }
+
     fn kap_string(v: &AplRef<APLValue>, who: &str) -> Result<String, AplError> {
         match v.as_ref() {
             APLValue::Str(s) => Ok(s.clone()),
@@ -13750,6 +13970,9 @@ impl Engine {
             | APLValue::SuspendedReturn { .. } => {
                 out.push(Rc::new(value.clone()));
             }
+            | APLValue::SqlConn { .. } | APLValue::SqlPrepared { .. } => {
+                out.push(Rc::new(value.clone()));
+            }
             APLValue::Array(arr) => {
                 for e in arr.elements() {
                     Self::enlist_recurse(out, e.as_ref(), level + 1, limit);
@@ -15722,6 +15945,9 @@ impl Engine {
             }
             APLValue::SuspendedReturn { .. } => {
                 Err(AplError::runtime("cannot use a suspended return as an array element".into()))
+            }
+            APLValue::SqlConn { .. } | APLValue::SqlPrepared { .. } => {
+                Err(AplError::runtime("cannot use a SQL handle as an array element".into()))
             }
             APLValue::Process(_) => {
                 Err(AplError::runtime("cannot use a process as an array element".into()))
