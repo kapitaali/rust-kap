@@ -275,6 +275,11 @@ impl<'a> Parser<'a> {
                         || (ns == "thread"
                             && matches!(base, "makeLock" | "makeCondvar" | "wait" | "signal"
                                 | "signalAll" | "withHeldLock" | "withLock"))
+                        // D1 cooperative threads (thread/thread.kt): `makeThread`
+                        // runs the lambda eagerly, `joinThread` returns the
+                        // stored outcome. Core-registered, not secure-gated
+                        // (engine.kt:507-515).
+                        || (ns == "thread" && matches!(base, "makeThread" | "joinThread"))
                 }
                 None => false,
             }

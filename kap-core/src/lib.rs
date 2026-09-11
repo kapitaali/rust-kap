@@ -171,6 +171,14 @@ pub enum APLValue {
     Lock { reentrant: bool, id: u64 },
     /// A condition variable (Kotlin `CondvarValue`, lock.kt). Stage-1 token.
     Condvar { id: u64 },
+    /// A finished thread handle (Kotlin `ThreadValue`, thread/thread.kt:9).
+    /// D1 cooperative emulation: the port is single-threaded, so
+    /// `thread:makeThread` runs the lambda EAGERLY with a null argument and
+    /// stores the outcome here; `thread:joinThread` returns it. A body that
+    /// raises stores nil (Kotlin logs `Exception in thread` and joins nil).
+    /// Sequential execution is one valid interleaving, and the lock tests
+    /// hold the lock across the whole body, so values are deterministic.
+    Thread { result: AplRef<APLValue> },
 }
 
 /// Fresh ids for `Lock`/`Condvar` identity (Kotlin: JVM object identity —
@@ -229,6 +237,8 @@ impl APLValue {
             APLValue::Stream(_) => "internal",
             // Kotlin `LockValue`/`CondvarValue` (lock.kt): wrapped MPLock/MPCondVar.
             APLValue::Lock { .. } | APLValue::Condvar { .. } => "internal",
+            // `ThreadValue.kapClass` is also `SystemClass.INTERNAL`.
+            APLValue::Thread { .. } => "internal",
             // `typeof` of a class instance is its CLASS symbol (Kotlin
             // `nameForClass(a.kapClass)`); handled in the `typeof` eval arm,
             // which returns the symbol directly. This string is only a fallback.
@@ -291,6 +301,8 @@ impl APLValue {
             APLValue::Jvm(h) => h.borrow().display(),
             APLValue::Lock { .. } => "lock".to_string(),
             APLValue::Condvar { .. } => "condvar".to_string(),
+            // `ThreadValue.formatted` is `[thread …]`; the handle is opaque.
+            APLValue::Thread { .. } => "[thread]".to_string(),
             // Display divergence (see TypedInstance docs): the harness
             // renderer shows the delegate so the delegate-derived
             // `ObjectsTest` expectations score.
@@ -334,6 +346,8 @@ impl APLValue {
             APLValue::Jvm(h) => h.borrow().display(),
             APLValue::Lock { .. } => "lock".to_string(),
             APLValue::Condvar { .. } => "condvar".to_string(),
+            // `ThreadValue.formatted` is `[thread …]`; the handle is opaque.
+            APLValue::Thread { .. } => "[thread]".to_string(),
             // Oracle-exact: `TypedAPLValue.formatted(style) = "instance"`.
             APLValue::TypedInstance { .. } => "instance".to_string(),
         }
@@ -405,6 +419,8 @@ impl APLValue {
             APLValue::Jvm(h) => h.borrow().display(),
             APLValue::Lock { .. } => "lock".to_string(),
             APLValue::Condvar { .. } => "condvar".to_string(),
+            // `ThreadValue.formatted` is `[thread …]`; the handle is opaque.
+            APLValue::Thread { .. } => "[thread]".to_string(),
             // Oracle-exact: `TypedAPLValue.formatted(style) = "instance"`.
             APLValue::TypedInstance { .. } => "instance".to_string(),
         }
@@ -445,6 +461,8 @@ impl APLValue {
             APLValue::Jvm(h) => h.borrow().display(),
             APLValue::Lock { .. } => "lock".to_string(),
             APLValue::Condvar { .. } => "condvar".to_string(),
+            // `ThreadValue.formatted` is `[thread …]`; the handle is opaque.
+            APLValue::Thread { .. } => "[thread]".to_string(),
             // Oracle-exact: `TypedAPLValue.formatted(style) = "instance"`.
             APLValue::TypedInstance { .. } => "instance".to_string(),
         }

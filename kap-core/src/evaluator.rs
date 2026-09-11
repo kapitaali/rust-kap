@@ -2097,6 +2097,7 @@ impl Engine {
             APLValue::Jvm(_) => true,
             APLValue::Lock { .. } | APLValue::Condvar { .. } => true,
             APLValue::TypedInstance { .. } => true,
+            APLValue::Thread { .. } => true,
         }
     }
 
@@ -4128,6 +4129,40 @@ impl Engine {
                 match right_val.force(self)?.as_ref() {
                     APLValue::Condvar { .. } => Ok(Rc::new(APLValue::Null)),
                     _ => Err(AplError::runtime("thread:condvar: expected a condvar".into())),
+                }
+            }
+            "thread:makeThread" => {
+                // `MakeThreadFunctionImpl` (thread.kt:49-60): the argument must
+                // be a lambda, started with a null argument. D1 cooperative
+                // emulation runs it EAGERLY and stores the outcome (a raising
+                // body stores nil, like Kotlin's join-after-exception).
+                let f = right_val.force(self)?;
+                let (params, split, body, fenv) = match f.as_ref() {
+                    APLValue::UserFn { params, split, body, env: fenv } => {
+                        (params.clone(), *split, body.clone(), fenv.clone())
+                    }
+                    other => {
+                        return Err(AplError::runtime(format!(
+                            "makeThread: Expected lambda value. Got: {}",
+                            other.class_name()
+                        )))
+                    }
+                };
+                let null_arg = Box::new(Instr::Value(Rc::new(APLValue::Null)));
+                let outcome = self
+                    .apply_user_fn(&params, split, &body, &None, &null_arg, env, &fenv, None)
+                    .unwrap_or_else(|_| Rc::new(APLValue::Nil));
+                Ok(Rc::new(APLValue::Thread { result: outcome }))
+            }
+            "thread:joinThread" => {
+                // `JoinThreadFunctionImpl` (thread.kt:62-79): wait for the
+                // outcome and return it (nil if the body raised). Eager D1
+                // threads are already finished — just unwrap.
+                match right_val.force(self)?.as_ref() {
+                    APLValue::Thread { result } => Ok(result.clone()),
+                    _ => Err(AplError::runtime(
+                        "joinThread: Expected thread.".into(),
+                    )),
                 }
             }
             // `objects:` — user classes (objects.kt:87-143). Minimal surface:
@@ -6643,10 +6678,13 @@ impl Engine {
                 | "jvm:findClass"
                 // 11c Stage-1 `thread:` locks (thread/lock.kt). Core-registered in
                 // Kotlin (engine.kt:507-515, outside the secure blocks), so no
-                // secure gate. `makeThread`/`joinThread`/`withHeldLock`-as-fn stay
-                // unregistered until the D1 decision (Stage 2).
+                // secure gate. `withHeldLock`-as-fn stays unregistered (it is
+                // only a value-right-arg operator here).
                 | "thread:makeLock" | "thread:makeCondvar" | "thread:wait"
                 | "thread:signal" | "thread:signalAll"
+                // D1 cooperative threads (thread/thread.kt, engine.kt:507-515 —
+                // core-registered, outside the secure blocks, so no secure gate).
+                | "thread:makeThread" | "thread:joinThread"
         )
     }
 
@@ -13684,7 +13722,7 @@ impl Engine {
             | APLValue::Escape { .. } | APLValue::NonBoundFn { .. }
             | APLValue::Stream(_) | APLValue::Process(_) | APLValue::Timestamp(_)
             | APLValue::Jvm(_) | APLValue::Lock { .. } | APLValue::Condvar { .. }
-            | APLValue::TypedInstance { .. } => {
+            | APLValue::TypedInstance { .. } | APLValue::Thread { .. } => {
                 out.push(Rc::new(value.clone()));
             }
             APLValue::Array(arr) => {
@@ -15654,6 +15692,9 @@ impl Engine {
             APLValue::TypedInstance { .. } => {
                 Err(AplError::runtime("cannot use a class instance as an array element".into()))
             }
+            APLValue::Thread { .. } => {
+                Err(AplError::runtime("cannot use a thread as an array element".into()))
+            }
             APLValue::Process(_) => {
                 Err(AplError::runtime("cannot use a process as an array element".into()))
             }
@@ -15667,6 +15708,13 @@ impl Engine {
     fn value_to_instr(&self, v: &AplRef<APLValue>) -> Result<Instr, AplError> {
         match v.as_ref() {
             APLValue::UserFn { .. } | APLValue::Escape { .. } | APLValue::NonBoundFn { .. } => {
+                Ok(Instr::Value(v.clone()))
+            }
+            // Opaque handle values round-trip by identity (they are single
+            // values in Kotlin and live in arrays directly): threads made by
+            // `thread:makeThread` are collected into arrays by `¨` before
+            // `thread:joinThread¨` consumes them; class instances likewise.
+            APLValue::Thread { .. } | APLValue::TypedInstance { .. } => {
                 Ok(Instr::Value(v.clone()))
             }
             _ => self.apl_to_instr(v.as_ref()),
