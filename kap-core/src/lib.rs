@@ -976,12 +976,6 @@ impl NamespaceRegistry {
         self.constants
             .borrow_mut()
             .insert((ns.to_string(), name.to_string()));
-        // Bind the name to Null if not already bound, so the symbol exists.
-        {
-            let mut syms = self.symbols.borrow_mut();
-            let m = syms.entry(ns.to_string()).or_default();
-            m.entry(name.to_string()).or_insert_with(|| Rc::new(APLValue::Null));
-        }
     }
     /// Whether `(ns, name)` is a read-only constant.
     pub fn is_constant(&self, ns: &str, name: &str) -> bool {
@@ -1281,6 +1275,11 @@ pub struct Engine {
     /// at its top). Real Kap has no such guard and StackOverflows; we skip an
     /// already-in-flight include instead so the intended single load succeeds.
     pub include_stack: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>>,
+    /// Basenames of files already fully loaded this session. Kotlin caches `use()`d
+    /// files — once loaded, a file is never re-executed (math.kap assigns
+    /// math:pi then declare(:const pi); re-running would fail). Persistent across
+    /// conformance cases so subsequent `use("standard-lib.kap")` calls skip.
+    pub include_loaded: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>>,
     /// Explicitly-configured standard-library search directories (e.g. set from a
     /// `--lib-path` CLI flag). Consulted first by `use(...)` when resolving a file
     /// by basename — the port's analog of kap-jvm-text's `--lib-path`.

@@ -1211,18 +1211,7 @@ impl Engine {
                         "No arguments specified for function".to_string(),
                     ));
                 }
-                let found = bound.or_else(|| {
-                    // Namespace constants the port provides natively (mirroring
-                    // stdlib values the oracle loads via `withStandardLib`, e.g.
-                    // math.kap `pi ← 3.14159265358979323846`; oracle
-                    // `use("standard-lib.kap") ⋄ math:pi` → 3.141592653589793).
-                    match (namespace.as_deref(), name.as_str()) {
-                        (Some("math"), "pi") => Some(Rc::new(APLValue::Number(
-                            KapNumber::Double(std::f64::consts::PI),
-                        ))),
-                        _ => None,
-                    }
-                })
+                let found = bound
                     .ok_or_else(|| AplError::runtime(format!("undefined symbol: {}", name)))?;
                 // B2 (code_analysis_03): an operator is never a first-class value in Real Kap.
                 // Kotlin resolves names function-first, then throws InvalidOperatorArgument for
@@ -23555,6 +23544,17 @@ impl Engine {
             }
         }
 
+        // Already-loaded guard: skip a file that has already been loaded this session.
+        // Kotlin's use() caches files — math.kap assigns math:pi then declare(:const pi),
+        // so re-running it would fail "Assignment to constant variable". The port must
+        // also skip re-loading files whose side effects have already been applied.
+        {
+            let loaded = self.include_loaded.borrow();
+            if loaded.contains(&basename) {
+                return Ok(Rc::new(APLValue::Null));
+            }
+        }
+
         // Build the search path: configured --lib-path dirs first, then CWD, then
         // $KAP_LIB, then this repo's kap-stdlib/std.
         let mut dirs: Vec<std::path::PathBuf> = Vec::new();
@@ -23598,6 +23598,7 @@ impl Engine {
         })?;
 
         self.include_stack.borrow_mut().insert(basename.clone());
+        self.include_loaded.borrow_mut().insert(basename.clone());
         let _guard = IncludeGuard {
             stack: self.include_stack.clone(),
             name: basename.clone(),
