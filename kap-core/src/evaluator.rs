@@ -181,8 +181,13 @@ impl Environment {
         None
     }
 
-    /// Assign to `name`, updating the *nearest existing binding* (Kap `←` semantics:
-    /// like `set!`). Mirrors `define`'s routing: lexical scope first, then namespace table.
+    /// Assign to `name`. Kap `←` binds in the CURRENT execution frame: the walk
+    /// updates the nearest existing lexical binding up to AND including the
+    /// innermost call frame (`is_call_frame`), never past it. A bare `←` with no
+    /// binding below-or-at the frame binds IN the frame (function-local); only
+    /// with no call frame in the chain does it fall through to the namespace
+    /// table (module scope). Qualified (`ns:name`) writes always go to their
+    /// namespace. `declare(:local …)` marks keep their explicit scope.
     pub fn assign(&self, name: &str, ns: &Option<String>, value: AplRef<APLValue>) {
         let key = (name.to_string(), ns.clone());
         // 0. A declared-but-unassigned local (`declare(:local …)`) binds in the
@@ -196,14 +201,30 @@ impl Environment {
             }
             cur = e.parent.as_deref();
         }
-        // 1. Nearest lexical binding up the scope chain.
+        // 1. Nearest lexical binding up the scope chain, stopping AFTER the
+        // innermost call frame (its own bindings are still assignable).
         let mut cur: Option<&Environment> = Some(self);
+        let mut barrier: Option<&Environment> = None;
         while let Some(e) = cur {
             if e.symbols.borrow().contains_key(&key) {
                 e.symbols.borrow_mut().insert(key.clone(), value);
                 return;
             }
+            if e.is_call_frame.get() {
+                barrier = Some(e);
+                break;
+            }
             cur = e.parent.as_deref();
+        }
+        if let Some(frame) = barrier {
+            // Inside a function/operator call. A qualified write names its
+            // namespace explicitly and still goes there; a bare write with no
+            // frame-local binding becomes a frame local (never caller state,
+            // never the namespace table).
+            if ns.is_none() {
+                frame.symbols.borrow_mut().insert(key, value);
+                return;
+            }
         }
         // 2. Module namespace table (qualified or current/default for bare).
         match ns {
@@ -1580,6 +1601,9 @@ impl Engine {
                 env,
             ),
             Instr::Block { body } => self.eval_block(body, env),
+            // `∇`-closure wrapper (see `ClosedScope`): transparent at eval time —
+            // the barrier lives on the call frame, set by `apply_user_fn`/`apply_user_op`.
+            Instr::ClosedScope(b) => self.eval_instr(b, env),
             Instr::If {
                 cond,
                 then_block,
@@ -1750,10 +1774,13 @@ impl Engine {
                 // (`parse_fn_def` closed-env restriction): a hidden operand
                 // hits the `Operator without left function` guard while the
                 // body parses, before this hook ever runs. No check here.
+                // CLOSED-SCOPE wrapper: every `∇` body runs in a sealed frame —
+                // a bare `←` inside binds locally (never leaks to caller scope
+                // or the namespace table). `⇐`/block bodies are never wrapped.
                 let v = Rc::new(APLValue::UserFn {
                     params,
                     split,
-                    body: Rc::new(*body.clone()),
+                    body: Rc::new(crate::ast::Instr::ClosedScope(body.clone())),
                     env: env.clone(),
                 });
                 // ∇ tradfn registers in the ENGINE-GLOBAL function table
@@ -1964,12 +1991,13 @@ impl Engine {
                 // PLAN §2.8b: `∇` operator bodies are CLOSED like tradfn bodies
                 // (parser.kt:771/783) and never trip — oracle `∇ (x foo y) b …`
                 // with const `a` → `0`. No check here.
+                // CLOSED-SCOPE wrapper (see `UserFnDef` above): same sealed frame.
                 let v = Rc::new(APLValue::UserOp {
                     op_left: op_left.clone(),
                     op_right: op_right.clone(),
                     left_params: left_params.clone(),
                     right_params: right_params.clone(),
-                    body: Rc::new(*body.clone()),
+                    body: Rc::new(crate::ast::Instr::ClosedScope(body.clone())),
                     env: env.clone(),
                 });
                 env.define(name, &None, v.clone());
@@ -3032,6 +3060,9 @@ impl Engine {
             // evaluate the block body in a fresh child scope. (`{ … } x` and `a { … } b`.)
             Instr::Block { body } => {
                 let child = Environment::child(&env);
+                // NOTE: no `is_call_frame` here — a directly-applied `{…}` block
+                // writes through to defining scope (oracle `lockTest`: `{ a +← ⍵ }`
+                // updates the global). Only `∇`-wrapped bodies seal their frame.
                 let right_val = self.eval_instr(right, env)?.force(self)?;
                 if let Some(l) = left {
                     let lv = self.eval_instr(l, env)?.force(self)?;
@@ -6533,8 +6564,11 @@ impl Engine {
         let a_frame: Vec<usize> = a_dims[..a_dims.len() - 1].to_vec();
         let b_frame: Vec<usize> = b_dims[1..].to_vec();
         let k: usize = *a_dims.last().unwrap_or(&1);
-        let a_flat = self.flat_elements(&a);
-        let b_flat = self.flat_elements(&b);
+        // LOGICAL row-major cells (not storage-level children): a rank>1 side
+        // stored as nested rows must contribute scalars here, matching Kotlin's
+        // strided-subarray addressing (see `logical_cells`).
+        let a_flat = self.logical_cells(&a);
+        let b_flat = self.logical_cells(&b);
         // Row-major multipliers of A and B.
         let mults = |d: &[usize]| -> Vec<usize> {
             let mut m = vec![1usize; d.len()];
@@ -6596,6 +6630,71 @@ impl Engine {
             flat.push(acc.unwrap_or_else(|| Rc::new(APLValue::Null)));
         }
         self.build_nested(&flat, &res_dims)
+    }
+
+    /// Logical flat cells of `v` in row-major order: one entry per logical
+    /// position (`element_count()` entries for plain data), mirroring Kotlin's
+    /// flat `valueAt` indexing (`InnerJoinResult` + `StridedSubarray`,
+    /// outer_join.kt:127-144). Unlike `flat_elements` (one storage level),
+    /// this descends STRUCTURAL nesting: a rank>1 array stored as nested rows
+    /// (what `build_nested` produces, e.g. every matrix result of `÷`) yields
+    /// its scalars, not its rows. Rank-1 children are pushed whole/opaque, so
+    /// genuinely enclosed cells (a vector of boxes) are never recursed into.
+    /// Flat-stored rank>1 values are chunked by their dimensions. Needed by the
+    /// higher-rank inner-product path, whose frame arithmetic addresses `a`/`b`
+    /// as flat row-major cells: with rows instead of scalars, a length-1
+    /// contracted axis skips the fn0-reduce and the row-vector leaks into the
+    /// result (`(2 1⍴1 0)+∙×(1 1⍴0)` gave `(((0)) ((0)))`, breaking QR/Rinv).
+    fn logical_cells(&self, v: &AplRef<APLValue>) -> Vec<AplRef<APLValue>> {
+        fn walk(out: &mut Vec<AplRef<APLValue>>, node: &AplRef<APLValue>, dims: &[usize]) {
+            if dims.len() <= 1 {
+                // Rank ≤1 (or scalar): storage children ARE the logical cells.
+                match node.as_ref() {
+                    APLValue::Array(a) => out.extend(a.elements()),
+                    APLValue::Str(s) => {
+                        out.extend(s.chars().map(|c| std::rc::Rc::new(APLValue::Char(c))))
+                    }
+                    APLValue::Null => {}
+                    other => out.push(std::rc::Rc::new(other.clone())),
+                }
+                return;
+            }
+            let kids: Vec<AplRef<APLValue>> = match node.as_ref() {
+                APLValue::Array(a) => a.elements(),
+                APLValue::Str(s) => {
+                    out.extend(s.chars().map(|c| std::rc::Rc::new(APLValue::Char(c))));
+                    return;
+                }
+                APLValue::Null => return,
+                other => {
+                    out.push(std::rc::Rc::new(other.clone()));
+                    return;
+                }
+            };
+            if kids.len() == dims[0] {
+                // Nested-row layout: recurse per row with the trailing dims.
+                for k in &kids {
+                    walk(out, k, &dims[1..]);
+                }
+            } else {
+                // Flat (or unexpected) layout: chunk into dims[0] consecutive groups.
+                let inner: usize = dims[1..].iter().product::<usize>().max(1);
+                for (i, chunk) in kids.chunks(inner.max(1)).enumerate() {
+                    if i >= dims[0] {
+                        break;
+                    }
+                    if dims[1..].len() <= 1 || chunk.len() != 1 {
+                        out.extend(chunk.iter().cloned());
+                    } else {
+                        walk(out, &chunk[0], &dims[1..]);
+                    }
+                }
+            }
+        }
+        let dims = Self::value_dims(v);
+        let mut out = Vec::with_capacity(v.element_count().max(1));
+        walk(&mut out, v, &dims);
+        out
     }
 
     /// Outer product helper: result shape concat(a,b), every (i,j) pair via fn.
@@ -7065,12 +7164,26 @@ impl Engine {
         self_name: Option<&str>,
     ) -> Result<AplRef<APLValue>, AplError> {
         let child = Environment::child(&closure_env);
+        // CLOSED-SCOPE (`∇`) bodies run sealed: a bare `←` inside binds in this
+        // frame (see `is_call_frame`). The wrapper travels with the body value,
+        // so this needs no signature threading. `body` itself stays wrapped for
+        // the self-rebind below (recursion preserves closedness); evaluation
+        // uses the stripped `eval_body`.
+        let closed = matches!(body, Instr::ClosedScope(_));
+        if closed {
+            child.is_call_frame.set(true);
+        }
+        let eval_body: &Instr = match body {
+            Instr::ClosedScope(b) => b,
+            _ => body,
+        };
         // Mark the child scope as a return-target frame when the body is a
         // Block (`{}` dfn). This mirrors Kotlin's `parseFnDefinitionNewEnvironment`
-        // which sets `returnTarget = true` for `{}` dfn bodies. For bare-symbol
+        // which sets `returnTarget` for `{}` dfn bodies. For bare-symbol
         // bodies (`f ⇐ →`), the child scope is NOT a return target — `→` must
-        // propagate to the enclosing frame.
-        if matches!(body, Instr::Block { .. }) {
+        // propagate to the enclosing frame. (Checked on the stripped body: a
+        // `∇`-wrapped Block is still a dfn body.)
+        if matches!(eval_body, Instr::Block { .. }) {
             child.is_return_target.set(true);
         }
         // Evaluate args in the *calling* env (Kap passes by value/sharing). The body
@@ -7135,13 +7248,14 @@ impl Engine {
         // Bound ONLY for dfn bodies (`{…}` blocks, possibly with named params) and
         // delegation bodies — NOT for bare function bodies (primitive symbols,
         // trains, derived fns: `f ⇐ ×-`, `a ⇐ ⍞(foo 1)`). Kotlin binds ⍺/⍵ only in
-        // `parseFnDefinition` (dfn bodies); expression-functions resolve ⍺/⍵
-        // lexically, so `λ((10+⍵)+)` applied later reads the WRAP-time ⍵, not the
+        // `parseFnDefinition` (dfn bodies); expression-functions resolve `⍺`/`⍵`
+        // lexically, so `λ((10+⍵)+)` applied later reads the WRAP-time `⍵`, not the
         // call arg (oracle `a ⇐ ⍞(foo 1) ⋄ a 5` → 16, not 20). Binding them here
-        // would shadow the closure value with the call arg.
+        // would shadow the closure value with the call arg. (Checked on the
+        // stripped body so a wrapped `∇` body behaves like its inner form.)
         let body_binds_omega = !params.is_empty()
             || !matches!(
-                body,
+                eval_body,
                 Instr::Derived { .. }
                     | Instr::Train { .. }
                     | Instr::ValueOp { .. }
@@ -7191,7 +7305,9 @@ impl Engine {
         // `→` (branch/return) raises `AplError::Return(v)`; the enclosing function frame
         // catches it here and returns `v`. If it escapes uncaught (top level), `eval_string_in_env`
         // converts it to the Real-Kap message "Call to return without a function call".
-        let result = match body {
+        // The tail dispatches on the STRIPPED body (a `ClosedScope` wrapper is not
+        // itself applicable); the self-rebind above keeps the wrapped original.
+        let result = match eval_body {
             Instr::Derived { .. } | Instr::Train { .. } | Instr::ValueOp { .. } | Instr::AxisApplied { .. } | Instr::Symbol { .. } | Instr::DynamicRef { .. } | Instr::DynamicRefExpr { .. } | Instr::MethodCall { .. } | Instr::OverOp { .. } | Instr::InnerProduct { .. } | Instr::Obverse { .. } => {
                 child.fn_body_depth.set(child.fn_body_depth.get() + 1);
                 // Re-dispatch with the already-evaluated ARG VALUES (`⍵`/`⍺` bound
@@ -7205,13 +7321,13 @@ impl Engine {
                 let rv = Box::new(Instr::Value(right_val.clone()));
                 let lv: Option<Box<Instr>> =
                     left_val.as_ref().map(|v| Box::new(Instr::Value(v.clone())));
-                let r = self.eval_apply(body, &lv, &rv, &child);
+                let r = self.eval_apply(eval_body, &lv, &rv, &child);
                 child.fn_body_depth.set(child.fn_body_depth.get() - 1);
                 r
             }
             _ => {
                 child.fn_body_depth.set(child.fn_body_depth.get() + 1);
-                let r = self.eval_instr(body, &child);
+                let r = self.eval_instr(eval_body, &child);
                 child.fn_body_depth.set(child.fn_body_depth.get() - 1);
                 r
             }
@@ -7407,7 +7523,13 @@ impl Engine {
         }
         // Build a child scope off the operator's closure env. This is the scope in which
         // the operator *body* runs, so the data args (`a`, `⍵`, …) live here.
+        // Sealed frame only for `∇`-wrapped bodies (see `ClosedScope`); a `⇐`-defined
+        // operator keeps write-through like a `⇐` function.
         let child = Environment::child(&op_env);
+        let op_body: &Instr = body.as_ref();
+        if matches!(op_body, Instr::ClosedScope(_)) {
+            child.is_call_frame.set(true);
+        }
         // Wrap a function operand (`left_fn`/`right_fn`) as an `APLValue::UserFn` so the
         // operator body can apply it — both via a bare reference (`x a0 b`) and via the
         // dynamic-ref form (`⍞x a0 b`). The operand must be bound as the *raw* function,
@@ -7582,8 +7704,14 @@ impl Engine {
         }
         // Deferred operator-body execution: Kotlin checks const ONLY at
         // instruction-BUILD time; runtime `setVar` is unchecked (v3 gate).
+        // The `ClosedScope` wrapper is not itself evaluable: strip it (the
+        // barrier above was already set on sight of it).
         child.fn_body_depth.set(child.fn_body_depth.get() + 1);
-        let r = self.eval_instr(&body, &child);
+        let eval_op_body: &Instr = match body.as_ref() {
+            Instr::ClosedScope(b) => b,
+            _ => op_body,
+        };
+        let r = self.eval_instr(eval_op_body, &child);
         child.fn_body_depth.set(child.fn_body_depth.get() - 1);
         r
     }
@@ -9525,26 +9653,22 @@ impl Engine {
             // swapping the operand order whenever the LEFT side was the scalar —
             // e.g. `16 ⍟ 255 16` computed log_255(16) instead of log_16(255).)
             (APLValue::Array(xa), APLValue::Number(y)) => {
+                // Scalar extension over LOGICAL structure: recurse per child so
+                // nested-row storage (e.g. every matrix from `-`, `÷`) maps
+                // row-wise instead of being silently DROPPED. The old code only
+                // pushed `Number` leaves (`if let … else if Nil`, no else), so
+                // `(2 1⍴…)-… ÷scalar` returned dims `[2,1]` with EMPTY storage —
+                // the `()` phantom that later panicked `join_by_axis` inside
+                // QR. `num2_impl` re-entry preserves operand order (f(elem,
+                // scalar)), Nil rules, and char arithmetic per child.
                 let mut out = Vec::with_capacity(xa.element_count());
                 for e in xa.elements() {
-                    if let APLValue::Number(x) = e.as_ref() {
-                        out.push(Rc::new(APLValue::Number(f(x, y))));
-                    } else if matches!(e.as_ref(), APLValue::Nil) {
-                        // Nil strand element: per-cell nil rule for the
-                        // symbol's own family (`+ - × ÷` via `nil_dyadic`,
-                        // `⌊ ⌈` via `minmax_nil` — Kotlin Min/MaxAPLFunction
-                        // fnOther passes numbers/chars through either side).
-                        let r = if matches!(sym, "⌊" | "⌈") {
-                            Some(self.minmax_nil(e.as_ref(), &APLValue::Number(y.clone()), sym))
-                        } else if matches!(sym, "+" | "-" | "×" | "÷") {
-                            self.nil_dyadic(e.as_ref(), &APLValue::Number(y.clone()), sym)
-                        } else {
-                            None
-                        };
-                        if let Some(r) = r {
-                            out.push(r?);
-                        }
-                    }
+                    out.push(self.num2_impl(
+                        Some(e),
+                        Rc::new(APLValue::Number(y.clone())),
+                        f,
+                        sym,
+                    )?);
                 }
                 Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
                     xa.dimensions.clone(),
@@ -9552,25 +9676,17 @@ impl Engine {
                 )))))
             }
             (APLValue::Number(y), APLValue::Array(xa)) => {
+                // Mirror of the above: recurse per child (f(scalar, elem) order
+                // preserved by `num2_impl` argument positions). The old inline
+                // code had the same silent-drop hole for nested-row storage.
                 let mut out = Vec::with_capacity(xa.element_count());
                 for e in xa.elements() {
-                    if let APLValue::Number(x) = e.as_ref() {
-                        out.push(Rc::new(APLValue::Number(f(y, x))));
-                    } else if matches!(e.as_ref(), APLValue::Nil) {
-                        // Nil strand element on the right: per-cell nil rule
-                        // for the symbol's own family (nil on the right passes
-                        // the number through for `+ - × ÷ ⌊ ⌈`).
-                        let r = if matches!(sym, "⌊" | "⌈") {
-                            Some(self.minmax_nil(&APLValue::Number(y.clone()), e.as_ref(), sym))
-                        } else if matches!(sym, "+" | "-" | "×" | "÷") {
-                            self.nil_dyadic(&APLValue::Number(y.clone()), e.as_ref(), sym)
-                        } else {
-                            None
-                        };
-                        if let Some(r) = r {
-                            out.push(r?);
-                        }
-                    }
+                    out.push(self.num2_impl(
+                        Some(Rc::new(APLValue::Number(y.clone()))),
+                        e,
+                        f,
+                        sym,
+                    )?);
                 }
                 Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
                     xa.dimensions.clone(),
@@ -9578,8 +9694,14 @@ impl Engine {
                 )))))
             }
             (APLValue::Array(xa), APLValue::Array(ya)) => {
+                // Pair LOGICAL cells (see `logical_cells`), not storage children: a
+                // flat-stored side paired against a nested-row side misaligns
+                // (scalars meet rows instead of scalars, so `a1-(q0+∙×c)` with a
+                // zero subtrahend returned zeros instead of `a1`). Layouts that
+                // already agree pair identically to before.
+                let xe = self.logical_cells(&Rc::new(APLValue::Array(xa.clone())));
+                let ye = self.logical_cells(&Rc::new(APLValue::Array(ya.clone())));
                 let mut out = Vec::with_capacity(xa.element_count());
-                let ye = ya.elements();
                 if xa.element_count() != ya.element_count() {
                     return Err(AplError::runtime(format!(
                         "{}: arrays of different length ({} vs {})",
@@ -9588,7 +9710,7 @@ impl Engine {
                         ya.element_count()
                     )));
                 }
-                for (i, e) in xa.elements().into_iter().enumerate() {
+                for (i, e) in xe.into_iter().enumerate() {
                     if let (APLValue::Number(x), Some(APLValue::Number(y))) =
                         (e.as_ref(), ye.get(i).map(|y| y.as_ref()))
                     {
@@ -11347,14 +11469,41 @@ impl Engine {
     ) -> Result<AplRef<APLValue>, AplError> {
         match left_val {
             None => {
-                // Monadic `,` = ravel: flatten (one level) into a rank-1 vector.
+                // Monadic `⍪` = table (Kotlin `ConcatenateAPLFunctionFirstAxisImpl.eval1Arg`,
+                // concatenate-array.kt:573-584): rank-0 → dims `[1,1]`; else dims
+                // `[d[0], product(d[1..])]` (collapse every axis after the first).
+                // Same elements in row-major order (`ResizedArrayImpls` over the
+                // same size is the identity) — so gather LOGICAL cells, exactly
+                // like ravel below (nested-row storage must not leak rows here
+                // either: QR's `⍪t` feeds `(…,…)↑`, which rejects rank-1).
+                if is_table {
+                    let v = right_val.force(self)?;
+                    let vd = v.dimensions();
+                    let new_dims: Vec<usize> = if vd.is_empty() {
+                        vec![1, 1]
+                    } else {
+                        let rest: usize = vd[1..].iter().product::<usize>().max(1);
+                        // No max() on vd[0]: an empty first axis stays 0 (Kotlin
+                        // keeps it; claiming 1 row with no cells would panic).
+                        vec![vd[0], rest]
+                    };
+                    let elems = self.logical_cells(&v);
+                    return self.build_nested(&elems, &new_dims);
+                }
+                // Monadic `,` = ravel: flatten into a rank-1 vector.
                 // Oracle: `,5`→`⟨5⟩`, `,1 2 3`→`⟨1 2 3⟩`, `,⊂5`→`⟨5⟩`, `⍴,5`→`⟨1⟩`,
                 // `,"ab"`→`"ab"` (a string is already a rank-1 char vector, so its
                 // chars splice — `collect_elements` pushed it whole, yielding a
                 // 1-element vector holding the string).
+                // LOGICAL cells, not storage children: a rank>1 value stored as
+                // nested rows (e.g. every matrix from `-`, `÷`) must contribute
+                // scalars — one storage level yields a dims-[n] vector OF ROWS
+                // (`⍴,d` said `(2)` while the value displayed `((0) (1))`, and the
+                // row-vectors poisoned every downstream fn, e.g. QR's `B÷t` died
+                // with `÷: arrays of different length (2 vs 1)`). `logical_cells`
+                // keeps rank-1/str/scalar behaviour identical (incl. `,⍬`→empty).
                 let v = right_val.force(self)?;
-                let mut elems = Vec::new();
-                self.collect_elements_splice_str(&v, &mut elems);
+                let elems = self.logical_cells(&v);
                 Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
                     vec![elems.len()],
                     ArrayData::Nested(elems),
@@ -11519,10 +11668,8 @@ impl Engine {
                     _ => None,
                 };
                 self.join_by_axis(
-                    &a.elements(),
-                    &a_dims,
-                    &b.elements(),
-                    &b_dims,
+                    &a,
+                    &b,
                     default_axis,
                     join_name,
                     a_labels,
@@ -11750,11 +11897,11 @@ impl Engine {
             });
             let a1 = APLValue::Array(Rc::new(KapArray::new(rd.clone(), ArrayData::Nested(a_elems))));
             let b1 = APLValue::Array(Rc::new(KapArray::new(rd, ArrayData::Nested(b_elems))));
+            let a1r = std::rc::Rc::new(a1);
+            let b1r = std::rc::Rc::new(b1);
             return self.join_by_axis(
-                &a1.elements(),
-                &a1.dimensions(),
-                &b1.elements(),
-                &b1.dimensions(),
+                &a1r,
+                &b1r,
                 na,
                 ",",
                 a1_laminate_labels.as_ref(),
@@ -11842,10 +11989,8 @@ impl Engine {
             _ => None,
         };
         self.join_by_axis(
-            &a3.elements(),
-            &a_dims,
-            &b3.elements(),
-            &b_dims,
+            &a3,
+            &b3,
             na,
             ",",
             a_labels,
@@ -11888,15 +12033,21 @@ impl Engine {
     /// A and B along that axis (e.g. `(3),[0.5](3)` → `(3 2)`, interleaved by row).
     fn join_by_axis(
         &self,
-        a_elems: &[AplRef<APLValue>],
-        a_dims: &[usize],
-        b_elems: &[AplRef<APLValue>],
-        b_dims: &[usize],
+        a: &AplRef<APLValue>,
+        b: &AplRef<APLValue>,
         axis: usize,
         name: &str,
         a_labels: Option<&DimensionLabels>,
         b_labels: Option<&DimensionLabels>,
     ) -> Result<AplRef<APLValue>, AplError> {
+        // LOGICAL row-major cells (see `logical_cells`): a rank>1 side stored as
+        // nested rows must contribute scalars — storage children (rows) addressed
+        // as flat cells nest rows into the result (`(1x1),(1x1)` gave `(1 (0))`,
+        // breaking Rinv) or panic on phantom-empty storage.
+        let a_dims = a.dimensions();
+        let b_dims = b.dimensions();
+        let a_elems = self.logical_cells(a);
+        let b_elems = self.logical_cells(b);
         if a_dims.len() != b_dims.len() {
             return Err(AplError::runtime(format!(
                 "{}: ranks of A and B are different",
@@ -11933,9 +12084,9 @@ impl Engine {
             }
             let k = coords[axis];
             let (src_elems, src_dims, offset) = if k < a_dims[axis] {
-                (a_elems, a_dims, 0usize)
+                (&a_elems, &a_dims, 0usize)
             } else {
-                (b_elems, b_dims, a_dims[axis])
+                (&b_elems, &b_dims, a_dims[axis])
             };
             // Encode the source flat index (same coords, but axis coord relative to source).
             coords[axis] = k - offset;
@@ -13596,7 +13747,7 @@ impl Engine {
                 if total > 100_000_000 {
                     return Err(AplError::runtime("take/drop result too large".into()));
                 }
-                let mut flat = a.elements();
+                let mut flat = self.logical_cells(&right);
                 let orig_dims = a.dimensions.clone();
                 let mut new_labels = a.labels().cloned();
                 for axis in 0..rank {

@@ -23,6 +23,20 @@ pub enum KapNumber {
 }
 
 impl KapNumber {
+    /// `BigRational` as f64 via numer/denom division. (`BigRational::to_string`
+    /// yields `"1/2"`, which does NOT `parse::<f64>()` — the old one-liner sent
+    /// every fractional rational to `INFINITY`, so `(1÷2)×9.0` gave `Infinity`
+    /// instead of `4.5` and broke `9.0 8.0 7.0 ⌹ 2`.)
+    fn rational_to_f64(v: &num_rational::BigRational) -> f64 {
+        let n: f64 = v.numer().to_string().parse().unwrap_or(f64::INFINITY);
+        let d: f64 = v.denom().to_string().parse().unwrap_or(1.0);
+        if d == 0.0 {
+            f64::INFINITY
+        } else {
+            n / d
+        }
+    }
+
     /// Numeric value as f64 (may lose precision / throw on huge bigint — matches Kap
     /// `asDouble`, which just calls `.toDouble()`).
     pub fn as_double(&self) -> f64 {
@@ -30,7 +44,7 @@ impl KapNumber {
             KapNumber::Long(v) => *v as f64,
             KapNumber::Double(v) => *v,
             KapNumber::BigInt(v) => v.to_string().parse::<f64>().unwrap_or(f64::INFINITY),
-            KapNumber::Rational(v) => v.to_string().parse::<f64>().unwrap_or(f64::INFINITY),
+            KapNumber::Rational(v) => Self::rational_to_f64(v),
             KapNumber::Complex(re, _) => *re,
         }
     }
@@ -65,7 +79,7 @@ impl KapNumber {
             KapNumber::Double(v) => (*v, 0.0),
             KapNumber::Long(v) => (*v as f64, 0.0),
             KapNumber::BigInt(v) => (v.to_string().parse::<f64>().unwrap_or(f64::INFINITY), 0.0),
-            KapNumber::Rational(v) => (v.to_string().parse::<f64>().unwrap_or(f64::INFINITY), 0.0),
+            KapNumber::Rational(v) => (Self::rational_to_f64(v), 0.0),
         }
     }
 
@@ -1022,7 +1036,7 @@ impl KapNumber {
                 if let Some(e) = u32::try_from(*b).ok() {
                     return rational_to_kap(a.pow(e as i32));
                 }
-                Double(a.to_string().parse::<f64>().unwrap_or(f64::INFINITY).powf(*b as f64))
+                Double(Self::rational_to_f64(a).powf(*b as f64))
             }
             (Complex(re, im), Long(b)) => {
                 let z = (*re, *im);

@@ -200,7 +200,7 @@ fn classify_with_timeout(c: &Case) -> Outcome {
             // (0,1)↓(2 2⍴…) must be a 2×1 per-axis drop (drop.kt:328 axisArray);
             // the port currently does NOT drop (a1 keeps B's full shape), so
             // QR/Rinv recurse on wrong shapes.
-            // H2 (narrow, fn `classify` documents why): `io:toHex/fromHex/
+            // H2 (narrow, fn `classify` documents why): `io:toHex/fromHex/`
             // `base64Encode` are stdlib-defined and non-recursive, so preload
             // stdlib for exactly the Simple suite (never Math — row 998).
             // Base64EncodingTest.kt runs every call with `withStandardLib =
@@ -208,8 +208,17 @@ fn classify_with_timeout(c: &Case) -> Outcome {
             // `io:base64Encode/Decode` (io.kap), so it rides the same preload.
             // Rows that `use()` themselves (formatterTest) are left alone:
             // a second load fails re-assigning `:const math:pi`.
+            //
+            // UNBLOCKED (this session): the Math suite now rides the same preload.
+            // It was excluded because row 998 (`testMatrixDivision`) stack-overflowed
+            // the worker via the dyadic-`↓` divergence. Both are fixed: per-axis drop
+            // is correct (`(0,1)↓2 2⍴1 0 0 1` → shape `(2 1)`, oracle `⟨2 1⟩`) and
+            // the `⌹`/QR/Rinv chain terminates with the expected values. So
+            // `StandardLibMathTest` (withStandardLib = true in Kotlin) now gets the
+            // same prepend as the other two suites.
             let src = if (c.file.contains("StandardLibSimpleFunctionsTest")
-                || c.file.contains("Base64EncodingTest"))
+                || c.file.contains("Base64EncodingTest")
+                || c.file.contains("StandardLibMathTest"))
                 && !c.expr.trim_start().starts_with("use(")
             {
                 format!("use(\"standard-lib.kap\")\n{}", c.expr)
@@ -604,6 +613,26 @@ fn curated_kap_parity() {
         (":fill 2 ⍴ 1 2 3", "(1 2 3 0)"),
         (":fill 3 ⍴ 1 2", "(1 2 0)"),
         ("⍴ :fill 2 ⍴ 1 2 3 4", "(2 2)"),
+        // Monadic `⍪` = TABLE (concatenate-array.kt:573-584): rank-0 → (1 1), else
+        // `(d[0], product(rest))`. Oracle: `⍴⍪5` → `⟨1 1⟩`, `⍴⍪1 2` → `⟨2 1⟩`.
+        // (The port used to return a rank-1 vector, which broke QR's `⍪t`.)
+        ("⍴⍪5", "(1 1)"),
+        ("⍴⍪1 2", "(2 1)"),
+        // A rational is a REAL number for arithmetic: `(1/2)×9.0` → 4.5. (The old
+        // `as_double` parsed `"1/2"` as f64, failed, and returned Infinity.)
+        ("(1÷2)×9.0", "4.5"),
+        // `∇` tradfn bodies are CLOSED: a bare `←` inside binds in the call frame,
+        // so it can neither read nor write the caller's `a`/`c`
+        // (CustomFunctionTest.functionArgumentsAreLocal / ...TwoArg).
+        ("a←1 ⋄ ∇ b (a) { a←2+a } ⋄ b 100 ⋄ a", "1"),
+        ("a←1 ⋄ c←2 ⋄ ∇ (c) b (a) { a←4 ⋄ c←3 } ⋄ 1000 b 100 ⋄ a c", "(1 2)"),
+        // (`⇐` self-recursion registration is covered by the sweep row
+        // CustomFunctionTest.selfRecursionWithNamedFunction: the `if(...){…}`
+        // syntax it needs is a stdlib defsyntax, which this engine does not load.)
+        // Per-axis drop (`(0,1)↓2 2⍴1 0 0 1` → shape `(2 1)`; drop.kt:328
+        // axisArray). The port used to keep the full shape, which corrupted Rinv.
+        ("⍴(0,1)↓2 2⍴1 0 0 1", "(2 1)"),
+        ("(0,1)↓2 2⍴1 0 0 1", "(0 1)"),
         // unicode:* namespace builtins (Kap unicode.kt)
         ("unicode:toCodepoints \"ABC\"", "(65 66 67)"),
         ("unicode:fromCodepoints 65 66 67", "\"ABC\""),

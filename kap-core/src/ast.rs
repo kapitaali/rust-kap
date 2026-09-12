@@ -98,6 +98,17 @@ pub enum Instr {
         right_params: Vec<String>,
         body: Box<Instr>,
     },
+    /// A *closed-scope wrapper* around a `∇`-defined function/operator body. The parser
+    /// never emits this: the evaluator wraps the body at `UserFnDef`/`UserOpDef` time
+    /// (Kotlin parses every `∇` body in a `closed=true` env, parser.kt:757/771/783).
+    /// `apply_user_fn`/`apply_user_op` set the call frame's `is_call_frame` barrier on
+    /// sight of this wrapper, so a bare `←` inside binds in the frame (function-local)
+    /// instead of leaking into caller scope or the namespace table — while `⇐`
+    /// lambdas and bare blocks (never wrapped) keep write-through to defining scope
+    /// (`updateableConstValue`, closure counters, `{ a +← ⍵ }` under lock). The wrapper
+    /// travels WITH the body value, so recursion, `⍞`-dispatch, and method calls all
+    /// preserve closedness with no signature threading.
+    ClosedScope(Box<Instr>),
     /// An anonymous function *assignment* via `⇐`: `name ⇐ <fn-expr>`. The right side
     /// is any function-valued expression (a lambda, a train, a builtin name, or another
     /// named function). Compiled like `UserFnDef` but without a separate left/right split

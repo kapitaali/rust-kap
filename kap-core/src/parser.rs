@@ -1179,6 +1179,17 @@ impl<'a> Parser<'a> {
                         }
                         self.advance(); // consume the name
                         self.advance(); // consume ⇐
+                        // Kotlin `processShortFormFn` (parser.kt:640-664) registers the
+                        // name as a local function BEFORE parsing the RHS body, so a
+                        // self-referential call inside (`foo ⇐ { … foo (⍵-1) … }`)
+                        // parses as an application (recursion) rather than stranding
+                        // as a value. (This mirrors `parse_fn_assign` below, which
+                        // already pushes before; the old push-after here left the
+                        // body's own name unknown, so `selfRecursionWithNamedFunction`
+                        // silently stranded and only passed by accident.)
+                        if !self.known_functions.iter().any(|f| f == &name) {
+                            self.known_functions.push(name.clone());
+                        }
                         let value = self.parse_function_expr_impl(true)?;
                         // B2: a bare pure-adverb RHS is invalid (e.g. `foo ⇐ ⌸`).
                         // Ambivalent adverbs are valid (e.g. `f ⇐ /`, `f ⇐ ⌿`).
@@ -1197,6 +1208,9 @@ impl<'a> Parser<'a> {
                         // Value-producing nodes (Literal, Array) are rejected; all other
                         // AST shapes are function-producing (Lambda, Train, Symbol,
                         // Derived, Block, ValueOp, InnerProduct, OverOp, DynamicRef).
+                        // (The name itself was registered as a known function BEFORE
+                        // the RHS was parsed — see above — so later statements in
+                        // the same block also resolve `g ⍵` as an application.)
                         if matches!(
                             value,
                             Instr::Literal(_) | Instr::Array { .. }
@@ -1205,12 +1219,7 @@ impl<'a> Parser<'a> {
                                 "Right side of the arrow must be a function"
                             )));
                         }
-                        // Kotlin processShortFormFn DEFINES the binding during parse
-                        // (lookupFunction sees it immediately), so a later statement in
-                        // the same block resolves `g ⍵` as an application. Mirror that.
-                        if !self.known_functions.iter().any(|f| f == &name) {
-                            self.known_functions.push(name.clone());
-                        }
+                        // (The name was already registered BEFORE the RHS parse above.)
                         return Ok(Instr::FnAssign {
                             name,
                             namespace,

@@ -1198,6 +1198,18 @@ pub struct Environment {
     /// `AplError::Return` propagates up until it finds a scope with this flag set,
     /// then the value is returned from that scope instead of propagating further.
     pub is_return_target: std::cell::Cell<bool>,
+    /// True for a function/operator-call frame (`apply_user_fn`, operator-body eval,
+    /// directly-applied `{…}` block). Kap `←` binds in the CURRENT execution frame
+    /// (Kotlin's fresh `StorageStack` frame): `assign` updates lexical bindings up to
+    /// and including this frame but never past it, and a bare `←` with no binding
+    /// below-or-at the frame binds HERE instead of leaking into caller scope or the
+    /// namespace table. Without this, a tradfn's `n←…` overwrote the caller's `n`
+    /// (oracle: a tradfn body can neither write NOR read caller globals), which
+    /// corrupted QR/Rinv recursion (`(m,m-n)↑B` silently became `(1,0)↑B`).
+    /// Control-structure bodies (`if`/`while`) share the frame (no child), so loop
+    /// counters still assign in place. Qualified (`ns:name`) writes always target
+    /// their namespace, barrier or not. READS are deliberately unbarriered.
+    pub is_call_frame: std::cell::Cell<bool>,
     /// Dynamic depth of deferred function/operator-body execution (`apply_user_fn` /
     /// `apply_user_op` body eval). PLAN §2.8b: Kotlin checks const ONLY at
     /// instruction-BUILD time (`deriveLvalueReader`); runtime `setVar` is unchecked.
@@ -1231,6 +1243,7 @@ impl Environment {
             home_ns: RefCell::new(None),
             acts_as_root: std::cell::Cell::new(false),
             is_return_target: std::cell::Cell::new(false),
+            is_call_frame: std::cell::Cell::new(false),
             fn_body_depth: std::cell::Cell::new(0),
         })
     }
