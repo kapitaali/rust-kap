@@ -3638,9 +3638,15 @@ impl<'a> Parser<'a> {
             };
             // A namespaced native value-op (`int:proto`) after a function: the
             // function operand binds it as `ValueOp{fn, "int:proto", operand}`.
+            // The BARE operator `defer` (engine.kt:421 `registerNativeOperator("defer",
+            // DeferAPLOperator())`) binds the same way: `f defer v` → `ValueOp{f,
+            // "defer", v}`, which the evaluator turns into a lazy `APLValue::Deferred`
+            // (Kotlin `DeferAPLOperator` → `DeferredAPLValue1Arg/2Arg`,
+            // div_functions.kt:168-194; DeferComputationTest).
             let next_is_native_value_op = match &next {
                 Some(Token::Literal(LiteralValue::Symbol { name, namespace })) => {
-                    namespace.as_deref() == Some("int") && name == "proto"
+                    (namespace.as_deref() == Some("int") && name == "proto")
+                        || (namespace.is_none() && name == "defer")
                 }
                 _ => false,
             };
@@ -4181,10 +4187,42 @@ impl<'a> Parser<'a> {
                     | Some(Token::ComposeToken)
                     | Some(Token::ReverseComposeToken)
                     | Some(Token::LeftForkToken)
-                    | Some(Token::RightForkToken)
-                    | Some(Token::OpenParen) => {
+                    | Some(Token::RightForkToken) => {
                         kinds.push(Kind::Func);
                         self.advance();
+                        self.skip_newlines();
+                    }
+                    // A NESTED group is a function atom only when its own content is an
+                    // operator group (`(+⊢)`, `(×-)`). Treating every nested group as a
+                    // function made a VALUE group like `(5 (foo 1))` look like a
+                    // left-bind `[value fn]`, so the strand mis-parsed as a dyadic
+                    // application (oracle `5 (foo 1)` → `⟨5 6⟩`, a 2-element strand;
+                    // port raised "Index dereference without argument" / "No arguments
+                    // specified for function").
+                    Some(Token::OpenParen) => {
+                        let inner_is_fn = self.next_is_paren_operator();
+                        kinds.push(if inner_is_fn { Kind::Func } else { Kind::Value });
+                        // Consume the whole nested group so the walk continues AFTER it.
+                        let mut depth = 0usize;
+                        loop {
+                            match self.peek().map(|t| &t.token) {
+                                None => break,
+                                Some(Token::OpenParen) => {
+                                    depth += 1;
+                                    self.advance();
+                                }
+                                Some(Token::CloseParen) => {
+                                    depth -= 1;
+                                    self.advance();
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                }
+                                _ => {
+                                    self.advance();
+                                }
+                            }
+                        }
                         self.skip_newlines();
                     }
                     _ => {
