@@ -4961,6 +4961,25 @@ impl Engine {
                     }
                 }
             },
+            // `int:ensureGeneric` / `ensureLong` / `ensureDouble` / `ensureBoolean`
+            // (Kotlin `EnsureTypeFunction`, engine.kt:424-427 + div_functions.kt:415-423):
+            // each returns `ForcedElementTypeArray(a, T)` — a `DelegatedValue` that
+            // forwards EVERY operation to `a` and differs only in `specialisedType`
+            // (div_functions.kt:392-413). The port has no element-type annotation, so
+            // the faithful behaviour is IDENTITY: the value is returned unchanged.
+            // (Kotlin's own use is to *enable* the ∨//∧/ short-circuit fast path; the
+            // reduced RESULT is identical either way. Oracle:
+            // `∨/ int:ensureBoolean 0 0 1 0` → `1`, `∧/ int:ensureBoolean 1 1 0` → `0`.)
+            // Monadic only (NoAxisAPLFunction).
+            "int:ensureGeneric" | "int:ensureLong" | "int:ensureDouble" | "int:ensureBoolean" => {
+                match left_val {
+                    Some(_) => Err(AplError::runtime(format!(
+                        "{}: Function cannot be called with two arguments",
+                        name.split_once(':').map(|(_, b)| b).unwrap_or(name.as_str())
+                    ))),
+                    None => right_val.force(self),
+                }
+            }
             // `int:asRational` (Kotlin AsRationalFunction, div_functions.kt:439):
             // Long/BigInt → Rational(n,1) (kept rational: displays `10/1`),
             // Rational → itself; anything else errors. Explicit conversion —
@@ -6694,6 +6713,22 @@ impl Engine {
         let dims = Self::value_dims(v);
         let mut out = Vec::with_capacity(v.element_count().max(1));
         walk(&mut out, v, &dims);
+        // Robustness: a malformed value whose dims claim more elements than its
+        // storage holds (built before the logical-cell fixes, e.g. the phantom
+        // `[2,1]`-with-empty-storage arrays) must not let a caller index past the
+        // end. When the logical walk under-fills a NON-EMPTY storage, fall back to
+        // the storage-level view — identical for well-formed values, where the
+        // walk always yields exactly `element_count()` entries.
+        if out.len() != v.element_count() {
+            let storage = match v.as_ref() {
+                APLValue::Array(a) => a.elements(),
+                APLValue::Str(s) => s.chars().map(|c| std::rc::Rc::new(APLValue::Char(c))).collect(),
+                _ => Vec::new(),
+            };
+            if !storage.is_empty() {
+                return storage;
+            }
+        }
         out
     }
 
@@ -12110,7 +12145,22 @@ impl Engine {
             for i in 0..rank {
                 sf += c2[i] * src_strides[i];
             }
-            out_elems.push(src_elems[sf].clone());
+            // Bounds-guarded: a malformed operand (dims claiming more elements than
+            // its storage holds) must surface as an APL error, never a Rust panic
+            // (Kotlin's `valueAt` raises IndexOutOfBounds here). `[[`o3:format ,1`]]
+            // hit this through the formatter's `⍪/` path.
+            match src_elems.get(sf) {
+                Some(e) => out_elems.push(e.clone()),
+                None => {
+                    return Err(AplError::runtime(format!(
+                        "{}: malformed operand: element {} missing from shape {:?} (has {} elements)",
+                        name,
+                        sf,
+                        src_dims,
+                        src_elems.len()
+                    )))
+                }
+            }
         }
         let labels = self.catenate_labels(a_labels, b_labels, axis, rank, a_dims[axis], b_dims[axis]);
         Ok(Rc::new(APLValue::Array(Rc::new(KapArray {
