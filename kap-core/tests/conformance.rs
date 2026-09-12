@@ -200,7 +200,7 @@ fn classify_with_timeout(c: &Case) -> Outcome {
             // (0,1)↓(2 2⍴…) must be a 2×1 per-axis drop (drop.kt:328 axisArray);
             // the port currently does NOT drop (a1 keeps B's full shape), so
             // QR/Rinv recurse on wrong shapes.
-            // H2 (narrow, fn `classify` documents why): `io:toHex/fromHex/`
+            // H2 (narrow, fn `classify` documents why): `io:toHex/fromHex/
             // `base64Encode` are stdlib-defined and non-recursive, so preload
             // stdlib for exactly the Simple suite (never Math — row 998).
             // Base64EncodingTest.kt runs every call with `withStandardLib =
@@ -273,12 +273,11 @@ fn run_kotlin_conformance() {
         if o == Outcome::Unsupported && unsupported_examples.len() < 25 {
             unsupported_examples.push(c);
         }
-        if o == Outcome::Mismatch {
-            if let Ok(got) = engine.eval_to_string(&c.expr) {
-                if mismatch_examples.len() < 25 {
-                    mismatch_examples.push((c, got));
-                }
-            }
+        if o == Outcome::Mismatch && mismatch_examples.len() < 25 {
+            let got = engine
+                .eval_to_string(&c.expr)
+                .unwrap_or_else(|e| format!("<re-eval error: {e}>"));
+            mismatch_examples.push((c, got));
         }
         if std::env::var("CONFORM_DUMP").is_ok() {
             use std::io::Write;
@@ -337,7 +336,7 @@ fn run_kotlin_conformance() {
         s.push_str("\n--- sample mismatch cases ---\n");
         for (c, got) in &mismatch_examples {
             s.push_str(&format!(
-                "  {} : expr={} expected={:?} got={}\n",
+                "  {} : expr={:?} expected={:?} got={:?}\n",
                 c.test, c.expr, c.expected, got
             ));
         }
@@ -584,8 +583,27 @@ fn curated_kap_parity() {
         ("\"abc\"⍴⍳100", "(0 1 2)"),
         ("1⌽\"abc\"", "\"bca\""),
         ("\"abc\"⍪\"def\"", "\"abcdef\""),
-        // Comma of a string with a numeric vector strands into a mixed vector.
-        ("\"abc\"⍪1 2 3", "(\"abc\" 1 2 3)"),
+        // Catenate of a string with a numeric vector: a `Str` IS a rank-1 char
+        // vector (Kotlin `APLString`), so its chars splice into the result.
+        // Oracle-verified (`kap-jvm-text --no-standard-lib`):
+        //   `⍕⊃⍴ "abc"⍪1 2 3`              → `"6"`
+        //   `("abc"⍪1 2 3)≡(@a @b @c 1 2 3)` → `1`
+        //   `("abc"⍪1 2 3)≡("abc" 1 2 3)`   → `0`
+        //   raw render                      → `@a @b @c 1 2 3`
+        // The prior expectation `("abc" 1 2 3)` was the port's pre-fix behaviour
+        // (the string pushed as ONE element, length 4) — corrected here.
+        ("\"abc\"⍪1 2 3", "(@a @b @c 1 2 3)"),
+        // A `Str` is a rank-1 char VECTOR, so `,` splices its characters rather than
+        // boxing the whole string (oracle: `⊃⍴ (⍳10),"ab"` → `12`; `,"ab"` → `"ab"`).
+        ("≢ (⍳10),\"ab\"", "12"),
+        (",\"ab\"", "\"ab\""),
+        // `:fill` reshape: the computed dimension only expands on a NON-ZERO
+        // remainder, and FILL extends past the source with the fill element instead
+        // of cycling (oracle: `:fill 2 ⍴ 1 2 3` → `1 2 / 3 0`; `:fill 3 ⍴ 1 2` →
+        // `1 2 0`; `⍴ :fill 2 ⍴ 1 2 3 4` → `2 2`).
+        (":fill 2 ⍴ 1 2 3", "(1 2 3 0)"),
+        (":fill 3 ⍴ 1 2", "(1 2 0)"),
+        ("⍴ :fill 2 ⍴ 1 2 3 4", "(2 2)"),
         // unicode:* namespace builtins (Kap unicode.kt)
         ("unicode:toCodepoints \"ABC\"", "(65 66 67)"),
         ("unicode:fromCodepoints 65 66 67", "\"ABC\""),

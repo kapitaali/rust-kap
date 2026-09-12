@@ -78,6 +78,12 @@ pub enum APLValue {
     /// An unevaluated expression (lazy thunk). `instr` is the tree; `env` is the lexical
     /// environment captured at the point of deferral.
     Deferred { instr: AplRef<ast::Instr>, env: AplRef<Environment> },
+    /// A `dynamicequal` reactive binding (Kotlin `DynamicValue`, dynamic-assign.kt):
+    /// re-evaluates `instr` in `env` on EVERY read (call-by-name). `id` feeds the
+    /// circular-assignment guard in `force()` (Kotlin `CircularDynamicAssignment`).
+    /// A plain `←` overwrites the slot, dropping the dependency tracking, exactly
+    /// like Kotlin's `processDestinationUpdated` unregistering the listeners.
+    Dynamic { instr: AplRef<ast::Instr>, env: AplRef<Environment>, id: u64 },
     /// A user-defined function (lambda / tradfn). `params` are argument names; `body` is
     /// the unevaluated expression; `env` is the closure captured at definition time
     /// (used to build a child scope when the function is applied). `split` = the number
@@ -244,6 +250,7 @@ impl APLValue {
             APLValue::Null => "null",
             APLValue::Nil => "null",
             APLValue::Deferred { .. } => "deferred",
+            APLValue::Dynamic { .. } => "dynamic",
             // Kotlin `SystemClass.LAMBDA_FN = SystemClass("function")`
             // (objects.kt:32): `typeof` of any function value is `kap:function`
             // (oracle: `typeof(y)` on an operator operand → `kap:function`).
@@ -313,6 +320,7 @@ impl APLValue {
                 format!("({})", parts.join(" "))
             }
             APLValue::Deferred { .. } => "<deferred>".to_string(),
+            APLValue::Dynamic { .. } => "<dynamic>".to_string(),
             APLValue::UserFn { .. } => "<function>".to_string(),
             APLValue::Escape { .. } => "<function>".to_string(),
             APLValue::NonBoundFn { .. } => "<function>".to_string(),
@@ -374,6 +382,7 @@ impl APLValue {
                 a.elements().iter().map(|e| e.format_plain()).collect()
             }
             APLValue::Deferred { .. } => "<deferred>".to_string(),
+            APLValue::Dynamic { .. } => "<dynamic>".to_string(),
             APLValue::UserFn { .. } => "<function>".to_string(),
             APLValue::Escape { .. } => "<function>".to_string(),
             APLValue::NonBoundFn { .. } => "<function>".to_string(),
@@ -455,6 +464,7 @@ impl APLValue {
                 }
             }
             APLValue::Deferred { .. } => "<deferred>".to_string(),
+            APLValue::Dynamic { .. } => "<dynamic>".to_string(),
             APLValue::UserFn { .. } => "<function>".to_string(),
             APLValue::Escape { .. } => "<function>".to_string(),
             APLValue::NonBoundFn { .. } => "<function>".to_string(),
@@ -513,6 +523,7 @@ impl APLValue {
             APLValue::Array(a) => Self::format_conform_array(a, false),
             APLValue::List(a) => Self::format_conform_array(a, true),
             APLValue::Deferred { .. } => "<deferred>".to_string(),
+            APLValue::Dynamic { .. } => "<dynamic>".to_string(),
             APLValue::UserFn { .. } => "<function>".to_string(),
             APLValue::Escape { .. } => "<function>".to_string(),
             APLValue::NonBoundFn { .. } => "<function>".to_string(),
@@ -961,6 +972,17 @@ impl NamespaceRegistry {
             .borrow_mut()
             .insert((ns.to_string(), name.to_string()));
     }
+    /// All `(namespace, name)` pairs marked as FUNCTION DEFINITIONS (`∇` tradfn /
+    /// `⇐` dfn). Needed because a `∇` def registers ONLY in the engine-global
+    /// function table (Kotlin `engine.registerFunction` → `engine.functions[ns:name]`)
+    /// and never in `symbols`, so `collect_function_names` — which requires a
+    /// `UserFn` entry in `symbols` — cannot see it. The parser still has to know
+    /// the qualified `ns:name` is applicable: `NamespaceTest.simpleInclude` requires
+    /// `use("test-data/use-test.kap")` then `foo:a 100` → `101` (Kotlin
+    /// `lookupFunction` → `engine.getFunction(foo:a)`).
+    pub fn fn_def_names(&self) -> Vec<(String, String)> {
+        self.fn_definitions.borrow().iter().cloned().collect()
+    }
     /// Clear the function-definition mark (a later `←` rebinds the name as a value).
     pub fn unmark_fn_def(&self, ns: &str, name: &str) {
         self.fn_definitions
@@ -1313,6 +1335,10 @@ pub struct Engine {
     /// qualified name — classes carry no methods in this port (Kotlin's
     /// default `resolveMethod` throws `Invalid target object` anyway).
     pub classes: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>>,
+    /// In-progress `dynamicequal` thunk ids (Kotlin `CircularDynamicAssignment`,
+    /// common.kt:156). `force()` inserts the thunk's id before re-evaluating and
+    /// removes it after; re-entry errors instead of overflowing the stack.
+    pub dyn_active: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<u64>>>,
 }
 
 impl Engine {

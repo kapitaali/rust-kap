@@ -356,6 +356,7 @@ fn single_char_token(c: char) -> Option<Token> {
         '⍠' => Token::MethodCallToken,
         '⟦' => Token::FunctionCallOpenParen,
         '⟧' => Token::FunctionCallCloseParen,
+        '?' => Token::QuestionMark,
         _ => return None,
     })
 }

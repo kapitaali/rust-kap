@@ -13,6 +13,7 @@ use crate::lexer::{tokenise, tokenise_with};
 use crate::number::{bigint_to_kap, popcount_bigint, rational_to_kap, KapNumber};
 use crate::parser;
 use crate::map::KapMap;
+use rand::Rng;
 use crate::token::{LiteralValue, Token};
 use unicode_segmentation::UnicodeSegmentation;
 use std::cmp::Ordering;
@@ -249,11 +250,27 @@ impl Environment {
             cur = env.parent.as_deref();
         }
         self.ns_registry.collect_function_names(&mut names);
-        // Engine-global ∇ tradfns (Kotlin engine.getFunction). These live on the
-        // root environment's engine_fns, not in function_defs per-scope.
-        for name in self.engine_fns.borrow().keys() {
-            if !names.contains(name) {
-                names.push(name.clone());
+        // A `∇` tradfn (and `⇐` dfn) registers ONLY in the engine-global function
+        // table (Kotlin `engine.registerFunction` → `engine.functions[ns:name]`) and
+        // never in `symbols`, so `collect_function_names` (which requires a `UserFn`
+        // entry there) misses it. Recover the QUALIFIED `ns:name` from the fn-def
+        // marks: Kotlin's parser resolves a namespaced application through
+        // `lookupFunction` → `engine.getFunction(foo:a)`, whose key is the namespaced
+        // symbol — `use("test-data/use-test.kap")` + `foo:a 100` must apply (`101`),
+        // not strand (`(<function> 100)`).
+        {
+            let eng = self.engine_fns.borrow();
+            for (ns, name) in self.ns_registry.fn_def_names() {
+                if !matches!(
+                    eng.get(&name).map(|v| v.as_ref()),
+                    Some(APLValue::UserFn { .. })
+                ) {
+                    continue;
+                }
+                let qual = format!("{}:{}", ns, name);
+                if !names.contains(&qual) {
+                    names.push(qual);
+                }
             }
         }
         names
@@ -310,6 +327,19 @@ impl APLValue {
             APLValue::Deferred { instr, env } => {
                 let env = env.clone();
                 engine.eval_instr(instr, &env)
+            }
+            // A `dynamicequal` thunk re-evaluates on every read (call-by-name, standing
+            // in for Kotlin's listener-driven invalidation: any dependency change is
+            // visible because nothing is cached). The id guard turns circular
+            // dependencies into `Circular dynamic assignment` instead of a stack
+            // overflow (Kotlin `CircularDynamicAssignment`, common.kt:156).
+            APLValue::Dynamic { instr, env, id } => {
+                if !engine.dyn_active.borrow_mut().insert(*id) {
+                    return Err(AplError::runtime("Circular dynamic assignment".into()));
+                }
+                let r = engine.eval_instr(instr, env);
+                engine.dyn_active.borrow_mut().remove(id);
+                r
             }
             // Forcing a suspended `→`-return re-raises it: inside a live frame
             // (e.g. `comp`-collapse) the frame catches it; past frame exit it
@@ -506,6 +536,10 @@ fn unicode_char_name(c: char) -> Option<String> {
     };
     Some(named.to_string())
 }
+
+/// Fresh ids for `dynamicequal` thunks (Kotlin has no ids — its listeners are
+/// GC'd objects; the port needs a cheap re-entry key for the circular guard).
+static NEXT_DYNAMIC_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Engine {
     /// B6 (code_analysis_03 / Kotlin `Namespace.checkAssign`): error if the target
@@ -1396,6 +1430,23 @@ impl Engine {
                     Err(AplError::runtime("assignment target must be a symbol".into()))
                 }
             }
+            Instr::DynAssign { name, namespace, body } => {
+                // `b dynamicequal expr` (Kotlin `DynamicAssignmentInstruction`,
+                // dynamic-assign.kt): bind `name` to a thunk re-evaluating `body`
+                // on every read. A later plain `←` overwrites the slot, dropping
+                // reactivity (Kotlin's listener unregistration on normal assign).
+                self.check_not_constant(name, namespace, env)?;
+                let def_ns = namespace.clone().unwrap_or_else(|| env.ns_registry.current_ns());
+                env.ns_registry.unmark_fn_def(&def_ns, name);
+                let id = NEXT_DYNAMIC_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let thunk = Rc::new(APLValue::Dynamic {
+                    instr: Rc::new((**body).clone()),
+                    env: env.clone(),
+                    id,
+                });
+                env.assign(name, namespace, thunk.clone());
+                Ok(thunk)
+            }
             Instr::DestructAssign { target, value } => {
                 // `(a b c) ← expr` — bind each LHS symbol to the corresponding
                 // element of the (vector) RHS. `target` mirrors the LHS surface
@@ -2094,6 +2145,7 @@ impl Engine {
             APLValue::NonBoundFn { .. } => true,
             APLValue::UserOp { .. } => true,
             APLValue::Deferred { .. } => false,
+            APLValue::Dynamic { .. } => false,
             APLValue::Symbol { .. } => true,
             APLValue::Map(_) => true,
             APLValue::Stream(_) => true,
@@ -5907,6 +5959,10 @@ impl Engine {
                 Some(l) => self.intersection(l, right_val),
             },
             "⍋" | "grade" => self.grade_up(right_val),
+            "?" | "roll" => match left_val {
+                None => self.roll(right_val),
+                Some(l) => self.deal(l, right_val),
+            },
             "⍒" | "gradeDown" => self.grade_down(right_val),
             "∼" | "not" => self.logical_not(right_val),
             "!" | "gamma" | "binomial" => self.factorial_binomial(left_val, right_val),
@@ -5968,6 +6024,17 @@ impl Engine {
                 let mut n = KapArray::new(dims, a.data.clone());
                 n.labels = a.labels.clone();
                 Ok(Rc::new(APLValue::List(Rc::new(n))))
+            }
+            // Strings are rank-1 char arrays in Kotlin (`APLString : APLArray`),
+            // so rank-up spreads the chars: `<"ab"` → (1 2), not (1,).
+            APLValue::Str(s) => {
+                let chars: Vec<AplRef<APLValue>> =
+                    s.chars().map(|c| Rc::new(APLValue::Char(c))).collect();
+                let n = chars.len();
+                Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![1, n],
+                    ArrayData::Nested(chars),
+                )))))
             }
             _ => Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
                 vec![1],
@@ -10882,6 +10949,20 @@ impl Engine {
     }
 
     fn reshape(&self, left_val: AplRef<APLValue>, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        self.reshape_proto(left_val, right_val, None)
+    }
+
+    /// [`reshape`] with an optional PROTOTYPE fill element. Kotlin threads the proto
+    /// value into `RhoAPLFunctionImpl.eval2ArgWithProto`'s `defaultValue`
+    /// (reshape.kt:239) and `ExtendedRavelArray` returns it for every index past the
+    /// source's content — oracle `:fill 4 (⍴ int:proto @=) "ab"` → `@a @b @= @=`.
+    /// `None` is Kotlin's `BASE_DEFAULT_VALUE` (integer 0).
+    fn reshape_proto(
+        &self,
+        left_val: AplRef<APLValue>,
+        right_val: AplRef<APLValue>,
+        proto: Option<&AplRef<APLValue>>,
+    ) -> Result<AplRef<APLValue>, AplError> {
         // Dyadic `⍴`: `(dims) ⍴ data` builds an array of shape `dims`, filled by
         // cycling through the flat elements of `data` (Kap/APL reshape semantics).
         // Dimension-spec ladder, mirroring Kotlin reshape.kt findSizeCalculationMethod
@@ -11069,9 +11150,14 @@ impl Engine {
                         // Kotlin :312-337 — the computed size depends on the method.
                         let q = b_size / total_fixed;
                         let r = b_size % total_fixed;
+                        // Kotlin reshape.kt:307-329 — a NON-ZERO remainder is what
+                        // makes FILL/RECYCLE need one extra column's worth of
+                        // elements; an evenly-dividing content has nothing to
+                        // extend (`:fill 2 ⍴ 1 2 3 4` → `2 2`, not `3 2`;
+                        // `:fill 2 ⍴ 1 2 3` → `2 2`).
                         let n = match method {
                             SizeMethod::Match | SizeMethod::Truncate => q,
-                            SizeMethod::Fill | SizeMethod::Recycle => q + 1,
+                            SizeMethod::Fill | SizeMethod::Recycle => q + i64::from(r != 0),
                         };
                         out.push(n.max(0) as usize);
                     }
@@ -11142,21 +11228,49 @@ impl Engine {
                 .collect(),
             other => vec![Rc::new(other.clone())],
         };
+        // The fill element: the proto when one was supplied, else Kap's
+        // `BASE_DEFAULT_VALUE` (integer 0).
+        let fill_elem: AplRef<APLValue> = match proto {
+            Some(p) => p.clone(),
+            None => Rc::new(APLValue::Number(KapNumber::Long(0))),
+        };
         if src.is_empty() {
-            // Filling with a prototype: use a scalar 0 (matches Kap's empty-fill behaviour for
-            // numeric reshape sources).
-            src = vec![Rc::new(APLValue::Number(KapNumber::Long(0)))];
+            // An empty source is extended entirely with the fill element.
+            src = vec![fill_elem.clone()];
         }
         let total: usize = dims.iter().product();
         let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(total);
+        // `:fill` EXTENDS past the source with the fill element; every other method
+        // (plain `⍴`, `:match`, `:truncate`, `:recycle`) CYCLES the source. Kotlin
+        // reshape.kt:322 `ExtendedRavelArray(b, n, pos, defaultValue)` has
+        // `valueAt(i) = if (i < src.size) src[i] else fillElement`, whereas
+        // `ResizedArrayImpls.makeResizedArray` recycles. Oracle:
+        //   `:fill 2 ⍴ 1 2 3`   → `1 2 / 3 0`   (port cycled → `1 2 3 1`)
+        //   `:fill 3 ⍴ 1 2`     → `1 2 0`
+        //   `:recycle 2 ⍴ 1 2 3`→ `1 2 / 3 1`   (stays a cycle)
+        let extend_with_fill = specs
+            .iter()
+            .any(|s| matches!(s, DimSpec::Computed(SizeMethod::Fill)));
         for i in 0..total {
-            out.push(Rc::new(src[i % src.len()].as_ref().clone()));
+            if extend_with_fill && i >= src.len() {
+                out.push(fill_elem.clone());
+            } else {
+                out.push(Rc::new(src[i % src.len()].as_ref().clone()));
+            }
         }
         Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(dims, ArrayData::Nested(out))))))
     }
 
-    /// Dyadic reshape with a custom fill value (`(dims ⍴ int:proto v) arr`).
-    /// Mirrors `reshape` but uses `fill` instead of 0 when the source array is empty.
+    /// Dyadic reshape with a custom fill value: the port's entry point for
+    /// `(dims ⍴ int:proto v) arr`.
+    ///
+    /// Kotlin `RhoAPLFunction.eval2ArgWithProto` (reshape.kt:239) IS the same
+    /// reshape with `defaultValue = proto`, so delegate to [`reshape_proto`] rather
+    /// than re-implementing the coordinate math. The previous version re-derived the
+    /// dimensions itself and mapped any non-numeric shape entry to a literal `0`, so
+    /// the `:fill` keyword spec collapsed the shape:
+    ///   `:fill 2 (⍴ int:proto 2.2) 1.1 2.1 3.1` → `()`   (oracle: `1.1 2.1 / 3.1 2.2`)
+    ///   `:fill 4 (⍴ int:proto @=) "ab"`         → `@a @b @a @b` (oracle: `@a @b @= @=`)
     fn reshape_with_fill(
         &self,
         left_val: Option<AplRef<APLValue>>,
@@ -11164,51 +11278,14 @@ impl Engine {
         fill: &AplRef<APLValue>,
     ) -> Result<AplRef<APLValue>, AplError> {
         match left_val {
-            Some(l) => {
-                let l = l.force(self)?;
-                let r = right_val.force(self)?;
-                match (l.as_ref(), r.as_ref()) {
-                    (APLValue::Number(KapNumber::Long(d)), APLValue::Array(a)) if *d >= 0 => {
-                        let dims = vec![*d as usize];
-                        let total = *d as usize;
-                        let mut out = Vec::with_capacity(total);
-                        for i in 0..total {
-                            if (i as usize) < a.element_count() {
-                                out.push(a.elements()[i % a.element_count()].clone());
-                            } else {
-                                out.push(fill.clone());
-                            }
-                        }
-                        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(dims, ArrayData::Nested(out))))))
-                    }
-                    (APLValue::Array(dims_arr), APLValue::Array(a)) => {
-                        let dims: Vec<usize> = dims_arr.elements().iter().map(|e| match e.as_ref() {
-                            APLValue::Number(KapNumber::Long(n)) => *n as usize,
-                            _ => 0,
-                        }).collect();
-                        let total: usize = dims.iter().product();
-                        let src_elems = a.elements();
-                        let mut out = Vec::with_capacity(total);
-                        for i in 0..total {
-                            if src_elems.is_empty() {
-                                out.push(fill.clone());
-                            } else {
-                                out.push(src_elems[i % src_elems.len()].clone());
-                            }
-                        }
-                        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(dims, ArrayData::Nested(out))))))
-                    }
-                    _ => self.reshape(l, right_val),
-                }
-            }
+            Some(l) => self.reshape_proto(l, right_val, Some(fill)),
             None => {
-                // Monadic reshape with fill - use empty left arg (rank-0 reshape)
+                // Monadic reshape with fill (Kotlin `eval1ArgWithProto` → plain
+                // shape): only an empty source surfaces the fill value.
                 let r = right_val.force(self)?;
                 match r.as_ref() {
-                    APLValue::Array(a) if a.element_count() == 0 => {
-                        Ok(fill.clone())
-                    }
-                    _ => self.reshape(Rc::new(APLValue::Null), right_val),
+                    APLValue::Array(a) if a.element_count() == 0 => Ok(fill.clone()),
+                    _ => self.reshape_proto(Rc::new(APLValue::Null), right_val, Some(fill)),
                 }
             }
         }
@@ -11249,6 +11326,19 @@ impl Engine {
         }
     }
 
+    /// Disclose a rank-0 box to its element (Kotlin `APLValue.disclose()`:
+    /// `EnclosedAPLValue.disclose()` returns the inner value; everything else
+    /// returns itself). Used by catenate's scalar-arrayify (joinByAxis builds
+    /// `ConstantArray` over the disclosed scalar).
+    fn disclose_if_box(v: &AplRef<APLValue>) -> AplRef<APLValue> {
+        match v.as_ref() {
+            APLValue::Array(a) if a.dimensions.is_empty() => {
+                a.elements().into_iter().next().unwrap_or_else(|| v.clone())
+            }
+            _ => v.clone(),
+        }
+    }
+
     fn catenate(
         &self,
         left_val: Option<AplRef<APLValue>>,
@@ -11258,10 +11348,13 @@ impl Engine {
         match left_val {
             None => {
                 // Monadic `,` = ravel: flatten (one level) into a rank-1 vector.
-                // Oracle: `,5`→`⟨5⟩`, `,1 2 3`→`⟨1 2 3⟩`, `,⊂5`→`⟨5⟩`, `⍴,5`→`⟨1⟩`.
+                // Oracle: `,5`→`⟨5⟩`, `,1 2 3`→`⟨1 2 3⟩`, `,⊂5`→`⟨5⟩`, `⍴,5`→`⟨1⟩`,
+                // `,"ab"`→`"ab"` (a string is already a rank-1 char vector, so its
+                // chars splice — `collect_elements` pushed it whole, yielding a
+                // 1-element vector holding the string).
                 let v = right_val.force(self)?;
                 let mut elems = Vec::new();
-                self.collect_elements(&v, &mut elems);
+                self.collect_elements_splice_str(&v, &mut elems);
                 Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
                     vec![elems.len()],
                     ArrayData::Nested(elems),
@@ -11284,22 +11377,24 @@ impl Engine {
                 }
                 if a.is_null() {
                     // `⍬, X`: return X. If X is a scalar, wrap in a length-1
-                    // vector — `⍬,1` → `⟨1⟩`, not the bare scalar 1.
+                    // vector — `⍬,1` → `⟨1⟩`, not the bare scalar 1. A rank-0
+                    // box discloses (Kotlin joinByAxis :213-218 ConstantArray
+                    // over `a.disclose()`): `⍬,⊂(3 4)` → `⟨3 4⟩` plain.
                     if b.dimensions().is_empty() {
                         return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
                             vec![1],
-                            ArrayData::Nested(vec![b.clone()]),
+                            ArrayData::Nested(vec![Self::disclose_if_box(&b)]),
                         )))));
                     }
                     return Ok(b);
                 }
                 if b.is_null() {
                     // `X, ⍬`: return X. If X is a scalar, wrap in a length-1
-                    // vector — `1,⍬` → `⟨1⟩`.
+                    // vector — `1,⍬` → `⟨1⟩`. Rank-0 boxes disclose (see above).
                     if a.dimensions().is_empty() {
                         return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
                             vec![1],
-                            ArrayData::Nested(vec![a.clone()]),
+                            ArrayData::Nested(vec![Self::disclose_if_box(&a)]),
                         )))));
                     }
                     return Ok(a);
@@ -11334,8 +11429,10 @@ impl Engine {
                     b_rank - 1
                 };
                 // Arrayify scalars: reshape to other side's shape with length-1 at
-                // the concatenation axis (Kotlin joinByAxis :213-234).
+                // the concatenation axis (Kotlin joinByAxis :213-234:
+                // ConstantArray over the DISCLOSED scalar).
                 let a = if a_is_scalar {
+                    let disclosed = Self::disclose_if_box(&a);
                     let b_dims = b.dimensions();
                     let mut ad = vec![1usize; b_dims.len()];
                     for i in 0..b_dims.len() {
@@ -11344,12 +11441,13 @@ impl Engine {
                     let count = ad.iter().product::<usize>();
                     Rc::new(APLValue::Array(Rc::new(KapArray::new(
                         ad,
-                        ArrayData::Nested(vec![Rc::new(a.as_ref().clone()); count]),
+                        ArrayData::Nested(vec![disclosed; count]),
                     ))))
                 } else {
                     a
                 };
                 let b = if b_is_scalar {
+                    let disclosed = Self::disclose_if_box(&b);
                     let a_dims = a.dimensions();
                     let mut bd = vec![1usize; a_dims.len()];
                     for i in 0..a_dims.len() {
@@ -11358,7 +11456,7 @@ impl Engine {
                     let count = bd.iter().product::<usize>();
                     Rc::new(APLValue::Array(Rc::new(KapArray::new(
                         bd,
-                        ArrayData::Nested(vec![Rc::new(b.as_ref().clone()); count]),
+                        ArrayData::Nested(vec![disclosed; count]),
                     ))))
                 } else {
                     b
@@ -11368,8 +11466,8 @@ impl Engine {
                 // Both rank <= 1: flat concat (Kotlin Concatenated1DArrays, :181).
                 if a_dims.len() <= 1 && b_dims.len() <= 1 {
                     let mut elems = Vec::new();
-                    self.collect_elements(&a, &mut elems);
-                    self.collect_elements(&b, &mut elems);
+                    self.collect_elements_splice_str(&a, &mut elems);
+                    self.collect_elements_splice_str(&b, &mut elems);
                     let a_labels = match a.as_ref() {
                         APLValue::Array(arr) => arr.labels(),
                         _ => None,
@@ -11877,6 +11975,28 @@ impl Engine {
         match v.as_ref() {
             APLValue::Array(a) => out.extend(a.elements()),
             other => out.push(Rc::new(other.clone())),
+        }
+    }
+
+    /// Like [`collect_elements`] but treats a `Str` as the rank-1 CHARACTER VECTOR
+    /// it models (Kotlin `APLString`): its chars are spliced individually instead of
+    /// being pushed as a single element. `collect_elements`'s whole-value push is
+    /// right for a *nested* context (`⊂"ab"` stays one boxed element) but wrong for
+    /// `,`-catenation and ravel, where the string IS a rank-1 vector of chars.
+    /// Oracle: `⊃⍴ (⍳10),"ab"` → `12` (the port returned `11`), and
+    /// `base64Chars ← (@A+⍳26),(@a+⍳26),(@0+⍳10),"+/"` must be 64 chars — pushing
+    /// `"+/"` whole gave 63, which silently broke `io:base64Decode` (`/` unfindable
+    /// in the decode table).
+    fn collect_elements_splice_str(
+        &self,
+        v: &AplRef<APLValue>,
+        out: &mut Vec<AplRef<APLValue>>,
+    ) {
+        match v.as_ref() {
+            APLValue::Str(s) => {
+                out.extend(s.chars().map(|c| Rc::new(APLValue::Char(c))));
+            }
+            _ => self.collect_elements(v, out),
         }
     }
 
@@ -12669,7 +12789,7 @@ impl Engine {
             APLValue::Array(a) => {
                 let dims = a.dimensions.clone();
                 let rank = dims.len();
-                if rank == 0 {
+                if rank == 0 || a.element_count() == 0 {
                     return Ok(Rc::new(right.as_ref().clone()));
                 }
                 let axis = axis.unwrap_or(rank - 1).min(rank - 1);
@@ -14043,7 +14163,7 @@ impl Engine {
             APLValue::Number(_) | APLValue::Char(_) | APLValue::Null | APLValue::Nil
             | APLValue::Str(_)
             | APLValue::List(_) | APLValue::Map(_) | APLValue::Symbol { .. }
-            | APLValue::Deferred { .. } | APLValue::UserFn { .. } | APLValue::UserOp { .. }
+            | APLValue::Deferred { .. } | APLValue::Dynamic { .. } | APLValue::UserFn { .. } | APLValue::UserOp { .. }
             | APLValue::Escape { .. } | APLValue::NonBoundFn { .. }
             | APLValue::Stream(_) | APLValue::Process(_) | APLValue::Timestamp(_)
             | APLValue::Jvm(_) | APLValue::Lock { .. } | APLValue::Condvar { .. }
@@ -15315,11 +15435,35 @@ impl Engine {
             }
         }
 
-        // When every section was a scalar index, `result_dims` is empty: the result is a
-        // single rank-0 element, which Kap renders as a bare scalar (e.g. `x[2] → 3`, not
-        // `(3)`). Return that element directly rather than wrapping it in a rank-0 array.
+        // Scalar-shaped pick result (every section a scalar index): Kap does NOT
+        // return the bare element. `PickResultValue.unwrapDeferredValue` routes
+        // through `unwrapEnclosedSingleValue` (lookup.kt:159-161, reduce.kt:181):
+        // `EnclosedAPLValue.make` (types.kt:1554) — single values disclose,
+        // array values enclose in a rank-0 box. So `a[0]` on a nested array
+        // yields the enclosed element (and `↑a[0]` discloses it back), which is
+        // what `(cond fn) ← ↑entryList[i]` in structure.kap's `when` relies on.
         if result_dims.is_empty() {
-            return Ok(out.into_iter().next().unwrap_or_else(|| Rc::new(APLValue::Null)));
+            let elem = out
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| Rc::new(APLValue::Null));
+            let elem = elem.force(self)?;
+            return Ok(match elem.as_ref() {
+                APLValue::Number(_)
+                | APLValue::Char(_)
+                | APLValue::Symbol { .. }
+                | APLValue::Map(_)
+                | APLValue::List(_)
+                | APLValue::Nil
+                | APLValue::UserFn { .. }
+                | APLValue::UserOp { .. }
+                | APLValue::Escape { .. }
+                | APLValue::NonBoundFn { .. } => elem,
+                _ => Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![],
+                    ArrayData::Nested(vec![elem]),
+                )))),
+            });
         }
 
         // Thread labels: for each result axis (selected[k].len() > 1), index the
@@ -16005,6 +16149,9 @@ impl Engine {
             }),
             APLValue::Deferred { .. } => {
                 Err(AplError::runtime("cannot use a deferred value as an array element".into()))
+            }
+            APLValue::Dynamic { .. } => {
+                Err(AplError::runtime("cannot use a dynamic value as an array element".into()))
             }
             APLValue::Map(_) => {
                 Err(AplError::runtime("cannot use a map as an array element".into()))
@@ -19195,7 +19342,16 @@ impl Engine {
         // `flat_elements` sees only one storage level (rows, not cells), so
         // map `flat_cell_ravel` and rebuild with the ORIGINAL dims
         // (`+/¨ ⍳4 5 6` folds per cell, oracle `≡` → 1).
-        let right_elems = self.flat_cell_ravel(&right_val);
+        // Kotlin ForEach iterates POSITIONS of the right arg: `⍬`/Null has
+        // zero positions, so `d,¨d` with empty `d` runs ZERO iterations
+        // (oracle `⍴(d,¨d)` → `(0)`). `flat_elements(Null)` yields `[Null]`
+        // (one phantom), which fabricated a 1-element `(⍬)` and broke
+        // output3.kap's `trimVert` (`(axis mode) ← ⍬`). Short-circuit Null.
+        let right_elems = if matches!(right_val.as_ref(), APLValue::Null) {
+            Vec::new()
+        } else {
+            self.flat_cell_ravel(&right_val)
+        };
         let mut out = Vec::with_capacity(right_elems.len());
         match left_val {
             // Dyadic each: apply f to (left_element, right_element) for each right element.
@@ -22153,6 +22309,166 @@ impl Engine {
     /// Grade down `⍒ x`: descending first-axis grade.
     fn grade_down(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
         self.grade(right_val, false)
+    }
+
+    /// Monadic `?` roll (Kotlin `RandomAPLFunction.eval1Arg`).
+    /// Faithful to random-fn.kt: scalar → random int/double; array → per-element recurse;
+    /// empty array → empty array; rank-0 array → enclosed recurse on first element.
+    fn roll(&self, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        let v = right_val.force(self)?;
+        match v.as_ref() {
+            APLValue::Number(KapNumber::Long(n)) => {
+                let mut rng = rand::thread_rng();
+                if *n > 0 {
+                    Ok(Rc::new(APLValue::Number(KapNumber::Long(
+                        rng.gen_range(0..*n),
+                    ))))
+                } else if *n == 0 {
+                    Ok(Rc::new(APLValue::Number(KapNumber::Double(
+                        rng.gen::<f64>(),
+                    ))))
+                } else {
+                    Err(AplError::runtime(format!(
+                        "Invalid random range: {}",
+                        n
+                    )))
+                }
+            }
+            APLValue::Number(KapNumber::Double(d)) => {
+                if *d >= 0.0 && *d == d.floor() {
+                    let n = *d as i64;
+                    let mut rng = rand::thread_rng();
+                    if n > 0 {
+                        Ok(Rc::new(APLValue::Number(KapNumber::Long(
+                            rng.gen_range(0..n),
+                        ))))
+                    } else {
+                        Ok(Rc::new(APLValue::Number(KapNumber::Double(
+                            rng.gen::<f64>(),
+                        ))))
+                    }
+                } else {
+                    Err(AplError::runtime(format!(
+                        "Invalid random range: {}",
+                        d
+                    )))
+                }
+            }
+            APLValue::Number(KapNumber::BigInt(b)) => {
+                use num_traits::ToPrimitive;
+                let mut rng = rand::thread_rng();
+                if b == &num_bigint::BigInt::from(0) {
+                    Ok(Rc::new(APLValue::Number(KapNumber::Double(
+                        rng.gen::<f64>(),
+                    ))))
+                } else if b > &num_bigint::BigInt::from(0) {
+                    if let Some(n) = b.to_i64() {
+                        Ok(Rc::new(APLValue::Number(KapNumber::Long(
+                            rng.gen_range(0..n),
+                        ))))
+                    } else {
+                        Err(AplError::runtime(
+                            "Random from bigint is not supported".into(),
+                        ))
+                    }
+                } else {
+                    Err(AplError::runtime(format!(
+                        "Invalid random range: {}",
+                        b
+                    )))
+                }
+            }
+            APLValue::Number(_) => Err(AplError::runtime(
+                "Argument must be an integer greater than or equal to 0".into(),
+            )),
+            APLValue::Array(a) => {
+                let dims = a.dimensions.clone();
+                if dims.is_empty() {
+                    let first = a
+                        .elements()
+                        .first()
+                        .cloned()
+                        .unwrap_or(Rc::new(APLValue::Null));
+                    self.roll(first)
+                } else if a.element_count() == 0 {
+                    Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        dims,
+                        ArrayData::Nested(vec![]),
+                    )))))
+                } else {
+                    let elements: Result<Vec<_>, _> = a
+                        .elements()
+                        .iter()
+                        .map(|e| self.roll(e.clone()))
+                        .collect();
+                    Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                        dims,
+                        ArrayData::Nested(elements?),
+                    )))))
+                }
+            }
+            _ => Err(AplError::runtime(
+                "Argument must be an integer greater than or equal to 0".into(),
+            )),
+        }
+    }
+
+    /// Dyadic `?` deal (Kotlin `RandomAPLFunction.eval2Arg`).
+    /// `a ? b` picks `a` unique random integers from `0..b-1` (Fisher-Yates partial shuffle).
+    /// Constraints: `0 ≤ a ≤ b`, both integers. `a = 0` → empty array.
+    fn deal(&self, left_val: AplRef<APLValue>, right_val: AplRef<APLValue>) -> Result<AplRef<APLValue>, AplError> {
+        let a = left_val.force(self)?;
+        let b = right_val.force(self)?;
+        let a_int = match a.as_ref() {
+            APLValue::Number(n) => n.as_long().map_err(|e| AplError::runtime(e))?,
+            _ => return Err(AplError::runtime("A must be an integer".into())),
+        };
+        let b_long = match b.as_ref() {
+            APLValue::Number(n) => n.as_long().map_err(|e| AplError::runtime(e))?,
+            _ => return Err(AplError::runtime("B must be an integer".into())),
+        };
+        if a_int < 0 {
+            return Err(AplError::runtime(format!("A should not be negative, was: {}", a_int)));
+        }
+        if b_long < 0 {
+            return Err(AplError::runtime(format!("B should not be negative, was: {}", b_long)));
+        }
+        if a_int > b_long {
+            return Err(AplError::runtime(format!(
+                "A should not be greater than B. A: {}, B: {}",
+                a_int, b_long
+            )));
+        }
+        let a_usize = a_int as usize;
+        if a_usize == 0 {
+            return Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![0],
+                ArrayData::Nested(vec![]),
+            )))));
+        }
+        // Fisher-Yates partial shuffle (Kotlin `randSubsetC2`): pick `a` unique values from `0..b`.
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let mut rp: Vec<i64> = (0..a_int).collect();
+        let mut map = std::collections::HashMap::new();
+        for i in 0..a_usize {
+            let j = rng.gen_range((b_long - (a_int - i as i64))..b_long);
+            let j_usize = j as usize;
+            if j < a_int {
+                let c = rp[j_usize];
+                rp[j_usize] = rp[i];
+                rp[i] = c;
+            } else {
+                let c = map.get(&j).copied().unwrap_or(j);
+                map.insert(j, rp[i]);
+                rp[i] = c;
+            }
+        }
+        let elements = rp.into_iter().map(|v| Rc::new(APLValue::Number(KapNumber::Long(v)))).collect();
+        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+            vec![a_usize],
+            ArrayData::Nested(elements),
+        )))))
     }
 
     /// Sort `∧ x` (ascending) / `∨ x` (descending). Mirrors Kotlin

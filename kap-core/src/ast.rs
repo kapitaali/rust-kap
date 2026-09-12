@@ -268,6 +268,16 @@ pub enum Instr {
         op: Box<Instr>,
         value: Box<Instr>,
     },
+    /// Dynamic assignment `b dynamicequal expr` (Kotlin `DynamicAssignmentInstruction`,
+    /// dynamic-assign.kt): binds `name` to a thunk re-evaluating `body` on every read.
+    /// A plain `←` overwrites the slot (dropping reactivity); re-entering the same
+    /// thunk while forcing errors `Circular dynamic assignment` (common.kt:156).
+    /// Only single-symbol targets are legal (Kotlin `processDynamicAssignment`).
+    DynAssign {
+        name: String,
+        namespace: Option<String>,
+        body: Box<Instr>,
+    },
     /// A macro *expansion*: splice `body` with `bindings` (var name → already-parsed
     /// `Instr`) defined in a child scope. Faithful port of Kotlin's
     /// `CallWithVarInstruction` (built by `processCustomSyntax`).

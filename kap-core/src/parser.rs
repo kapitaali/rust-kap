@@ -192,6 +192,17 @@ impl<'a> Parser<'a> {
             || (name == "sysparam")
             // P3 `close` (engine.kt:1163, default namespace).
             || (name == "close" && namespace.is_none())
+            // A bare SINGLE-CHAR exported function name is interned in the CORE
+            // namespace by the tokeniser (`initSingleCharFunctionList` +
+            // `charIsSingleCharExported`, engine.kt:563-583), so `⌹ 5 5⍴…` reaches
+            // the standard library's `kap:⌹` even though `⌹` itself is not a native.
+            // Multi-char names are NOT aliased this way: oracle `QR` →
+            // "Variable not assigned: default:QR" while `kap:QR` applies (see
+            // `NamespaceTest.simpleInclude`).
+            || (namespace.is_none()
+                && name.chars().count() == 1
+                && !name.chars().next().map(char::is_alphanumeric).unwrap_or(true)
+                && self.known_functions.iter().any(|n| n == &format!("kap:{}", name)))
             // Namespaced native builtins (`io:print`, `unicode:enc`, …) are resolved at
             // runtime in `eval_apply`; treat them as functions so the parser builds the
             // dyadic `L f R` form (preserving any left operand).
@@ -243,7 +254,19 @@ impl<'a> Parser<'a> {
                             ))
                         // P3 `io:` / `io2:` file + stream natives (engine.kt:361-404,
                         // builtins/io_functions.kt + execprocess.kt).
-                        || (ns == "io" && matches!(base, "read" | "readFile" | "readdir" | "readCsv" | "fromHtmlTable"))
+                        || (ns == "io"
+                            && matches!(
+                                base,
+                                "read" | "readFile"
+                                    | "readdir"
+                                    | "readCsv"
+                                    | "fromHtmlTable"
+                                    | "toHex"
+                                    | "fromHex"
+                                    | "base64Encode"
+                                    | "base64Decode"
+                                    | "encodeUtf8"
+                            ))
                         || (ns == "io2"
                             && matches!(
                                 base,
@@ -1079,6 +1102,28 @@ impl<'a> Parser<'a> {
                     let namespace = namespace.clone();
                     // defsyntax macro triggers keep working under the new path.
                     if namespace.is_none() {
+                        // `b dynamicequal expr` (Kotlin `DynassignToken` in the
+                        // main loop → `processDynamicAssignment(pos, leftArgs)`,
+                        // parser.kt:998, dynamic-assign.kt): the keyword lexes
+                        // as a bare symbol; reserve it before macro lookup so
+                        // it never strands as a value.
+                        if name == "dynamicequal" {
+                            if left_args.len() != 1 {
+                                return Err(self.err("Can only assign to a single variable"));
+                            }
+                            let target = left_args.pop().unwrap();
+                            let (nm, ns) = match target {
+                                Instr::Symbol { name, namespace } => (name, namespace),
+                                _ => return Err(self.err("Dynamic assignment only works for single variables")),
+                            };
+                            self.advance(); // consume `dynamicequal`
+                            let body = self.parse_value_kotlin()?;
+                            return Ok(Instr::DynAssign {
+                                name: nm,
+                                namespace: ns,
+                                body: Box::new(body),
+                            });
+                        }
                         if let Some(m) = self.macro_lookup(&name) {
                             {
                                 self.advance();
@@ -1263,6 +1308,19 @@ impl<'a> Parser<'a> {
                     // Function-shaped USER/namespaced symbol → processFn (:969).
                     self.advance();
                     let fn_instr = Instr::Symbol { name, namespace };
+                    return self.finish_fn_call(fn_instr, &mut left_args, &mut lists);
+                }
+                Token::QuestionMark => {
+                    // `?` roll/deal: function-shaped primitive (Kotlin routes `?` through
+                    // processFn as both monadic roll and dyadic deal). Treat like the
+                    // is_primitive_op branch above — build a `Symbol("?")` and flow
+                    // through `finish_fn_call` so a left operand (dyadic deal) or just
+                    // a right operand (monadic roll) is parsed correctly.
+                    self.advance();
+                    let fn_instr = Instr::Symbol {
+                        name: "?".to_string(),
+                        namespace: None,
+                    };
                     return self.finish_fn_call(fn_instr, &mut left_args, &mut lists);
                 }
                 _ => {
@@ -2683,6 +2741,23 @@ impl<'a> Parser<'a> {
                     }
                     if matches!(n.token, Token::DynassignToken) {
                         return self.parse_fn_assign(&name_tok.token);
+                    }
+                    // `b dynamicequal expr` (Kotlin `DynassignToken`,
+                    // tokeniser.kt:840, dynamic-assign.kt): dynamic assignment.
+                    // The keyword lexes as a bare symbol; reserve it here so it
+                    // never strands as a value. Only single-symbol targets are
+                    // legal (Kotlin `processDynamicAssignment`).
+                    if let Token::Literal(LiteralValue::Symbol { name: kw, namespace: kwns }) = &n.token {
+                        if kw == "dynamicequal" && kwns.is_none() {
+                            self.advance(); // consume `dynamicequal`
+                            let body = self.parse_apply()?;
+                            let (nm, ns) = Self::name_of(&name_tok.token);
+                            return Ok(Instr::DynAssign {
+                                name: nm,
+                                namespace: ns,
+                                body: Box::new(body),
+                            });
+                        }
                     }
                 }
                 // not an assignment; rewind
@@ -7125,7 +7200,38 @@ impl<'a> Parser<'a> {
             return Err(self.err("expected '{' before defsyntax body"));
         }
         self.advance(); // consume the opening `{` (parse_block assumes it is gone)
-        let body = self.parse_block()?;
+        // Kotlin's `processDefsyntaxSub` parses the body with
+        // `parseValueToplevel(CloseFnDef)` — a SINGLE value expression, not a
+        // block of statements. `defsyntaxsub whenInner` has body `cond thenStatement`
+        // (a strand of two symbols); parsing it as a block makes each symbol a
+        // separate statement. `defsyntax` still uses a block body. Use
+        // `parse_expr()` (the legacy expression parser) for the sub-macro body
+        // — `parse_value_kotlin()` breaks immediately on leading newlines
+        // (END_EXPR_TOKEN_LIST check before first skip_newlines), which the
+        // defsyntax body always has.
+        // `defsyntaxsub` body is a SINGLE value expression. `parse_block()` treats
+        // each newline as a statement separator, breaking the strand. Instead, push
+        // `}` as the close token and use `parse_value_kotlin()` which strands
+        // consecutive values into an Array and stops at `}`. After parsing, consume
+        // the closing `}` (parse_value_kotlin stops at close tokens without consuming
+        // them).
+        let body = if is_sub {
+            // `defsyntaxsub` body is a SINGLE value expression. `parse_block()`
+            // treats each newline as a statement separator, breaking the strand.
+            // Use `parse_value_kotlin()` which strands consecutive values into an
+            // Array. Skip leading newlines first, and push `}` as the close token.
+            self.skip_newlines();
+            self.kotlin_close_stack.push(Token::CloseBrace);
+            let result = self.parse_value_kotlin();
+            self.kotlin_close_stack.pop();
+            self.skip_newlines();
+            if matches!(self.peek(), Some(t) if matches!(t.token, Token::CloseBrace)) {
+                self.advance();
+            }
+            result?
+        } else {
+            self.parse_block()?
+        };
         if is_sub {
             Ok(Some(Instr::DefSyntaxSub {
                 name: trigger,
@@ -7752,19 +7858,52 @@ impl<'a> Parser<'a> {
                         Box::new(Instr::NonBoundFn { body: Box::new(body) }),
                     ));
                 }
-                SyntaxRule::Value { var } | SyntaxRule::ExprFunction { var } | SyntaxRule::NExprFunction { var } => {
+                SyntaxRule::Value { var } => {
                     self.skip_newlines();
                     if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenParen)) {
-                        return Err(self.err(&format!("expected '(' in sub :value rule '{}'", var)));
+                        return Err(self.err(&format!("expected '(' for :value rule '{}'", var)));
                     }
                     self.advance();
                     let inner = self.parse_expr()?;
                     self.skip_newlines();
                     if !matches!(self.peek(), Some(t) if matches!(t.token, Token::CloseParen)) {
-                        return Err(self.err(&format!("expected ')' in sub :value rule '{}'", var)));
+                        return Err(self.err(&format!("expected ')' after :value rule '{}'", var)));
                     }
                     self.advance();
                     bindings.push((var.clone(), Box::new(inner)));
+                }
+                SyntaxRule::ExprFunction { var } => {
+                    self.skip_newlines();
+                    if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenParen)) {
+                        return Err(self.err(&format!("expected '(' for :exprfunction rule '{}'", var)));
+                    }
+                    self.advance();
+                    let inner = self.parse_expr()?;
+                    self.skip_newlines();
+                    if !matches!(self.peek(), Some(t) if matches!(t.token, Token::CloseParen)) {
+                        return Err(self.err(&format!("expected ')' after :exprfunction rule '{}'", var)));
+                    }
+                    self.advance();
+                    bindings.push((var.clone(), Box::new(Instr::Lambda {
+                        params: vec![],
+                        body: Box::new(Instr::Block { body: vec![inner] }),
+                    })));
+                }
+                SyntaxRule::NExprFunction { var } => {
+                    // Non-binding function arg: wraps the inner expr in NonBoundFn
+                    // (caller's context). Matches expand_macro's :nexprfunction arm.
+                    self.skip_newlines();
+                    if !matches!(self.peek(), Some(t) if matches!(t.token, Token::OpenParen)) {
+                        return Err(self.err(&format!("expected '(' for :nexprfunction rule '{}'", var)));
+                    }
+                    self.advance();
+                    let inner = self.parse_expr()?;
+                    self.skip_newlines();
+                    if !matches!(self.peek(), Some(t) if matches!(t.token, Token::CloseParen)) {
+                        return Err(self.err(&format!("expected ')' after :nexprfunction rule '{}'", var)));
+                    }
+                    self.advance();
+                    bindings.push((var.clone(), Box::new(Instr::NonBoundFn { body: Box::new(inner) })));
                 }
                 SyntaxRule::String { var } => {
                     self.skip_newlines();

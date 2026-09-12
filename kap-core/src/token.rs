@@ -78,7 +78,10 @@ pub enum Token {
     IncludeIfToken,
     NilToken,    // nil
 
-    // literal-bearing
+    /// `?` — roll / random function (Kotlin `RandomAPLFunction` registered under `"?"`).
+    /// Monadic: `?N` returns a random integer in `[0, N)`, `?0` returns a random double.
+    QuestionMark,
+
     Literal(LiteralValue),
     Error(String),
 }
