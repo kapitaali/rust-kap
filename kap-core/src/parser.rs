@@ -967,6 +967,19 @@ impl<'a> Parser<'a> {
                         // (no right arg inside the parens), processFn CONTINUES with the
                         // tokens after `)` — so `(1↑⍴) 3 4` chains (1↑) then ⍴ via
                         // Chain2, and `(≠⌸) v` derives the operator then applies to v.
+                        // EXCEPT a `ValueOp` group with `op_name == "defer"` (e.g.
+                        // `(foo defer 10)`): `defer` is a native operator that produces
+                        // an ALREADY-APPLIED VALUE (Kotlin `DeferredAPLValue1Arg` extends
+                        // `APLArray`, NOT `APLFunction`), so the group is NOT function-shaped
+                        // and must strand as a left_arg — not feed processFn. Without this,
+                        // `(foo defer 10) (foo defer 20)` builds a Train instead of stranding,
+                        // and `(fn defer v)[i]` dies with "Index dereference without
+                        // argument" (blocks DeferComputationTest simpleLazyEvaluation).
+                        if matches!(&group, Instr::ValueOp { op_name, .. } if op_name == "defer")
+                        {
+                            left_args.push(group);
+                            continue;
+                        }
                         return self.finish_fn_call(group, &mut left_args, &mut lists);
                     }
                     // Value group: this is Kotlin's `FnParseResult`-vs-`Value` fork
