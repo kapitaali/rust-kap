@@ -2126,6 +2126,31 @@ impl<'a> Parser<'a> {
             if left_args.is_empty() {
                 return Ok(fn_instr);
             }
+            // EXCEPT `100 foo defer 10`: a `defer`-ValueOp already consumed the
+            // call's right arg as its operand (`bind_operators_kotlin` parses
+            // `defer v` eagerly). Kotlin instead binds ONLY the operator in
+            // `parseOperator` (`processFn` → `FunctionCall2Arg(derived, ⍺, ⍵)`),
+            // so a non-empty left means a DYADIC deferred call, not a left-bind:
+            // `Apply{ValueOp{foo,defer,10}, ⍺=100}` (the dummy `Empty` right is
+            // never evaluated — the eval arm builds `Apply{func, left, operand}`
+            // and ignores apply-time `right`). Without this,
+            // `(100 foo defer 10)` became `Train[100, ValueOp]` and a following
+            // `[i]` died with "Index dereference without argument" (blocks
+            // DeferComputationTest simpleLazyEvaluation2Arg; oracle: 135).
+            if matches!(&fn_instr, Instr::ValueOp { op_name, .. } if op_name == "defer") {
+                let bound = if left_args.len() == 1 {
+                    left_args.pop().unwrap()
+                } else {
+                    Instr::Array {
+                        elements: std::mem::take(left_args),
+                    }
+                };
+                return Ok(Instr::Apply {
+                    fn_expr: Box::new(fn_instr),
+                    left: Some(Box::new(bound)),
+                    right: Box::new(Instr::Empty),
+                });
+            }
             // makeResultList (:206/:515): a SINGLE left arg passes UNWRAPPED —
             // LeftBind(10, +) binds ⍺=10, NOT ⍺=(10). Several strand.
             let bound = if left_args.len() == 1 {
