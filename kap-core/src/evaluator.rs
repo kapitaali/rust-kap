@@ -5328,13 +5328,35 @@ impl Engine {
                 }
                 let null = Rc::new(APLValue::Null);
                 // Run the main fn (⍵=⍬); capture but don't propagate yet.
+                // A `UserFn` value applies DIRECTLY (Kotlin `fn.makeClosure()`
+                // `.eval1Arg(context, APLNullValue)`): round-tripping through
+                // `apl_to_instr` dies with "cannot use a function as an array
+                // element", which broke both `int:unwindProtect λ{A} λ{B}` and
+                // the stdlib `unwindProtect` macro (its `:function` args arrive
+                // as evaluated UserFn values). Oracle: result 9, out "barfooqwe".
                 let main_res: Result<AplRef<APLValue>, AplError> = {
-                    let fn_instr = self.apl_to_instr(parts[0].as_ref())?;
-                    self.apply_fn_instr(&fn_instr, None, &null, env)
+                    match parts[0].as_ref() {
+                        APLValue::UserFn { params, split, body, env: fenv } => {
+                            let r = Box::new(Instr::Value(null.clone()));
+                            self.apply_user_fn(params, *split, body, &None, &r, env, fenv, None)
+                        }
+                        _ => {
+                            let fn_instr = self.apl_to_instr(parts[0].as_ref())?;
+                            self.apply_fn_instr(&fn_instr, None, &null, env)
+                        }
+                    }
                 };
                 // Handler always runs (⍵=⍬).
-                let handler_instr = self.apl_to_instr(parts[1].as_ref())?;
-                self.apply_fn_instr(&handler_instr, None, &null, env)?;
+                match parts[1].as_ref() {
+                    APLValue::UserFn { params, split, body, env: fenv } => {
+                        let r = Box::new(Instr::Value(null.clone()));
+                        self.apply_user_fn(params, *split, body, &None, &r, env, fenv, None)?;
+                    }
+                    _ => {
+                        let handler_instr = self.apl_to_instr(parts[1].as_ref())?;
+                        self.apply_fn_instr(&handler_instr, None, &null, env)?;
+                    }
+                }
                 main_res
             }
             // `int:throwNative` (dyadic): `Symbol int:throwNative Message` — throw a native
