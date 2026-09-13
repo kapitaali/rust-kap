@@ -2377,6 +2377,16 @@ impl<'a> Parser<'a> {
     /// Train and later fails with "unknown function: x" (the `(2+x)` / io.kap
     /// `code` regression).
     fn nested_right_is_fn_result(&self, r: &Instr) -> bool {
+        // A `defer`-ValueOp is an APPLIED VALUE (Kotlin `DeferredAPLValue`
+        // extends `APLArray`, never `APLFunction`), so it is an InstrParseResult,
+        // not a FnParseResult — it must APPLY as a right arg, never form a
+        // Chain2 train. Without this, `⊣ io:print defer 1 2 3` built
+        // `Train[⊣, ValueOp]` and died with "No arguments specified for
+        // function" (blocks DeferComputationTest deferWithCollapseAndDiscard).
+        // All OTHER ValueOps (⍤⍣⍢proto) are genuine derived functions.
+        if matches!(r, Instr::ValueOp { op_name, .. } if op_name == "defer") {
+            return false;
+        }
         match r {
             Instr::Symbol { name, namespace } => {
                 let qual = namespace

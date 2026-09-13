@@ -3730,6 +3730,17 @@ impl Engine {
         if let Instr::InnerProduct { left_fn, right_fn } = fn_expr {
             return self.apply_inner_product(left_fn, right_fn, left, right, env);
         }
+        // Monadic `⊣` (Kotlin `HideAPLFunction.eval1Arg`): evaluate the arg
+        // WITHOUT forcing, then discard it. A `Deferred` arg (from `defer`)
+        // must NEVER be forced here — forcing would run the deferred call for
+        // its side effects. Oracle: `⊣ io:print 5` prints `5` (eager arg runs
+        // during eval) then yields `⍬`; `⊣ io:print defer 1 2 3` yields `⍬`
+        // with NO output (blocks DeferComputationTest
+        // deferWithCollapseAndDiscard).
+        if name == "⊣" && left.is_none() {
+            let _ = self.eval_instr(right, env)?;
+            return Ok(Rc::new(APLValue::Null));
+        }
         // For dyadic, force left then right; for monadic, only right.
         let right_val = self.eval_instr(right, env)?.force(self)?;
         let left_val = match left {
