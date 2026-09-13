@@ -19974,6 +19974,25 @@ impl Engine {
     /// their exact Kap types, i.e. `compareEqualsTotalOrdering(td=true)` is true. Unlike
     /// `type_equal` (which does plain kind+value equality and collapses `-0.0`/`0.0`),
     /// this routes through `total_cmp(td=true)` so that `¯0.0 ≡ 0.0` is `0` (oracle).
+    /// String-vs-char-array content equality (Kotlin `APLArray.compareEqualsTotalOrdering`,
+    /// types.kt: `APLString` IS an `APLArray`, so String-vs-char-array compares by
+    /// dimensions + pairwise `valueAt`, storage-blind — for every td flag. Oracle:
+    /// `(("A",@y,")") ≡ "(Ay)")` → 1, `((@x @y) ≡ "xy")` → 1, but `(@y ≡ "y")` → 0
+    /// (scalar char vs rank-1 string differ in rank).
+    fn str_chars_equal(s: &str, a: &KapArray) -> bool {
+        let n = s.chars().count();
+        if a.dimensions != vec![n] {
+            return false;
+        }
+        let els = a.elements();
+        if els.len() != n {
+            return false;
+        }
+        s.chars()
+            .zip(els.iter())
+            .all(|(c, e)| matches!(e.as_ref(), APLValue::Char(d) if *d == c))
+    }
+
     fn total_equal(a: &APLValue, b: &APLValue) -> bool {
         match (a, b) {
             (APLValue::Number(x), APLValue::Number(y)) => {
@@ -19981,6 +20000,9 @@ impl Engine {
             }
             (APLValue::Char(x), APLValue::Char(y)) => x == y,
             (APLValue::Str(x), APLValue::Str(y)) => x == y,
+            (APLValue::Str(s), APLValue::Array(x)) | (APLValue::Array(x), APLValue::Str(s)) => {
+                Self::str_chars_equal(s, x)
+            }
             (APLValue::Null, APLValue::Null) => true,
             (APLValue::Nil, APLValue::Nil) => true,
             (APLValue::Symbol { name: n1, namespace: ns1 }, APLValue::Symbol { name: n2, namespace: ns2 }) => {
@@ -20023,6 +20045,9 @@ impl Engine {
             }
             (APLValue::Char(x), APLValue::Char(y)) => x == y,
             (APLValue::Str(x), APLValue::Str(y)) => x == y,
+            (APLValue::Str(s), APLValue::Array(x)) | (APLValue::Array(x), APLValue::Str(s)) => {
+                Self::str_chars_equal(s, x)
+            }
             (APLValue::Null, APLValue::Null) => true,
             (APLValue::Nil, APLValue::Nil) => true,
             (APLValue::Symbol { name: n1, namespace: ns1 }, APLValue::Symbol { name: n2, namespace: ns2 }) => {
@@ -20068,6 +20093,9 @@ impl Engine {
             }
             (APLValue::Char(x), APLValue::Char(y)) => x == y,
             (APLValue::Str(x), APLValue::Str(y)) => x == y,
+            (APLValue::Str(s), APLValue::Array(x)) | (APLValue::Array(x), APLValue::Str(s)) => {
+                Self::str_chars_equal(s, x)
+            }
             (APLValue::Null, APLValue::Null) => true,
             (APLValue::Nil, APLValue::Nil) => true,
             (APLValue::Symbol { name: n1, namespace: ns1 }, APLValue::Symbol { name: n2, namespace: ns2 }) => {
