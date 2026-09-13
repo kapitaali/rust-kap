@@ -219,6 +219,11 @@ fn classify_with_timeout(c: &Case) -> Outcome {
             let src = if (c.file.contains("StandardLibSimpleFunctionsTest")
                 || c.file.contains("Base64EncodingTest")
                 || c.file.contains("StandardLibMathTest")
+                // OutputFormatterTest: four rows use `o3:` (output3.kap) with
+                // withStandardLib=true in Kotlin; without the preload they die
+                // on the missing namespace. Safe now that the `when`-macro
+                // 1-train fix keeps outputFormatter0/1 clean under stdlib.
+                || c.file.contains("OutputFormatterTest")
                 // Per-test stdlib preload (Kotlin runs these with
                 // withStandardLib=true; the extractor drops the flag):
                 // NumbersTest.mathConstants (`math:pi` is stdlib-defined,
