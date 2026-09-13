@@ -1,16 +1,44 @@
 # Known non-conformances — Rust Kap vs Real Kap (Kotlin oracle)
 
-Live register of behavior that does **not** yet match Real Kap, last
-re-baselined at commit `d6372ef` (branch `feature/wheres-extra`). Coverage
-measured by the broad sweep (`conformance/kotlin_tests.jsonl`, 2545 extracted
-Kotlin cases):
-
-```
-ok         : 1774   (parsed + evaluated, value matched when expected known)
-mismatch   :  24    (ran to a value, but WRONG vs Kotlin)
-unsupported: 747    (parse or runtime error — feature not built yet)
-coverage   : 69.7%
-```
+> **STATUS 2026-09-13 — read this first.** The per-feature tables below are a
+> HISTORICAL snapshot frozen at commit `d6372ef` (2545 extracted cases, 1774 ok /
+> 24 mismatch / 747 unsupported = 69.7%). Many rows in them are closed since.
+> The live register for current work is `META-INF/PROGRESS-*.md` — the arc that
+> reached full corpus coverage is `META-INF/PROGRESS-20260913.md`.
+>
+> Current measurement (branch `feature/wheres-extra`, 2026-09-13):
+>
+> ```
+> extracted Kotlin cases : 2987
+> ok                     : 2987   (100.0%)
+> mismatch               :    0
+> unsupported            :    0
+> ```
+>
+> `cargo test --release -p kap-core` → exit 0: 16 test binaries, 198 tests
+> passed, 0 failed. Release is mandatory for the sweep (debug's 10 s per-case
+> `recv_timeout` turns a 12.8 s render into a phantom UNSUPPORTED).
+>
+> Two open limitations the corpus metric does NOT capture — not sweep
+> "non-conformances", but real gaps, do not lose them:
+>
+> 1. **`jvm:jvmMethodCallException` carries a message String, not Kotlin's live
+>    throwable.** Kotlin's tag data is `JvmInstanceValue(originException)`
+>    (jvm-module.kt:67); the port emits the exception text. Handing a live Jvm
+>    value to `xml.kap`'s `handleXmlParseException` raises "cannot use a JVM
+>    value as an array element" and then SIGSEGVs inside the JVM. The throwable's
+>    registry id is already carried on `JThrown`, and `jvm_thrown` in
+>    `evaluator.rs` is where the handover goes. No extracted row exercises this,
+>    so the sweep is green regardless.
+> 2. **Java-side assertions are run-verified only.** Rows whose Kotlin assertion
+>    is Java-side (e.g. `XmlParserTest` asserting `assertIs<Document>` +
+>    `nodeName`) carry `expected: None` in `kotlin_tests.jsonl`: the case proves
+>    the expression RUNS, not that the value is right. Closing that gap is an
+>    extractor change (`tools/extract_kotlin_tests.py`), not an engine change.
+>
+> ---
+>
+> ## HISTORICAL SNAPSHOT — table set frozen at `d6372ef` (2545 cases, 69.7%)
 
 Every "port | oracle" pair below was produced by probing **both** the Rust
 binary (`./target/debug/kap`) and the `kap-jvm-text` oracle in the same
