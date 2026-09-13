@@ -5375,8 +5375,18 @@ impl<'a> Parser<'a> {
             // cannot be verified at parse time (e.g. `toBoolean` in an unexpanded
             // macro body). Kotlin resolves these names at evaluation time.
             Some(Instr::Train { funcs, reverse: false, compose: false })
-        } else if funcs.len() == 1 && Self::is_function_expr(&funcs[0]) {
+        } else if funcs.len() == 1 && self.is_definite_function(&funcs[0]) {
+            // Single DEFINITE function `(foo)`, `(⍞f)`, `(+[2])`: a 1-train
+            // wrapper (callers unwrap lone-symbol trains in value position).
             Some(Instr::Train { funcs, reverse: false, compose: false })
+        } else if funcs.len() == 1 {
+            // Single NON-function `(v)`: a plain value group, NOT a 1-train
+            // (Kotlin makeResultList passes one arg unwrapped). A 1-train
+            // would apply `v` as a function ("unknown function: v") — this
+            // broke userfn-calls `f(v)` in `when` macro `:nexprfunction` args
+            // (the legacy group path, not the Kotlin loop). Return None so the
+            // caller falls back to value parsing.
+            None
         } else if !funcs.is_empty()
             && funcs.iter().all(|f| matches!(f, Instr::Symbol { .. }))
             && !matches!(&funcs[0], Instr::Symbol { name, namespace: None } if Self::is_primitive_op(name))
