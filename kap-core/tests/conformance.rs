@@ -218,7 +218,12 @@ fn classify_with_timeout(c: &Case) -> Outcome {
             // same prepend as the other two suites.
             let src = if (c.file.contains("StandardLibSimpleFunctionsTest")
                 || c.file.contains("Base64EncodingTest")
-                || c.file.contains("StandardLibMathTest"))
+                || c.file.contains("StandardLibMathTest")
+                // Per-test stdlib preload (Kotlin runs these with
+                // withStandardLib=true; the extractor drops the flag):
+                // NumbersTest.mathConstants (`math:pi` is stdlib-defined,
+                // math.kap — the native was removed in c7d6345).
+                || (c.file.contains("NumbersTest") && c.test == "mathConstants"))
                 && !c.expr.trim_start().starts_with("use(")
             {
                 format!("use(\"standard-lib.kap\")\n{}", c.expr)
