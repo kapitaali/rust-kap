@@ -11879,12 +11879,10 @@ impl Engine {
             None => return Err(AplError::runtime(",[axis]: requires two arguments".into())),
         };
         let b = right_val.force(self)?;
-        // Strings: Kotlin errors on axis for two strings (no laminate for chars); mirror.
-        if matches!((a.as_ref(), b.as_ref()), (APLValue::Str(_), APLValue::Str(_))) {
-            return Err(AplError::runtime(
-                ",[axis]: axis catenation is not supported for strings".into(),
-            ));
-        }
+        // Strings ARE rank-1 char arrays (Kotlin `APLString : APLArray`), so
+        // axis catenation over them is ordinary char concatenation — oracle
+        // `"ab" ,[0] "cd"` → `"abcd"`. (An earlier revision wrongly rejected
+        // all (Str,Str) pairs; o3:format's frame assembly needs this.)
         // Resolve the (possibly fractional) axis.
         let (is_laminate, new_axis): (bool, i64) = match axis {
             KapNumber::Long(v) => (false, *v),
