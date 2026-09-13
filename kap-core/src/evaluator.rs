@@ -631,6 +631,18 @@ impl Engine {
         ns: &Option<String>,
         env: &Rc<Environment>,
     ) -> Result<(), AplError> {
+        // `use()`-file loads emulate Kotlin's fresh registry: the port
+        // pre-seeds native quad constants (`⎕A`/`⎕a`/`⎕d`), but the oracle
+        // does NOT have them without the stdlib (fresh `--no-standard-lib`
+        // `⎕A` is "Variable not assigned" and `⎕A ← 5` yields `5`), so a
+        // stdlib file's own `⎕A ← …` definition would spuriously hit the
+        // pre-seed. Bypass the check while a file load is in flight; the
+        // file's own `declare(:const …)` re-establishes constness afterwards,
+        // converging with the oracle (which can never see this conflict —
+        // it has no pre-seed).
+        if !self.include_stack.borrow().is_empty() {
+            return Ok(());
+        }
         // Deferred body execution (`apply_user_fn` / `apply_user_op`): Kotlin
         // checks const ONLY at instruction-BUILD time (`deriveLvalueReader`);
         // runtime `setVar` is unchecked. Skip so `updateableConstValue`
@@ -3857,6 +3869,151 @@ impl Engine {
                 println!("{}", rendered);
                 Ok(right_val)
             }
+            // `feeder:make` / `feeder:put` / `feeder:att` (Kotlin `FeederModule`,
+            // feeder-module.kt + feeder-objs.kt, commonMain — portable). A named
+            // graph of transformer closures: `put` runs the value through the
+            // feeder's transformer, then forwards the result to attached feeders
+            // depth-first in attach order. `put`/`att` yield `⍬`; `make` yields
+            // 1 if a feeder with that name already existed, else 0.
+            "feeder:make" => {
+                if left_val.is_some() {
+                    return Err(AplError::runtime("feeder:make is monadic".into()));
+                }
+                let els = match right_val.as_ref() {
+                    APLValue::Array(a)
+                        if a.dimensions.len() == 1 && a.dimensions[0] == 2 =>
+                    {
+                        a.elements()
+                    }
+                    _ => {
+                        return Err(AplError::runtime(
+                            "feeder:make: Argument must be a 2-element array containing the name and a transformer function".into(),
+                        ))
+                    }
+                };
+                let (nm, ns) = match els[0].as_ref() {
+                    APLValue::Symbol { name, namespace } => (name.clone(), namespace.clone()),
+                    _ => {
+                        return Err(AplError::runtime(
+                            "feeder:make: first element must be a symbol".into(),
+                        ))
+                    }
+                };
+                let func = els[1].force(self)?;
+                if !matches!(func.as_ref(), APLValue::UserFn { .. }) {
+                    return Err(AplError::runtime(
+                        "feeder:make: Second element in argument is not a function".into(),
+                    ));
+                }
+                let key = Self::feeder_key(&nm, &ns);
+                let had = self.feeders.borrow().contains_key(&key);
+                // Re-registering drops existing connections (Kotlin
+                // `registerFeeder` removes connections to outputs the new
+                // feeder also declares — a transformer always declares exactly
+                // `[primary]`, so all of them).
+                self.feeders.borrow_mut().insert(
+                    key,
+                    crate::FeederEntry { func, connections: Vec::new() },
+                );
+                Ok(Rc::new(APLValue::Number(KapNumber::Long(if had {
+                    1
+                } else {
+                    0
+                }))))
+            }
+            "feeder:put" => {
+                let lv = match left_val {
+                    Some(v) => v,
+                    None => return Err(AplError::runtime("feeder:put is dyadic".into())),
+                };
+                let (nm, ns) = match lv.as_ref() {
+                    APLValue::Symbol { name, namespace } => (name.clone(), namespace.clone()),
+                    _ => {
+                        return Err(AplError::runtime(
+                            "feeder:put: left argument must be a feeder name symbol".into(),
+                        ))
+                    }
+                };
+                let key = Self::feeder_key(&nm, &ns);
+                if !self.feeders.borrow().contains_key(&key) {
+                    return Err(AplError::runtime(format!(
+                        "Feeder does not exist: {}",
+                        key
+                    )));
+                }
+                self.feeder_put_value(&key, right_val.clone(), env)?;
+                Ok(Rc::new(APLValue::Null))
+            }
+            "feeder:att" => {
+                if left_val.is_some() {
+                    return Err(AplError::runtime("feeder:att is monadic".into()));
+                }
+                let els = match right_val.as_ref() {
+                    APLValue::Array(a)
+                        if a.dimensions.len() == 1
+                            && (a.dimensions[0] == 2 || a.dimensions[0] == 3) =>
+                    {
+                        a.elements()
+                    }
+                    _ => {
+                        return Err(AplError::runtime(
+                            "feeder:att: Argument must be a 2- or 3-element array".into(),
+                        ))
+                    }
+                };
+                let sym_key =
+                    |v: &AplRef<APLValue>| match v.as_ref() {
+                        APLValue::Symbol { name, namespace } => {
+                            Some(Self::feeder_key(name, namespace))
+                        }
+                        _ => None,
+                    };
+                let src = sym_key(&els[0]).ok_or_else(|| {
+                    AplError::runtime("feeder:att: first element must be a symbol".into())
+                })?;
+                let dest = sym_key(&els[1]).ok_or_else(|| {
+                    AplError::runtime("feeder:att: second element must be a symbol".into())
+                })?;
+                if els.len() == 3 {
+                    // Kotlin reads valueAt(1) — the DESTINATION — as the output
+                    // name (`AttachToFeederFunction`) and requires it to be one
+                    // of the source's outputs (`[primary]`, a keyword-namespace
+                    // symbol a bare `'x` can never equal), so a 3-element
+                    // attach always fails.
+                    return Err(AplError::runtime(format!(
+                        "feeder:att: Failed to attach feeder: Source feeder {} does not contain output {}",
+                        src, dest
+                    )));
+                }
+                {
+                    let feeders = self.feeders.borrow();
+                    if !feeders.contains_key(&src) {
+                        return Err(AplError::runtime(format!(
+                            "feeder:att: Failed to attach feeder: Source feeder not found: {}",
+                            src
+                        )));
+                    }
+                    if !feeders.contains_key(&dest) {
+                        return Err(AplError::runtime(format!(
+                            "feeder:att: Failed to attach feeder: Destination feeder not found: {}",
+                            dest
+                        )));
+                    }
+                    if feeders[&src].connections.contains(&dest) {
+                        return Err(AplError::runtime(format!(
+                            "feeder:att: Failed to attach feeder: already connected: {}",
+                            dest
+                        )));
+                    }
+                }
+                self.feeders
+                    .borrow_mut()
+                    .get_mut(&src)
+                    .unwrap()
+                    .connections
+                    .push(dest);
+                Ok(Rc::new(APLValue::Null))
+            }
             // `io:` / `io2:` file + stream natives (engine.kt:361-404,
             // builtins/io_functions.kt). `io2:` multi-arg calls arrive as
             // `Apply{fn, None, List[args]}` from `⟦…⟧` (Kotlin
@@ -4226,10 +4383,395 @@ impl Engine {
             }
             "jvm:findClass" => {
                 let name = Self::kap_string(&right_val.force(self)?, "jvm:findClass")?;
-                if name == "java.lang.String" {
-                    Ok(Self::jvm_wrap(crate::jvm::JvmValue::ClassRef(name)))
-                } else {
-                    Err(AplError::runtime(format!("Class not found: {}", name)))
+                // Tier-3 (real JVM): validate against the actual classpath, so
+                // an absent class raises Real Kap's own error (oracle:
+                // `findClass: Class not found: …`). Tier-2 (no JVM): stay
+                // nominal — every named class resolves, since there is no
+                // classpath to check against.
+                if let Some(r) = crate::jvmbridge::class_exists(&name) {
+                    match r {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            return Err(AplError::runtime(format!(
+                                "findClass: Class not found: {}",
+                                name
+                            )))
+                        }
+                        Err(e) => return Err(Self::jerr_to_apl(e, "jvm:findClass")),
+                    }
+                }
+                Ok(Self::jvm_wrap(crate::jvm::JvmValue::ClassRef(name)))
+            }
+            // Constructor/method/field BINDING is real reflection when a JVM is
+            // up (so a missing member raises Kotlin's error text and the
+            // parameter/return types are recorded for invocation), and pure
+            // nominal metadata otherwise.
+            "jvm:findConstructor" => {
+                let args = Self::call_args(&right_val.force(self)?);
+                let class = match args.first().map(|a| a.as_ref()) {
+                    Some(APLValue::Jvm(h)) => match &*h.borrow() {
+                        crate::jvm::JvmValue::ClassRef(n) => n.clone(),
+                        _ => {
+                            return Err(AplError::runtime(
+                                "jvm:findConstructor: expected a JVM class".into(),
+                            ))
+                        }
+                    },
+                    _ => {
+                        return Err(AplError::runtime(
+                            "jvm:findConstructor: expected a JVM class".into(),
+                        ))
+                    }
+                };
+                let arg_types = Self::jvm_class_names(&args[1..])?;
+                if let Some(r) = crate::jvmbridge::bind_ctor(&class, &arg_types) {
+                    let sigs = match r {
+                        Ok(b) => b.params,
+                        Err(e) => return Err(Self::jerr_to_apl(e, "jvm:findConstructor")),
+                    };
+                    return Ok(Self::jvm_wrap(crate::jvm::JvmValue::Ctor {
+                        class,
+                        sigs,
+                    }));
+                }
+                Ok(Self::jvm_wrap(crate::jvm::JvmValue::Ctor {
+                    class,
+                    sigs: Vec::new(),
+                }))
+            }
+            "jvm:findMethod" => {
+                let args = Self::call_args(&right_val.force(self)?);
+                if args.len() < 2 {
+                    return Err(AplError::runtime(
+                        "jvm:findMethod: expected (class; name; *argTypes)".into(),
+                    ));
+                }
+                let class = match args[0].as_ref() {
+                    APLValue::Jvm(h) => match &*h.borrow() {
+                        crate::jvm::JvmValue::ClassRef(n) => n.clone(),
+                        _ => {
+                            return Err(AplError::runtime(
+                                "jvm:findMethod: expected a JVM class".into(),
+                            ))
+                        }
+                    },
+                    _ => {
+                        return Err(AplError::runtime(
+                            "jvm:findMethod: expected a JVM class".into(),
+                        ))
+                    }
+                };
+                let name = Self::kap_string(&args[1], "jvm:findMethod")?;
+                let arg_types = Self::jvm_class_names(&args[2..])?;
+                if let Some(r) = crate::jvmbridge::bind_method(&class, &name, &arg_types) {
+                    let b = match r {
+                        Ok(b) => b,
+                        Err(e) => return Err(Self::jerr_to_apl(e, "jvm:findMethod")),
+                    };
+                    return Ok(Self::jvm_wrap(crate::jvm::JvmValue::Method {
+                        class,
+                        name,
+                        sigs: b.params,
+                        ret: b.ret,
+                        is_static: b.is_static,
+                    }));
+                }
+                Ok(Self::jvm_wrap(crate::jvm::JvmValue::Method {
+                    class,
+                    name,
+                    sigs: Vec::new(),
+                    ret: String::new(),
+                    is_static: false,
+                }))
+            }
+            "jvm:findField" => {
+                let args = Self::call_args(&right_val.force(self)?);
+                if args.len() != 2 {
+                    return Err(AplError::runtime(
+                        "jvm:findField: expected (class; name)".into(),
+                    ));
+                }
+                let class = match args[0].as_ref() {
+                    APLValue::Jvm(h) => match &*h.borrow() {
+                        crate::jvm::JvmValue::ClassRef(n) => n.clone(),
+                        _ => {
+                            return Err(AplError::runtime(
+                                "jvm:findField: expected a JVM class".into(),
+                            ))
+                        }
+                    },
+                    _ => {
+                        return Err(AplError::runtime(
+                            "jvm:findField: expected a JVM class".into(),
+                        ))
+                    }
+                };
+                let name = Self::kap_string(&args[1], "jvm:findField")?;
+                if let Some(r) = crate::jvmbridge::bind_field(&class, &name) {
+                    let b = match r {
+                        Ok(b) => b,
+                        Err(e) => return Err(Self::jerr_to_apl(e, "jvm:findField")),
+                    };
+                    return Ok(Self::jvm_wrap(crate::jvm::JvmValue::Field {
+                        class,
+                        name,
+                        ftype: b.ftype,
+                        is_static: b.is_static,
+                    }));
+                }
+                Ok(Self::jvm_wrap(crate::jvm::JvmValue::Field {
+                    class,
+                    name,
+                    ftype: String::new(),
+                    is_static: false,
+                }))
+            }
+            "jvm:createInstance" => {
+                let args = Self::call_args(&right_val.force(self)?);
+                let (class, sigs) = match args.first().map(|a| a.as_ref()) {
+                    Some(APLValue::Jvm(h)) => match &*h.borrow() {
+                        crate::jvm::JvmValue::Ctor { class, sigs } => (class.clone(), sigs.clone()),
+                        _ => {
+                            return Err(AplError::runtime(
+                                "jvm:createInstance: expected a JVM constructor".into(),
+                            ))
+                        }
+                    },
+                    _ => {
+                        return Err(AplError::runtime(
+                            "jvm:createInstance: expected a JVM constructor".into(),
+                        ))
+                    }
+                };
+                if crate::jvmbridge::available() {
+                    let jargs = Self::jvm_args(&args[1..])?;
+                    let r = crate::jvmbridge::create_instance(&class, &sigs, &jargs)
+                        .unwrap_or_else(|| {
+                            Err(crate::jvmbridge::JErr::Message(
+                                "JVM disappeared".to_string(),
+                            ))
+                        });
+                    let v = match r {
+                        Ok(v) => v,
+                        Err(e) => return Err(Self::jerr_to_apl(e, "jvm:createInstance")),
+                    };
+                    return Self::jval_to_kap(v);
+                }
+                Ok(Self::jvm_wrap(crate::jvm::JvmValue::Instance(class)))
+            }
+            "jvm:callMethod" => {
+                let args = Self::call_args(&right_val.force(self)?);
+                if args.len() < 2 {
+                    return Err(AplError::runtime(
+                        "jvm:callMethod: expected (method; instance; *args)".into(),
+                    ));
+                }
+                let (class, name, sigs, ret, is_static) = match args[0].as_ref() {
+                    APLValue::Jvm(h) => match &*h.borrow() {
+                        crate::jvm::JvmValue::Method {
+                            class,
+                            name,
+                            sigs,
+                            ret,
+                            is_static,
+                        } => (
+                            class.clone(),
+                            name.clone(),
+                            sigs.clone(),
+                            ret.clone(),
+                            *is_static,
+                        ),
+                        _ => {
+                            return Err(AplError::runtime(
+                                "jvm:callMethod: expected a JVM method".into(),
+                            ))
+                        }
+                    },
+                    _ => {
+                        return Err(AplError::runtime(
+                            "jvm:callMethod: expected a JVM method".into(),
+                        ))
+                    }
+                };
+                // `null` instance: legal only for a static method (Kotlin
+                // `method.invoke(null, …)`); otherwise Kotlin raises the
+                // "null instance" error.
+                let instance = match args[1].as_ref() {
+                    APLValue::Nil | APLValue::Null => None,
+                    APLValue::Jvm(h) => {
+                        let hv = h.borrow().clone();
+                        match hv {
+                            crate::jvm::JvmValue::Live { id, .. } => Some(id),
+                            // Kotlin `toJava(args[1], method.declaringClass)`:
+                            // `jvm:toJvmString` yields a nominal JVM String that
+                            // has to be materialised as the real object before
+                            // it can serve as the receiver — `xml.kap:78`
+                            // passes `jvm:toJvmString s` to `String.getBytes`.
+                            crate::jvm::JvmValue::Scalar(crate::jvm::JvmScalar::Str(s))
+                                if class == "java.lang.String" =>
+                            {
+                                match crate::jvmbridge::new_string_id(&s) {
+                                    Some(Ok((id, _))) => Some(id),
+                                    Some(Err(e)) => {
+                                        return Err(Self::jerr_to_apl(e, "jvm:callMethod"))
+                                    }
+                                    None => {
+                                        return Err(AplError::runtime(
+                                            "jvm:callMethod: JVM unavailable".into(),
+                                        ))
+                                    }
+                                }
+                            }
+                            other => {
+                                return Err(AplError::runtime(format!(
+                                    "jvm:callMethod: instance is not a live JVM object: {}",
+                                    other.display()
+                                )))
+                            }
+                        }
+                    }
+                    APLValue::Str(s) if class == "java.lang.String" => {
+                        match crate::jvmbridge::new_string_id(s) {
+                            Some(Ok((id, _))) => Some(id),
+                            Some(Err(e)) => return Err(Self::jerr_to_apl(e, "jvm:callMethod")),
+                            None => {
+                                return Err(AplError::runtime(
+                                    "jvm:callMethod: JVM unavailable".into(),
+                                ))
+                            }
+                        }
+                    }
+                    other => {
+                        return Err(AplError::runtime(format!(
+                            "jvm:callMethod: instance is not a JVM object: {}",
+                            other.format_value()
+                        )))
+                    }
+                };
+                if !crate::jvmbridge::available() {
+                    return Err(Self::jvm_call_failed(format!(
+                        "{}.{}",
+                        class, name
+                    )));
+                }
+                let jargs = Self::jvm_args(&args[2..])?;
+                let r = crate::jvmbridge::call_method(
+                    &class, &name, &sigs, &ret, is_static, instance, &jargs,
+                )
+                .unwrap_or_else(|| {
+                    Err(crate::jvmbridge::JErr::Message("JVM disappeared".to_string()))
+                });
+                match r {
+                    Ok(v) => Self::jval_to_kap(v),
+                    Err(e) => Err(Self::jerr_to_apl(e, "jvm:callMethod")),
+                }
+            }
+            "jvm:getField" => {
+                let args = Self::call_args(&right_val.force(self)?);
+                if args.len() != 2 {
+                    return Err(AplError::runtime(
+                        "jvm:getField: expected (field; instance)".into(),
+                    ));
+                }
+                let (class, name, ftype, is_static) = match args[0].as_ref() {
+                    APLValue::Jvm(h) => match &*h.borrow() {
+                        crate::jvm::JvmValue::Field {
+                            class,
+                            name,
+                            ftype,
+                            is_static,
+                        } => (class.clone(), name.clone(), ftype.clone(), *is_static),
+                        _ => {
+                            return Err(AplError::runtime(
+                                "jvm:getField: expected a JVM field".into(),
+                            ))
+                        }
+                    },
+                    _ => {
+                        return Err(AplError::runtime(
+                            "jvm:getField: expected a JVM field".into(),
+                        ))
+                    }
+                };
+                let instance = match args[1].as_ref() {
+                    APLValue::Nil | APLValue::Null => None,
+                    APLValue::Jvm(h) => match &*h.borrow() {
+                        crate::jvm::JvmValue::Live { id, .. } => Some(*id),
+                        other => {
+                            return Err(AplError::runtime(format!(
+                                "jvm:getField: instance is not a live JVM object: {}",
+                                other.display()
+                            )))
+                        }
+                    },
+                    other => {
+                        return Err(AplError::runtime(format!(
+                            "jvm:getField: instance is not a JVM object: {}",
+                            other.format_value()
+                        )))
+                    }
+                };
+                let r = crate::jvmbridge::get_field(&class, &name, &ftype, is_static, instance)
+                    .unwrap_or_else(|| {
+                        Err(crate::jvmbridge::JErr::Message("JVM unavailable".to_string()))
+                    });
+                match r {
+                    // Kotlin's `GetFieldFunction` returns
+                    // `JvmInstanceValue(field.get(obj))` — the RAW JVM value,
+                    // not a Kap conversion (`javaObjToKap` belongs to
+                    // `fromJvm`). Converting here dies on any field whose type
+                    // has no Kap mapping, e.g. `XPathConstants.STRING`
+                    // (`javax.xml.namespace.QName`) at xml.kap:175.
+                    Ok(crate::jvmbridge::JVal::Obj { id, class }) => Ok(Self::jvm_wrap(
+                        crate::jvm::JvmValue::Live { id, class },
+                    )),
+                    Ok(v) => Self::jval_to_kap(v),
+                    Err(e) => Err(Self::jerr_to_apl(e, "jvm:getField")),
+                }
+            }
+            // `jvm:isJvmNull` (Kotlin `IsJvmNullFunction`, jvm-module.kt:551-558):
+            // monadic 1/0 — 1 iff the argument is Kap's `⦻` (nil), else 0. The
+            // bridge represents a Java `null` return/field as exactly that
+            // (`JVal::Null | JVal::Void => APLValue::Nil`), so this is the
+            // Java-null test; xml.kap:131 uses it on `getAttributes()`.
+            "jvm:isJvmNull" => {
+                let v = right_val.force(self)?;
+                let is_nil = matches!(v.as_ref(), APLValue::Nil);
+                Ok(Rc::new(APLValue::Number(KapNumber::Long(is_nil as i64))))
+            }
+            // `jvm:fromJvm` (Kotlin `javaObjToKap`): a live Java value becomes a
+            // plain Kap value. The bridge already converts scalars while
+            // returning them, so live objects are the only remaining case —
+            // their Java class decides (Kotlin's `else` raises
+            // "Unexpected JVM type: …").
+            "jvm:fromJvm" => {
+                let v = right_val.force(self)?;
+                match v.as_ref() {
+                    APLValue::Jvm(h) => match &*h.borrow() {
+                        crate::jvm::JvmValue::Live { id, class } => {
+                            if let Some(r) = crate::jvmbridge::object_to_string(*id) {
+                                return match r {
+                                    // A `java.lang.String` arrives as an object
+                                    // when it came from reflection; prefer the
+                                    // scalar mapping.
+                                    Ok(s) if class == "java.lang.String" => {
+                                        Ok(Rc::new(APLValue::Str(s)))
+                                    }
+                                    Ok(_) => Err(AplError::runtime(format!(
+                                        "Unexpected JVM type: {}",
+                                        class
+                                    ))),
+                                    Err(e) => Err(Self::jerr_to_apl(e, "jvm:fromJvm")),
+                                };
+                            }
+                            Err(AplError::runtime(format!(
+                                "Unexpected JVM type: {}",
+                                class
+                            )))
+                        }
+                        _ => Ok(Self::jvm_scalar_to_kap(v.as_ref())),
+                    },
+                    _ => Ok(Self::jvm_scalar_to_kap(v.as_ref())),
                 }
             }
             // 11c Stage-1 `thread:` locks (thread/lock.kt, thread.kt).
@@ -5105,6 +5647,16 @@ impl Engine {
                                 // The text-mode port has no renderer registry, so return
                                 // Null (the oracle returns the bound renderer function).
                                 Ok(Rc::new(APLValue::Null))
+                            }
+                            "kap:platform" | "default:platform" => {
+                                // Host platform symbol (oracle JVM run: `kap:jvm`;
+                                // linuxTest expects the `kap:linux` core-namespace
+                                // symbol from a native linux build, which is what
+                                // this port is).
+                                Ok(Rc::new(APLValue::Symbol {
+                                    name: "linux".to_string(),
+                                    namespace: Some("kap".to_string()),
+                                }))
                             }
                             other => Err(AplError::runtime(format!(
                                 "sysparam: System parameter not found: :{}",
@@ -6723,8 +7275,14 @@ impl Engine {
                     return;
                 }
             };
-            if kids.len() == dims[0] {
+            if kids.len() == dims[0]
+                && kids.iter().all(|k| Engine::is_structural_row(k, &dims[1..]))
+            {
                 // Nested-row layout: recurse per row with the trailing dims.
+                // The structural test matters: flat-stored nested cells whose
+                // count coincides with `dims[0]` (e.g. one `[2,10]` cell under
+                // dims `[1,1]`) are CELLS, not rows — they fall to the chunk
+                // path below, which keeps them whole.
                 for k in &kids {
                     walk(out, k, &dims[1..]);
                 }
@@ -7161,7 +7719,9 @@ impl Engine {
                 | "jvm:toJvmByte" | "jvm:toJvmChar" | "jvm:toJvmFloat" | "jvm:toJvmDouble"
                 | "jvm:toJvmBoolean" | "jvm:toJvmByteArray" | "jvm:findPrimitiveTypeClass"
                 | "jvm:createArrayInstance" | "jvm:arraySetElement" | "jvm:instanceOf"
-                | "jvm:findClass"
+                | "jvm:findClass" | "jvm:findConstructor" | "jvm:findMethod"
+                | "jvm:createInstance" | "jvm:callMethod"
+                | "jvm:findField" | "jvm:getField" | "jvm:fromJvm" | "jvm:isJvmNull"
                 // 11c Stage-1 `thread:` locks (thread/lock.kt). Core-registered in
                 // Kotlin (engine.kt:507-515, outside the secure blocks), so no
                 // secure gate. `withHeldLock`-as-fn stays unregistered (it is
@@ -7171,6 +7731,9 @@ impl Engine {
                 // D1 cooperative threads (thread/thread.kt, engine.kt:507-515 —
                 // core-registered, outside the secure blocks, so no secure gate).
                 | "thread:makeThread" | "thread:joinThread"
+                // `feeder:` namespace (feeder/feeder-module.kt, commonMain —
+                // core-registered, `allowedInSecureMode`, so no secure gate).
+                | "feeder:make" | "feeder:put" | "feeder:att"
                 // `sql:` module (contrib/sql) + `cm:` Calcite-local
                 // (experimental/calcite-mod). Module capabilities, not
                 // secure-gated (never registered in secure engines at all —
@@ -7212,7 +7775,9 @@ impl Engine {
                 | "jvm:toJvmByte" | "jvm:toJvmChar" | "jvm:toJvmFloat" | "jvm:toJvmDouble"
                 | "jvm:toJvmBoolean" | "jvm:toJvmByteArray" | "jvm:findPrimitiveTypeClass"
                 | "jvm:createArrayInstance" | "jvm:arraySetElement" | "jvm:instanceOf"
-                | "jvm:findClass"
+                | "jvm:findClass" | "jvm:findConstructor" | "jvm:findMethod"
+                | "jvm:createInstance" | "jvm:callMethod"
+                | "jvm:findField" | "jvm:getField" | "jvm:fromJvm" | "jvm:isJvmNull"
         )
     }
 
@@ -8223,6 +8788,254 @@ impl Engine {
     /// Wrap a Tier-1 JVM value (§11a, `jvm.rs`).
     fn jvm_wrap(v: crate::jvm::JvmValue) -> AplRef<APLValue> {
         Rc::new(APLValue::Jvm(crate::jvm::new_jvm(v)))
+    }
+
+    /// The JVM-side class names of a `findMethod`/`findConstructor` tail
+    /// (`Class` objects, Kotlin `ensureJvmInstance<Class<*>>`).
+    fn jvm_class_names(args: &[AplRef<APLValue>]) -> Result<Vec<String>, AplError> {
+        let mut out = Vec::with_capacity(args.len());
+        for a in args {
+            match a.as_ref() {
+                APLValue::Jvm(h) => match &*h.borrow() {
+                    crate::jvm::JvmValue::ClassRef(n) => out.push(n.clone()),
+                    crate::jvm::JvmValue::Class(c) => out.push(match c {
+                        crate::jvm::JvmClass::Prim(p) => p.get_name().to_string(),
+                        crate::jvm::JvmClass::PrimArray(p) => p.array_name().to_string(),
+                        crate::jvm::JvmClass::Void => "void".to_string(),
+                    }),
+                    other => {
+                        return Err(AplError::runtime(format!(
+                            "expected a JVM class, got: {}",
+                            other.display()
+                        )))
+                    }
+                },
+                other => {
+                    return Err(AplError::runtime(format!(
+                        "expected a JVM class, got: {}",
+                        other.format_value()
+                    )))
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Convert Kap arguments into bridge arguments (`toJava`).
+    fn jvm_args(args: &[AplRef<APLValue>]) -> Result<Vec<crate::jvmbridge::JArg>, AplError> {
+        use crate::jvmbridge::JArg;
+        let mut out = Vec::with_capacity(args.len());
+        for a in args {
+            let v = a.as_ref();
+            out.push(match v {
+                APLValue::Nil | APLValue::Null => JArg::Null,
+                APLValue::Str(s) => JArg::Str(s.clone()),
+                APLValue::Char(c) => JArg::Char(*c),
+                APLValue::Number(n) => match n {
+                    KapNumber::Long(i) => JArg::Long(*i),
+                    _ => JArg::Double(n.as_double()),
+                },
+                APLValue::Jvm(h) => match &*h.borrow() {
+                    crate::jvm::JvmValue::Scalar(s) => match s {
+                        crate::jvm::JvmScalar::Bool(b) => JArg::Bool(*b),
+                        crate::jvm::JvmScalar::Byte(b) => JArg::Byte(*b),
+                        crate::jvm::JvmScalar::Short(n) => JArg::Short(*n),
+                        crate::jvm::JvmScalar::Int(n) => JArg::Int(*n),
+                        crate::jvm::JvmScalar::Long(n) => JArg::Long(*n),
+                        crate::jvm::JvmScalar::Float(f) => JArg::Float(*f),
+                        crate::jvm::JvmScalar::Double(d) => JArg::Double(*d),
+                        crate::jvm::JvmScalar::Char(c) => JArg::Char(*c),
+                        crate::jvm::JvmScalar::Str(s) => JArg::Str(s.clone()),
+                        crate::jvm::JvmScalar::Bytes(b) => JArg::Bytes(b.clone()),
+                    },
+                    crate::jvm::JvmValue::Live { id, .. } => JArg::Obj(*id),
+                    other => {
+                        return Err(AplError::runtime(format!(
+                            "cannot pass a JVM descriptor as an argument: {}",
+                            other.display()
+                        )))
+                    }
+                },
+                // A numeric vector: Kotlin's `toJava` converts it to whichever
+                // Java array type the target parameter names, so carry the
+                // numbers and let `build_args` pick (`[B`/`[I`/`[J`/…).
+                APLValue::Array(_) => {
+                    fn collect(v: &APLValue, out: &mut Vec<i64>) -> Result<(), String> {
+                        match v {
+                            APLValue::Number(n) => {
+                                out.push(n.as_long()?);
+                                Ok(())
+                            }
+                            APLValue::Array(arr) => {
+                                for e in arr.elements() {
+                                    collect(e.as_ref(), out)?;
+                                }
+                                Ok(())
+                            }
+                            other => Err(format!("not a number: {}", other.format_value())),
+                        }
+                    }
+                    let mut nums = Vec::new();
+                    if let Err(e) = collect(v, &mut nums) {
+                        return Err(AplError::runtime(format!(
+                            "cannot convert to a Java value: {}",
+                            e
+                        )));
+                    }
+                    JArg::Longs(nums)
+                }
+                other => {
+                    return Err(AplError::runtime(format!(
+                        "cannot convert to a Java value: {}",
+                        other.format_value()
+                    )))
+                }
+            });
+        }
+        Ok(out)
+    }
+
+    /// Convert a bridge result into a Kap value (`javaObjToKap`).
+    fn jval_to_kap(v: crate::jvmbridge::JVal) -> Result<AplRef<APLValue>, AplError> {
+        use crate::jvmbridge::JVal;
+        Ok(match v {
+            // Kotlin `javaObjToKap(null)` → `APLNilValue`; a `void` method's
+            // `null` result arrives the same way.
+            JVal::Null | JVal::Void => Rc::new(APLValue::Nil),
+            JVal::Bool(b) => Rc::new(APLValue::Number(KapNumber::Long(if b { 1 } else { 0 }))),
+            JVal::Byte(n) => Rc::new(APLValue::Number(KapNumber::Long(n as i64))),
+            JVal::Short(n) => Rc::new(APLValue::Number(KapNumber::Long(n as i64))),
+            JVal::Int(n) => Rc::new(APLValue::Number(KapNumber::Long(n as i64))),
+            JVal::Long(n) => Rc::new(APLValue::Number(KapNumber::Long(n))),
+            JVal::Float(f) => Rc::new(APLValue::Number(KapNumber::Double(f as f64))),
+            JVal::Double(d) => Rc::new(APLValue::Number(KapNumber::Double(d))),
+            JVal::Char(c) => Rc::new(APLValue::Char(c)),
+            JVal::Str(s) => Rc::new(APLValue::Str(s)),
+            JVal::Bytes(b) => {
+                let data: Vec<AplRef<APLValue>> = b
+                    .into_iter()
+                    .map(|x| Rc::new(APLValue::Number(KapNumber::Long(x as i64))))
+                    .collect();
+                let n = data.len();
+                Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                    vec![n],
+                    ArrayData::Nested(data),
+                ))))
+            }
+            JVal::Obj { id, class } => Self::jvm_wrap(crate::jvm::JvmValue::Live { id, class }),
+            JVal::Other { class } => {
+                return Err(AplError::runtime(format!(
+                    "Unexpected JVM type: {}",
+                    class
+                )))
+            }
+        })
+    }
+
+    /// A failed JVM method call: Kotlin `JvmFunctionCallException` carries the
+    /// `jvm:jvmMethodCallException` tag, so `catch` on that tag runs its
+    /// handler (`catchException` → `1`).
+    fn jvm_call_failed(detail: String) -> AplError {
+        AplError::Thrown(
+            Rc::new(APLValue::Symbol {
+                name: "jvmMethodCallException".to_string(),
+                namespace: Some("jvm".to_string()),
+            }),
+            Rc::new(APLValue::Str(detail)),
+        )
+    }
+
+    /// A Java exception becomes the catchable `jvm:jvmMethodCallException` tag
+    /// whose data is the ORIGIN THROWABLE ITSELF (`jvm-module.kt:67`:
+    /// `ThrowableTag(APLSymbol(jvmMethodCallExceptionSymbol),
+    /// JvmInstanceValue(originException))`). Handler code such as
+    /// `xml.kap`'s `handleXmlParseException` then calls
+    /// `jvm:callMethod⟦getMessageMethod; ⍺⟧` and
+    /// `jvm:instanceOf⟦⍺; ioExceptionClass⟧` on that value, so the payload
+    /// must be a live JVM object (`t.id`), not a message string.
+    fn jvm_thrown(t: crate::jvmbridge::JThrown, who: &str) -> AplError {
+        let detail = format!(
+            "{}: {}{}",
+            who,
+            t.class,
+            if t.message.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", t.message)
+            }
+        );
+        // The tag data is a message STRING rather than Kotlin's
+        // `JvmInstanceValue(originException)`: the port's catenate/`when` paths
+        // cannot yet carry a `Jvm` value (they raise "cannot use a JVM value as
+        // an array element"), so handing the live throwable to `xml.kap`'s
+        // `handleXmlParseException` (which does `throw "Error reading stream: ",
+        // message`) turns a reportable load error into a crash in the bridge.
+        // The id is kept on `JThrown` so the object-side handover can be
+        // restored once Jvm values flow through catenate.
+        let payload = Rc::new(APLValue::Str(detail));
+        AplError::Thrown(
+            Rc::new(APLValue::Symbol {
+                name: "jvmMethodCallException".to_string(),
+                namespace: Some("jvm".to_string()),
+            }),
+            payload,
+        )
+    }
+
+    /// A bridge error becomes either the catchable Java-exception tag or a
+    /// plain Kap runtime error.
+    fn jerr_to_apl(e: crate::jvmbridge::JErr, who: &str) -> AplError {
+        match e {
+            crate::jvmbridge::JErr::Thrown(t) => Self::jvm_thrown(t, who),
+            crate::jvmbridge::JErr::Message(m) => AplError::runtime(m),
+        }
+    }
+
+    /// `fromJvm` of an already-converted value is the identity (`javaObjToKap`
+    /// over a scalar it maps itself).
+    fn jvm_scalar_to_kap(v: &APLValue) -> AplRef<APLValue> {
+        match v {
+            APLValue::Jvm(h) => match &*h.borrow() {
+                crate::jvm::JvmValue::Scalar(s) => match s {
+                    crate::jvm::JvmScalar::Bool(b) => {
+                        Rc::new(APLValue::Number(KapNumber::Long(if *b { 1 } else { 0 })))
+                    }
+                    crate::jvm::JvmScalar::Byte(n) => {
+                        Rc::new(APLValue::Number(KapNumber::Long(*n as i64)))
+                    }
+                    crate::jvm::JvmScalar::Short(n) => {
+                        Rc::new(APLValue::Number(KapNumber::Long(*n as i64)))
+                    }
+                    crate::jvm::JvmScalar::Int(n) => {
+                        Rc::new(APLValue::Number(KapNumber::Long(*n as i64)))
+                    }
+                    crate::jvm::JvmScalar::Long(n) => {
+                        Rc::new(APLValue::Number(KapNumber::Long(*n)))
+                    }
+                    crate::jvm::JvmScalar::Float(f) => {
+                        Rc::new(APLValue::Number(KapNumber::Double(*f as f64)))
+                    }
+                    crate::jvm::JvmScalar::Double(d) => {
+                        Rc::new(APLValue::Number(KapNumber::Double(*d)))
+                    }
+                    crate::jvm::JvmScalar::Char(c) => Rc::new(APLValue::Char(*c)),
+                    crate::jvm::JvmScalar::Str(s) => Rc::new(APLValue::Str(s.clone())),
+                    crate::jvm::JvmScalar::Bytes(b) => {
+                        let data: Vec<AplRef<APLValue>> = b
+                            .iter()
+                            .map(|x| Rc::new(APLValue::Number(KapNumber::Long(*x as i64))))
+                            .collect();
+                        let n = data.len();
+                        Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                            vec![n],
+                            ArrayData::Nested(data),
+                        ))))
+                    }
+                },
+                _ => Rc::new(v.clone()),
+            },
+            _ => Rc::new(v.clone()),
+        }
     }
 
     /// Kap scalar number (`ensureNumber()`); arrays and non-numbers error.
@@ -13621,25 +14434,21 @@ impl Engine {
                     Some(c) => Ok(Rc::new(APLValue::Char(c))),
                     None => Ok(Rc::new(APLValue::Number(KapNumber::Long(0)))),
                 },
-                APLValue::Array(a) => {
-                    let dims = a.dimensions.clone();
-                    let elems = a.elements();
+                APLValue::Array(_) => {
+                    // Monadic `↑` is flat-first (Kotlin `TakeAPLFunctionImpl`
+                    // .eval1ArgWithProto, drop.kt:13-24): `v.valueAt(0)` — the
+                    // first element, NOT the first major cell. Oracle:
+                    // `↑2 3⍴⍳6` -> scalar `0` (was: first row `(0 1 2)`), and
+                    // `↑` of a `[1,1]` holding a matrix -> the matrix itself
+                    // (unblocks o3 `res ← {top⍪⍵⍪bottom} ↑ …`). `logical_cells`
+                    // abstracts the port's nested-row storage exactly like
+                    // `valueAt` (one level: a nested cell is returned whole).
+                    let elems = self.logical_cells(&v);
                     if elems.is_empty() {
                         // Empty array -> default fill (0).
                         Ok(Rc::new(APLValue::Number(KapNumber::Long(0))))
-                    } else if dims.is_empty() || dims.len() == 1 {
-                        // 0-rank or 1-D: the first element *is* the first cell.
-                        Ok(elems[0].clone())
                     } else {
-                        // Higher rank: the first cell is `product(dims[1..])`
-                        // elements with shape `dims[1..]`.
-                        let cell: usize = dims[1..].iter().product();
-                        let cell_dims = dims[1..].to_vec();
-                        let cell_elems = elems[..cell].to_vec();
-                        Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
-                            cell_dims,
-                            ArrayData::Nested(cell_elems),
-                        )))))
+                        Ok(elems[0].clone())
                     }
                 }
                 _ => Err(AplError::runtime(
@@ -13737,6 +14546,111 @@ impl Engine {
 
     /// Core multi-dimensional take/drop. `take`=true means keep-from-edge
     /// (with padding for oversized positive counts); `take`=false means drop.
+    /// Take/drop on a char vector (Kotlin `Take`/`Drop` over `APLString`).
+    /// Ground rules from the oracle (`--no-standard-lib`):
+    /// - take 0 / drop-everything -> empty generic array, which renders as ⍬,
+    ///   has `typeof` kap:array and `≡⍬` (oracle `0↑"xy"`, `2↓"xy"`).
+    /// - oversize take pads with numeric 0 and degrades to a generic array
+    ///   (`5↑"xy"` -> `[x, y, 0, 0, 0]`, `¯5↑"xy"` -> `[0, 0, 0, x, y]`).
+    /// - any other slice stays `Str` (`1↓"xy"` -> `"y"`).
+    fn take_drop_str(
+        &self,
+        chars: Vec<char>,
+        c: i64,
+        take: bool,
+    ) -> Result<AplRef<APLValue>, AplError> {
+        let n = chars.len();
+        let k = c.unsigned_abs() as usize;
+        // Empty take/drop yields an empty generic array (renders as ⍬,
+        // `typeof` kap:array, `≡⍬`), matching `0↑1 2 3` on the port.
+        let empty = || {
+            Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![0],
+                ArrayData::Long(vec![]),
+            ))))
+        };
+        if take {
+            if k == 0 {
+                return Ok(empty());
+            }
+            if k <= n {
+                let slice: String = if c >= 0 {
+                    chars[..k].iter().collect()
+                } else {
+                    chars[n - k..].iter().collect()
+                };
+                return Ok(Rc::new(APLValue::Str(slice)));
+            }
+            let zero = || Rc::new(APLValue::Number(KapNumber::Long(0)));
+            let mut out: Vec<AplRef<APLValue>> = Vec::with_capacity(k);
+            if c < 0 {
+                out.extend((0..k - n).map(|_| zero()));
+            }
+            out.extend(chars.into_iter().map(|ch| Rc::new(APLValue::Char(ch))));
+            if c >= 0 {
+                out.extend((0..k - n).map(|_| zero()));
+            }
+            Ok(Rc::new(APLValue::Array(Rc::new(KapArray::new(
+                vec![k],
+                ArrayData::Nested(out),
+            )))))
+        } else {
+            let d = n.min(k);
+            let slice: String = if c >= 0 {
+                chars[d..].iter().collect()
+            } else {
+                chars[..n - d].iter().collect()
+            };
+            if slice.is_empty() {
+                Ok(empty())
+            } else {
+                Ok(Rc::new(APLValue::Str(slice)))
+            }
+        }
+    }
+
+    /// Display key for a feeder symbol (Kotlin `Symbol.nameWithNamespace`).
+    fn feeder_key(name: &str, namespace: &Option<String>) -> String {
+        match namespace {
+            Some(ns) => format!("{}:{}", ns, name),
+            None => name.to_string(),
+        }
+    }
+
+    /// Run one feeder push: transformer first, then depth-first forwarding to
+    /// attached feeders in attach order (`TransformerFeeder.putValue`,
+    /// feeder-objs.kt). The transformer is applied as an anonymous call (no
+    /// self-name), like `⍞fn`.
+    fn feeder_put_value(
+        &self,
+        key: &str,
+        val: AplRef<APLValue>,
+        env: &AplRef<Environment>,
+    ) -> Result<(), AplError> {
+        let (func, conns) = {
+            let feeders = self.feeders.borrow();
+            let e = feeders
+                .get(key)
+                .ok_or_else(|| AplError::runtime(format!("Feeder does not exist: {}", key)))?;
+            (e.func.clone(), e.connections.clone())
+        };
+        let res = match func.as_ref() {
+            APLValue::UserFn { params, split, body, env: fenv } => {
+                let right = Box::new(Instr::Value(val));
+                self.apply_user_fn(params, *split, body.as_ref(), &None, &right, env, fenv, None)?
+            }
+            _ => {
+                return Err(AplError::runtime(
+                    "feeder: transformer is not a function".into(),
+                ))
+            }
+        };
+        for c in &conns {
+            self.feeder_put_value(c, res.clone(), env)?;
+        }
+        Ok(())
+    }
+
     fn take_or_drop(
         &self,
         take: bool,
@@ -13879,24 +14793,22 @@ impl Engine {
                 Ok(Rc::new(APLValue::Array(Rc::new(KapArray { dimensions: dims, data: ArrayData::Nested(flat), labels: new_labels.map(Box::new) }))))
             }
             APLValue::Str(s) => {
-                // A string is a rank-1 vector of chars; take/drop slices its characters.
+                // A string is a rank-1 vector of chars; take/drop slices its
+                // characters via `take_drop_str` (oracle: `1↓"xy"` -> "y",
+                // `0↑"xy"`/`2↓"xy"` -> ⍬, `5↑"xy"` -> [x,y,0,0,0]).
                 let chars: Vec<char> = s.chars().collect();
-                let n = chars.len();
-                // Take/drop is monadic (single count) on a vector.
                 let c = counts_ref.first().copied().unwrap_or(0);
-                let (keep, start) = if take {
-                    let k = (c.unsigned_abs() as usize).min(n);
-                    (k, 0)
-                } else {
-                    let drop = (c.unsigned_abs() as usize).min(n);
-                    (n - drop, drop)
-                };
-                let sliced: String = chars[start..start + keep].iter().collect();
-                Ok(Rc::new(APLValue::Str(sliced)))
+                self.take_drop_str(chars, c, take)
             }
-            other => Err(AplError::runtime(
+            APLValue::Char(ch) => {
+                // A char scalar takes/drops exactly like a 1-char string:
+                // `1↑@x` -> "x", `1↓@x` -> ⍬, oversize pads with numeric 0.
+                self.take_drop_str(vec![*ch], counts_ref.first().copied().unwrap_or(0), take)
+            }
+            other => {
+                Err(AplError::runtime(
                 "↑/↓ not implemented for this value type".into(),
-            )),
+            ))},
         }
     }
 
@@ -19815,6 +20727,13 @@ impl Engine {
     /// node, one storage level holding exactly `element_count()` children
     /// means every child is one logical element (stop); fewer children means
     /// a structural split (recurse). An empty node yields nothing.
+    /// COUNT IS NOT ENOUGH when trailing dims are all 1: `[1,1]` row storage
+    /// (`build_nested`, monadic `⍪`) holds one row wrapper for one element,
+    /// indistinguishable by count from one flat cell. So a rank>1 node whose
+    /// children exactly fill `dims[0]` descends ONLY into STRUCTURAL rows
+    /// (child dims == trailing dims); other children are cells, pushed whole
+    /// (o3: `⍴¨⍪…` gave `(1)` — delivered the `[M]` row wrapper instead of
+    /// the `[2,10]` cell M).
     fn flat_cell_ravel(&self, v: &AplRef<APLValue>) -> Vec<AplRef<APLValue>> {
         let rank = v.rank();
         if rank <= 1 {
@@ -19824,7 +20743,15 @@ impl Engine {
             match node.as_ref() {
                 APLValue::Array(a) if a.element_count() > 0 => {
                     let kids = a.elements();
-                    if kids.len() == a.element_count() {
+                    let d = &a.dimensions;
+                    if d.len() > 1
+                        && kids.len() == d[0]
+                        && kids.iter().all(|k| Engine::is_structural_row(k, &d[1..]))
+                    {
+                        for e in &kids {
+                            walk(out, e);
+                        }
+                    } else if kids.len() == a.element_count() {
                         out.extend(kids);
                     } else {
                         for e in &kids {
@@ -19839,6 +20766,13 @@ impl Engine {
         let mut out = Vec::with_capacity(v.element_count());
         walk(&mut out, v);
         out
+    }
+
+    /// A child is a STRUCTURAL row wrapper (port nested-row layout) iff it is
+    /// an `Array` whose dims equal the expected trailing dims. Anything else —
+    /// scalars, strings, or arrays with other dims — is a logical CELL.
+    fn is_structural_row(k: &AplRef<APLValue>, trailing: &[usize]) -> bool {
+        matches!(k.as_ref(), APLValue::Array(a) if a.dimensions == trailing)
     }
 
     /// Deep ravel: flatten `v` to a single flat vector of scalars (rank-0 leaves),

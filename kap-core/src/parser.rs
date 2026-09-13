@@ -299,7 +299,9 @@ impl<'a> Parser<'a> {
                                 | "toJvmByte" | "toJvmChar" | "toJvmFloat" | "toJvmDouble"
                                 | "toJvmBoolean" | "toJvmByteArray" | "findPrimitiveTypeClass"
                                 | "createArrayInstance" | "arraySetElement" | "instanceOf"
-                                | "findClass"))
+                                | "findClass" | "findConstructor" | "findMethod"
+                                | "createInstance" | "callMethod"
+                                | "findField" | "getField" | "fromJvm" | "isJvmNull"))
                         // 11c Stage-1 `thread:` locks (thread/lock.kt: `makeLock`
                         // etc. are fns; `withHeldLock` is a value-right-arg op
                         // like `int:proto`, `withLock` is custom stdlib syntax
@@ -312,6 +314,9 @@ impl<'a> Parser<'a> {
                         // stored outcome. Core-registered, not secure-gated
                         // (engine.kt:507-515).
                         || (ns == "thread" && matches!(base, "makeThread" | "joinThread"))
+                        // `feeder:` namespace (feeder/feeder-module.kt, commonMain):
+                        // make / put / att. Dispatch arms live in `eval_apply`.
+                        || (ns == "feeder" && matches!(base, "make" | "put" | "att"))
                 }
                 None => false,
             }
@@ -339,6 +344,22 @@ impl<'a> Parser<'a> {
             _ => (String::new(), None),
         }
     }
+    /// Kotlin `engine.nameToSymbol` (engine.kt:574-581, via
+    /// `findSymbolInImportsOrIntern`, engine.kt:1003): a symbol literal written
+    /// WITHOUT an explicit namespace is interned into the namespace in effect
+    /// where it is read. So `'getLength` inside `namespace("xml")` denotes
+    /// `xml:getLength` — precisely the symbol that `⍺.xml:getLength`
+    /// dereferences, which is what makes xml.kap's
+    /// `map:with \`'getLength λ{…}` dispatch table resolve. A root-session
+    /// literal lands in `default` (`io:print 'bar` → `default:bar`;
+    /// oracle-verified), and an explicitly qualified `'kap:array` keeps its own
+    /// namespace.
+    fn intern_symbol_ns(&self, namespace: Option<String>) -> Option<String> {
+        match namespace {
+            Some(ns) => Some(ns),
+            None => Some(self.current_ns.clone()),
+        }
+    }
     fn skip_newlines(&mut self) {
         while let Some(t) = self.peek() {
             if matches!(t.token, Token::Newline) {
@@ -347,6 +368,55 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
+    }
+
+    /// Whether one or more `Newline` tokens sit at the cursor. The newline is
+    /// significant inside a parenthesised group (see the `OpenParen` arm of
+    /// `parse_primary`): it separates statements there, exactly like `⋄`.
+    /// (Kotlin: a *file* parsed as one unit treats a newline inside `( … )` as
+    /// a statement separator — `(a ← 1 ⏎ a+1)` is `2` — while the oracle's
+    /// line-oriented REPL cannot express it; the port always parses whole
+    /// inputs, so file semantics are the right ones, and `use("xml.kap")`
+    /// depends on it.)
+    fn newlines_ahead(&self) -> bool {
+        let mut i = self.pos;
+        while matches!(self.toks.get(i).map(|t| &t.token), Some(Token::Newline)) {
+            i += 1;
+        }
+        i != self.pos
+    }
+
+    /// Whether a parenthesised group starting at the cursor contains a
+    /// top-level newline before its matching `)` — i.e. it is written as a
+    /// multi-line statement sequence (file semantics). Scans with bracket
+    /// depth so newlines nested inside `( … )`/`{ … }`/`[ … ]`/`⟦ … ⟧` do not
+    /// count. A top-level `;` disqualifies the group (that form is a list
+    /// literal and keeps its existing parse).
+    fn paren_group_has_top_level_newline(&self) -> bool {
+        let mut depth: i32 = 0;
+        let mut i = self.pos;
+        while let Some(t) = self.toks.get(i) {
+            match t.token {
+                Token::OpenParen
+                | Token::OpenBrace
+                | Token::OpenBracket
+                | Token::FunctionCallOpenParen => depth += 1,
+                Token::CloseBrace | Token::CloseBracket | Token::FunctionCallCloseParen => {
+                    depth -= 1;
+                }
+                Token::CloseParen => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                }
+                Token::ListSeparator if depth == 0 => return false,
+                Token::Newline if depth == 0 => return true,
+                _ => {}
+            }
+            i += 1;
+        }
+        false
     }
 
     fn err(&self, msg: &str) -> AplError {
@@ -872,7 +942,14 @@ impl<'a> Parser<'a> {
                     let (mname, mns) = match self.peek() {
                         Some(t) => match &t.token {
                             Token::Literal(LiteralValue::Symbol { name, namespace }) => {
-                                (name.clone(), namespace.clone())
+                                // Kotlin `tokeniser.nextSymbol()` (tokeniser.kt:499-501)
+                                // = `engine.nameToSymbol(...)`: a bare method name is
+                                // interned into the namespace in effect here, so
+                                // `nodeList⍠getLength` inside `namespace("xml")` looks up
+                                // the `xml:getLength` entry that
+                                // `map:with \`'getLength …` installed.
+                                let ns = self.intern_symbol_ns(namespace.clone());
+                                (name.clone(), ns)
                             }
                             _ => {
                                 return Err(self.err("expected a symbol after ⍠"))
@@ -6196,7 +6273,7 @@ impl<'a> Parser<'a> {
                 // to participate in value-strand left-bind trains. `namespace`
                 // is preserved so it matches `typeof`-returned symbols under `≡`.
                 let name = name.clone();
-                let namespace = namespace.clone();
+                let namespace = self.intern_symbol_ns(namespace.clone());
                 self.advance();
                 Ok(Instr::Literal(LiteralValue::SymbolValue { name, namespace }))
             }
@@ -6221,9 +6298,10 @@ impl<'a> Parser<'a> {
                         let tok = t.token.clone();
                         self.advance();
                         if let Token::Literal(LiteralValue::Symbol { name, namespace }) = tok {
+                            let ns = self.intern_symbol_ns(namespace);
                             Ok(Instr::Literal(LiteralValue::SymbolValue {
                                 name,
-                                namespace,
+                                namespace: ns,
                             }))
                         } else {
                             unreachable!()
@@ -6499,10 +6577,16 @@ impl<'a> Parser<'a> {
             | Instr::ValueOp { .. }
             | Instr::AxisApplied { .. }
             | Instr::OverOp { .. }
-            | Instr::MemberDeref { .. }
             | Instr::MethodCall { .. }
             | Instr::Block { .. }
             | Instr::DynamicRef { .. } => true,
+            // A member dereference (`⍺.x`, `⍵.field`) is a VALUE element:
+            // Kotlin parses each list element with `parseBooleanExpression`
+            // and only a bare `FnParseResult` is rejected (parser.kt:335-348),
+            // so `jvm:callMethod⟦⍺.xml:item; obj; ⍵⟧` is a valid 3-element list
+            // (oracle-accepted; `xml.kap` depends on it). Rejecting it here made
+            // the whole stdlib file fail to load.
+            Instr::MemberDeref { .. } => false,
             _ => false,
         }
     }
@@ -6537,8 +6621,15 @@ impl<'a> Parser<'a> {
                 | Instr::OverOp { .. }
                 // `Obverse` operator `f ⍫ g` (Obverse) is a derived function value.
                 | Instr::Obverse { .. }
-                // `object.member` (MemberDeref) is a function-shaped postfix, like `Index`.
-                | Instr::MemberDeref { .. }
+                // NOTE: `object.member` (MemberDeref) is NOT function-shaped. Kotlin's
+                // `MemberDereferenceInstruction` / `MemberDereferenceNameArgumentInstruction`
+                // extend `Instruction` (lookup.kt:18/57), and
+                // `processMemberDereference` returns a plain
+                // `TokenParseResult.Instr` (parser.kt:1013) — a VALUE operand.
+                // Counting it as a function made `io:print a.b` (and `⊂a.(3)`,
+                // `1+a.(3)`) parse the deref as the atop/Chain2 right argument and then
+                // trip the statement-level bare-function check ("No arguments specified
+                // for function"); the oracle prints the deref's value.
                 // `object⍠name` (MethodCall) is a function-shaped postfix: Kotlin
                 // routes the `MethodCallFunction` descriptor through processFn
                 // (parser.kt:990), so `a⍠m 200` applies monadically.
@@ -6813,7 +6904,7 @@ impl<'a> Parser<'a> {
                 // Pass the symbol value through as an `Instr::SymbolValue`, preserving
                 // its namespace (so a `'kap:array` resolves with the `kap` namespace).
                 let name = name.clone();
-                let namespace = namespace.clone();
+                let namespace = self.intern_symbol_ns(namespace.clone());
                 self.advance();
                 Ok(Instr::SymbolValue { name, namespace })
             }
@@ -6834,9 +6925,10 @@ impl<'a> Parser<'a> {
                         let tok = t.token.clone();
                         self.advance();
                         if let Token::Literal(LiteralValue::Symbol { name, namespace }) = tok {
+                            let ns = self.intern_symbol_ns(namespace);
                             Ok(Instr::Literal(LiteralValue::SymbolValue {
                                 name,
-                                namespace,
+                                namespace: ns,
                             }))
                         } else {
                             unreachable!()
@@ -6911,6 +7003,49 @@ impl<'a> Parser<'a> {
             Token::OpenParen => {
                 self.advance();
                 self.skip_newlines();
+                // A group written across several lines with a top-level newline
+                // is a STATEMENT SEQUENCE under file semantics: `(a ← 1 ⏎ a+1)`
+                // is `2`, `(1 ⏎ 2)` is the scalar `2` (not the vector `1 2`), and
+                // `xml.kap`'s `nodeList ← ( … ⏎ map:with ⏎ … )` depends on it.
+                // Checked FIRST (before the train/function attempts below,
+                // which would otherwise claim e.g. a two-literal group) and
+                // parsed with the Kotlin accumulator loop, where a newline
+                // already ends a statement.
+                if self.paren_group_has_top_level_newline() {
+                    let mut body = Vec::new();
+                    loop {
+                        self.skip_newlines();
+                        match self.peek() {
+                            Some(t) if matches!(t.token, Token::CloseParen) => {
+                                self.advance();
+                                break;
+                            }
+                            Some(t) if matches!(t.token, Token::StatementSeparator) => {
+                                self.advance();
+                                continue;
+                            }
+                            Some(_) => {
+                                let save2 = self.pos;
+                                self.kotlin_close_stack.push(Token::CloseParen);
+                                let res = self.parse_value_kotlin();
+                                self.kotlin_close_stack.pop();
+                                let stmt = match res {
+                                    Ok(s) => s,
+                                    Err(_) => {
+                                        self.pos = save2;
+                                        self.parse_expr()?
+                                    }
+                                };
+                                body.push(stmt);
+                            }
+                            None => return Err(self.err("expected ')' to close group")),
+                        }
+                    }
+                    if body.len() == 1 {
+                        return Ok(body.pop().unwrap());
+                    }
+                    return Ok(Instr::Block { body });
+                }
                 // A parenthesised *sequence of >=2 functions* is a train: `(f g h)`.
                 // Try the value/fn accumulator first (Kotlin inner parseExpr — handles the
                 // value-left-bind-to-fn-chain case, e.g. `(¯1r2 0+2÷⍨≢)`); if it doesn't
@@ -6935,8 +7070,49 @@ impl<'a> Parser<'a> {
                     }
                 }
                 self.pos = save;
+                // A group written across several lines with a top-level newline
+                // is a STATEMENT SEQUENCE under file semantics: `(a ← 1 ⏎ a+1)`
+                // is `2`, `(1 ⏎ 2)` is the scalar `2` (not the vector `1 2`), and
+                // `xml.kap`'s `nodeList ← ( … ⏎ map:with ⏎ … )` depends on it.
+                // Detected up front because `parse_expr` would otherwise strand
+                // across the newline. Handled with the Kotlin accumulator loop
+                // (newline ends a statement there) instead of `parse_expr`.
+                if self.paren_group_has_top_level_newline() {
+                    let mut body = Vec::new();
+                    loop {
+                        self.skip_newlines();
+                        match self.peek() {
+                            Some(t) if matches!(t.token, Token::CloseParen) => {
+                                self.advance();
+                                break;
+                            }
+                            Some(t) if matches!(t.token, Token::StatementSeparator) => {
+                                self.advance();
+                                continue;
+                            }
+                            Some(_) => {
+                                let save2 = self.pos;
+                                self.kotlin_close_stack.push(Token::CloseParen);
+                                let res = self.parse_value_kotlin();
+                                self.kotlin_close_stack.pop();
+                                let stmt = match res {
+                                    Ok(s) => s,
+                                    Err(_) => {
+                                        self.pos = save2;
+                                        self.parse_expr()?
+                                    }
+                                };
+                                body.push(stmt);
+                            }
+                            None => return Err(self.err("expected ')' to close group")),
+                        }
+                    }
+                    if body.len() == 1 {
+                        return Ok(body.pop().unwrap());
+                    }
+                    return Ok(Instr::Block { body });
+                }
                 let e = self.parse_expr()?;
-                self.skip_newlines();
                 // A `;` between operands inside a group is a *list* literal: `(10;20;30)`.
                 // (Kap uses `;` as the list separator in vectors and function argument lists.)
                 // Distinct from a space-stranded array — `typeof (1;2;3)` → `kap:list`.
@@ -6977,6 +7153,8 @@ impl<'a> Parser<'a> {
                         _ => return Err(self.err("expected ')' after '⋄'-separated group")),
                     }
                 }
+                // Newline-separated statements inside the group are handled
+                // above (before `parse_expr`); nothing more to do here.
                 match self.peek() {
                     Some(t) if matches!(t.token, Token::CloseParen) => {
                         self.advance();

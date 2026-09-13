@@ -423,6 +423,78 @@ def check_comparison_rows(body: str):
     return rows
 
 
+def expand_compare_helpers(body: str, expr: str):
+    """Expand CompareTest's helper-parameterised assertions to concrete rows.
+
+    Three tests route through private helpers with `for (value in listOf(..))`
+    values and per-call operator/expectation args, so the naively extracted
+    template (e.g. `${value} ${name} 6 6.0 …`) is uninterpolated Kap. Expand:
+    - `compareFunction("op", arrayOf(n…))` × values → `v op <rest>` rows with
+      the call's own Long-vector expectation (Kap-syntax `(n n …)`).
+    - `testEqualsAndSame("a", "b", e)` → `a OP b` (exp e) + `a NOT-OP b`
+      (exp 1-e), where (OP, NOT-OP) is (`≡`,`≢`) when the body tests
+      `${a}≡${b}`, else (`=`,`≠`).
+    All operators, values and expectations come verbatim from the test
+    source; nothing is invented. Returns [] when the body has no such
+    helpers (caller then falls through to the generic row).
+    """
+    rows = []
+    if '${value}' in expr and '${name}' in expr:
+        lm = re.search(r'for\s*\(\s*value\s+in\s+listOf\s*\(', body)
+        if lm:
+            # String-aware paren scan: values contain parens themselves
+            # (`"(int:asBigint 5)"`), so a naive `[^)]*` would truncate.
+            i, depth, instr, esc = lm.end(), 1, False, False
+            while i < len(body) and depth > 0:
+                c = body[i]
+                if instr:
+                    if esc:
+                        esc = False
+                    elif c == '\\':
+                        esc = True
+                    elif c == '"':
+                        instr = False
+                else:
+                    if c == '"':
+                        instr = True
+                    elif c == '(':
+                        depth += 1
+                    elif c == ')':
+                        depth -= 1
+                i += 1
+            inner = body[lm.end():i - 1]
+            values = [
+                m.group(1).replace('\\"', '"')
+                for m in re.finditer(r'"((?:[^"\\]|\\.)*)"', inner)
+            ]
+            for op_m in re.finditer(
+                r'compareFunction\(\s*"([^"]+)"\s*,\s*arrayOf\(([^)]*)\)', body
+            ):
+                op, arr = op_m.group(1), op_m.group(2)
+                nums = [p.strip() for p in arr.split(',') if p.strip()]
+                if not nums or not all(re.fullmatch(r'[+-]?\d+', p) for p in nums):
+                    continue
+                exp = '(' + ' '.join(nums) + ')'
+                for v in values:
+                    rows.append(
+                        (expr.replace('${value}', v).replace('${name}', op), exp)
+                    )
+        return rows
+    if '${a}' in expr and '${b}' in expr:
+        ops = ('≡', '≢') if '"${a}≡${b}"' in body else ('=', '≠')
+        for m in re.finditer(
+            r'testEqualsAndSame\(\s*"((?:[^"\\]|\\.)*)"\s*,\s*"((?:[^"\\]|\\.)*)"\s*,\s*(\d+)\s*\)',
+            body,
+        ):
+            a = m.group(1).replace('\\"', '"')
+            b = m.group(2).replace('\\"', '"')
+            e = int(m.group(3))
+            rows.append((a + ops[0] + b, str(e)))
+            rows.append((a + ops[1] + b, str(1 - e)))
+        return rows
+    return rows
+
+
 def main():
     records = []
     for root, _dirs, files in os.walk(ARRAY_ROOT):
@@ -454,6 +526,21 @@ def main():
                     })
                 expr = first_expr_in_call(body)
                 if expr is None:
+                    continue
+                # CompareTest helper-parameterised tests (for-in-listOf values
+                # crossed with helper-supplied operators/expectations): emit
+                # the concrete rows and skip the uninterpolated `${…}`
+                # template row below.
+                compare_rows = expand_compare_helpers(body, expr)
+                for cexpr, cexp in compare_rows:
+                    records.append({
+                        'file': os.path.relpath(path, ARRAY_ROOT),
+                        'test': name,
+                        'kind': 'eval',
+                        'expr': cexpr,
+                        'expected': cexp,
+                    })
+                if compare_rows:
                     continue
                 kind = "fails" if detect_fails(body) else "eval"
                 expected = best_effort_expected(body) if kind == "eval" else None

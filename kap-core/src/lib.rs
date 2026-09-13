@@ -28,6 +28,7 @@ pub mod session;
 pub mod stream;
 pub mod time;
 pub mod jvm;
+pub mod jvmbridge;
 pub mod csv;
 pub mod html;
 pub mod sql;
@@ -1352,6 +1353,24 @@ pub struct Engine {
     /// common.kt:156). `force()` inserts the thunk's id before re-evaluating and
     /// removes it after; re-entry errors instead of overflowing the stack.
     pub dyn_active: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<u64>>>,
+    /// Named feeder graph (Kotlin `FeederModule`/`FeederManager`,
+    /// feeder-module.kt + feeder-objs.kt, commonMain — portable, and
+    /// single-threaded here so no `MPLock`). Keyed by the feeder symbol's
+    /// display (`ns:name` or bare `name`).
+    pub feeders: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, FeederEntry>>>,
+}
+
+/// One registered feeder (Kotlin `TransformerFeeder`, feeder-objs.kt): the
+/// transformer closure plus destination feeder keys in attach order (Kotlin's
+/// `connections` list for the single `primary` output).
+#[derive(Debug, Clone)]
+pub struct FeederEntry {
+    /// Transformer closure. The port's `UserFn` already carries its defining
+    /// env (`fenv`), which is what Kotlin's `makeClosure()` captures.
+    pub func: AplRef<APLValue>,
+    /// Attached destination feeder keys, in attach order (depth-first
+    /// forwarding in `putValue`).
+    pub connections: Vec<String>,
 }
 
 impl Engine {

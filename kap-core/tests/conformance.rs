@@ -174,12 +174,18 @@ fn classify_with_timeout(c: &Case) -> Outcome {
             if c.file.ends_with("SecureTest.kt") {
                 engine.set_secure_mode(true);
             }
+            let mut wlib_paths: Vec<String> = Vec::new();
             for candidate in [
                 concat!(env!("CARGO_MANIFEST_DIR"), "/../../array"),
                 concat!(env!("CARGO_MANIFEST_DIR"), "/../array"),
             ] {
-                engine.set_lib_paths(&[candidate]);
+                // Mirror `APLTest.makeEngine`: the module dir AND its
+                // `standard-lib/` subdir are search roots, which is where
+                // `xml.kap` / `math-kap.kap` / `io.kap` live.
+                wlib_paths.push(candidate.to_string());
+                wlib_paths.push(format!("{}/standard-lib", candidate));
             }
+            engine.set_lib_paths(&wlib_paths);
             // H2 (harness-only): Kotlin's `parseAPLExpression(expr, withStandardLib
             // = true)` builds the engine through `makeEngine(standardLib = true)`,
             // which loads `standard-lib.kap`. The extractor drops that flag; the
@@ -262,11 +268,36 @@ fn run_kotlin_conformance() {
     // `standard-lib.kap` includes resolve there. Point the port's `use()` search
     // at the same dirs when present (engine.kt:699 `resolveLibraryFile` joins the
     // full relative name onto each search dir).
+    let mut lib_paths: Vec<String> = Vec::new();
     for candidate in [
         concat!(env!("CARGO_MANIFEST_DIR"), "/../../array"),
         concat!(env!("CARGO_MANIFEST_DIR"), "/../array"),
     ] {
-        engine.set_lib_paths(&[candidate]);
+        // Kotlin's `APLTest.makeEngine` adds BOTH the module dir and its
+        // `standard-lib/` subdir to the library search path; `xml.kap`,
+        // `math-kap.kap` and friends live in the subdir, so `use("xml.kap")`
+        // only resolves once it is on the list.
+        lib_paths.push(candidate.to_string());
+        lib_paths.push(format!("{}/standard-lib", candidate));
+    }
+    engine.set_lib_paths(&lib_paths);
+
+    // Tier-3 JNI: the `jvm:` rows need a real JVM, and the JVM needs to see
+    // Kap's own test fixtures (Kotlin's suite has them on its runtime
+    // classpath; the port must be told where they are). `conformance/
+    // jvm-fixtures/classes` holds behaviour-identical Java equivalents of the
+    // Kotlin fixtures in `array/src/jvmTest/.../jvmmod`. When no JVM is
+    // available at all (no `JAVA_HOME`/libjvm) the bridge reports itself
+    // unavailable and the engine falls back to its nominal, JVM-free behaviour.
+    if std::env::var("KAP_JVM_CLASSPATH").is_err() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("conformance")
+            .join("jvm-fixtures")
+            .join("classes");
+        if fixtures.is_dir() {
+            std::env::set_var("KAP_JVM_CLASSPATH", &fixtures);
+        }
     }
 
     // Silence per-case panic output. Some reference cases trigger engine panics
@@ -1222,8 +1253,13 @@ fn curated_kap_parity() {
     // --- Symbols (Kotlin SymbolTest.kt: ${ns}:${name} rendering + int: builtins) ---
     {
         let symbol_cases: Vec<(&str, &str)> = vec![
-            // A bare `'foo` literal is a symbol value in the default namespace.
-            ("'foo", "foo"),
+            // A bare `'foo` literal is a symbol value interned in the DEFAULT
+            // namespace, and Kotlin renders symbols as `nameWithNamespace`
+            // (`APLSymbol.formatted`, types.kt:1698-1700) — so the display form is
+            // `default:foo`, not `foo`. Oracle (`--no-lineeditor -l`, root
+            // namespace): `io:print 'bar` → `default:bar`, and the same literal
+            // inside `namespace("foo")` → `foo:bar`.
+            ("'foo", "default:foo"),
             // `int:symbolName` returns a 2-element vector [name, namespace] (Kap pair form).
             ("int:symbolName 'foo", "(\"foo\" \"default\")"),
             ("int:symbolName 'abc", "(\"abc\" \"default\")"),

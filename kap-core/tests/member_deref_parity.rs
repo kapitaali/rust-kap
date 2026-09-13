@@ -18,6 +18,9 @@ fn run_case(expr: &str) -> Result<String, String> {
 
 fn format_value(v: &APLValue) -> String {
     match v {
+        // `APLValue::Dynamic` is the DynAssign thunk (a call-by-name closure), not a
+        // data value; this helper only formats data, so render it opaquely.
+        APLValue::Dynamic { .. } => "<dynamic>".to_string(),
         APLValue::Array(a) => {
             if a.dimensions.is_empty() {
                 // rank-0 scalar array — disclose

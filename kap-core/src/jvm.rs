@@ -143,13 +143,44 @@ pub enum JvmScalar {
     Bytes(Vec<u8>),
 }
 
-/// A Tier-1 JVM value (`JvmInstanceValue`).
+/// A Tier-1/Tier-2 JVM value (`JvmInstanceValue`).
 #[derive(Clone, PartialEq, Debug)]
 pub enum JvmValue {
     Scalar(JvmScalar),
     Class(JvmClass),
-    /// Nominal class reference (`findClass`); no methods until Tier 2.
+    /// Nominal class reference (`findClass`, Tier-2 nominal: no classpath
+    /// without a JVM, so every named class resolves).
     ClassRef(String),
+    /// Nominal constructor reference (`findConstructor`). `sigs` holds the
+    /// bound parameter class names (getName form); empty = nominal fallback
+    /// (Tier-2) or no-arg.
+    Ctor { class: String, sigs: Vec<String> },
+    /// Nominal method reference (`findMethod`). `sigs`/`ret` (getName form)
+    /// and `is_static` come from bind-time reflection; all-empty/false =
+    /// nominal fallback (Tier-2).
+    Method {
+        class: String,
+        name: String,
+        sigs: Vec<String>,
+        ret: String,
+        is_static: bool,
+    },
+    /// Nominal field reference (`findField`). `ftype` (getName form) from
+    /// bind-time reflection; empty = nominal fallback.
+    Field {
+        class: String,
+        name: String,
+        ftype: String,
+        /// `Modifier.isStatic` — a static constant is read with
+        /// `GetStatic<Type>Field` and a `null` instance (`field.get(null)`).
+        is_static: bool,
+    },
+    /// Nominal instance (`createInstance`, Tier-2 nominal).
+    Instance(String),
+    /// Live JNI object (Tier-3 real bridge): process-global-ref id plus the
+    /// class name (for display and `instanceof`-style checks). The ref itself
+    /// lives in `jvmbridge`'s registry so the value stays `Clone + PartialEq`.
+    Live { id: u64, class: String },
     /// Emulated primitive array (`createArrayInstance`); mutated in place by
     /// `arraySetElement` through the handle's `RefCell`.
     ObjectArray { elem: JvmPrim, data: Vec<JvmScalar> },
@@ -190,6 +221,11 @@ impl JvmValue {
             JvmValue::Class(JvmClass::PrimArray(p)) => p.array_name().to_string(),
             JvmValue::Class(JvmClass::Void) => "void".to_string(),
             JvmValue::ClassRef(n) => format!("class {}", n),
+            JvmValue::Ctor { class, .. } => format!("constructor {}", class),
+            JvmValue::Method { class, name, .. } => format!("method {}.{}", class, name),
+            JvmValue::Field { class, name, .. } => format!("field {}.{}", class, name),
+            JvmValue::Instance(n) => format!("instance {}", n),
+            JvmValue::Live { class, .. } => format!("instance {}", class),
             JvmValue::ObjectArray { elem, data } => {
                 let desc = elem.array_name();
                 let body = data.iter().map(|s| JvmValue::Scalar(s.clone()).display()).collect::<Vec<_>>().join(" ");
