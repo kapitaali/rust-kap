@@ -344,6 +344,21 @@ def expand_make_functions(exp: str) -> str:
     return exp.replace('${makeFunctions()}', '\n'.join(lines))
 
 
+def expand_val_bindings(exp: str, body: str) -> str:
+    """Substitute `${name}` templates from local `val name = <int>` bindings.
+
+    E.g. EncoderAPLFunctionTest `val n = 300` with expr
+    `"x ← encoder:encode 2 ⋆ ⍳ ${n} ⋄ …"` becomes `⍳ 300`. Only plain
+    integer bindings are substituted; anything else is left for the
+    `${…}` fallthrough below (eval-OK scoring, no expected value).
+    """
+    if '${' not in exp:
+        return exp
+    for m in re.finditer(r'val\s+(\w+)\s*=\s*(\d+)', body):
+        exp = exp.replace('${' + m.group(1) + '}', m.group(2))
+    return exp
+
+
 def best_effort_expected(body: str):
     """Pull a single-line assertSimpleNumber(N, ...) / assert1DArray(arrayOf(...), ...) expectation.
 
@@ -454,6 +469,8 @@ def main():
                     # `${makeFunctions()}` (ComposeTest contrib rows): expand the
                     # Kotlin helper to its runtime output (genuine eval cases).
                     exp = expand_make_functions(exp)
+                    # `val n = 300` integer bindings (Encoder `${n}` rows).
+                    exp = expand_val_bindings(exp, body)
                     # `{GENERIC}` is a test-harness backend marker (APLTest.kt
                     # `parseAndTestWithGeneric` runs the expr twice: with `{GENERIC}`
                     # removed, and replaced by `int:ensureGeneric`). The port has one
