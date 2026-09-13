@@ -325,6 +325,25 @@ def expand_template_loop(expr: str, body: str) -> list:
     return results
 
 
+def expand_make_functions(exp: str) -> str:
+    """Expand the `${makeFunctions()}` Kotlin template (ComposeTest.kt:250-257).
+
+    That private helper builds five `⇐` tracing functions A..E at runtime;
+    the extractor otherwise emits the literal `${makeFunctions()}` placeholder,
+    which is unparsable Kap. The expansion below is the helper's exact runtime
+    output, so the four contribTest rows become genuine eval cases.
+    """
+    if '${makeFunctions()}' not in exp:
+        return exp
+    lines = []
+    for ch in 'ABCDE':
+        lines.append(
+            f'{ch} ⇐ {{ io:print if(isLocallyBound \'⍺) '
+            f'{{ "(",⍺,"{ch}",⍵,")" }} else {{ "({ch}",⍵,")" }} }}'
+        )
+    return exp.replace('${makeFunctions()}', '\n'.join(lines))
+
+
 def best_effort_expected(body: str):
     """Pull a single-line assertSimpleNumber(N, ...) / assert1DArray(arrayOf(...), ...) expectation.
 
@@ -432,6 +451,9 @@ def main():
                 if "parseAPLExpressionWithSpecialRandom(" in body:
                     expected = None
                 for exp in expanded_exprs:
+                    # `${makeFunctions()}` (ComposeTest contrib rows): expand the
+                    # Kotlin helper to its runtime output (genuine eval cases).
+                    exp = expand_make_functions(exp)
                     # `{GENERIC}` is a test-harness backend marker (APLTest.kt
                     # `parseAndTestWithGeneric` runs the expr twice: with `{GENERIC}`
                     # removed, and replaced by `int:ensureGeneric`). The port has one
