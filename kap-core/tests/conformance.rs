@@ -22,6 +22,292 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
+/// JNI verification for the 4 `XmlParserTest` rows that return `JvmInstanceValue`.
+///
+/// The broad sweep previously scored these as run-verified only (`expected: None`;
+/// Kotlin asserts `Document`/`Node` properties via Java). The extractor now
+/// captures those assertions as `expected` (`"foo"`, `"ghi test0"` …), but the
+/// Kap result itself is a `Jvm` live object whose `format_value` is
+/// `"instance com.sun.…"` — not the asserted property. Comparing `format_value`
+/// to `"foo"` would always mismatch. Instead, when the harness sees one of
+/// those 4 tests with a live `Jvm` result, it verifies the *property* via a
+/// small JNI call (mirroring `xml.kap`'s `getNodeName`/`getAttribute` path) and
+/// compares that property string to `expected`.
+fn xml_jvm_verify(test: &str, val: &APLValue, expected: &str) -> bool {
+    // Only handle the 4 Document/Node rows; everything else falls through to
+    // the normal `format_value` path.
+    let is_doc_test = matches!(
+        test,
+        "simpleParseString" | "simpleParseFile" | "testXpathSimpleNodeResult" | "testXpathSimpleNodeListResult"
+    );
+    if !is_doc_test {
+        return false;
+    }
+    // Extract the live id(s) from the Kap value. The Document/Node rows are
+    // either a single `Jvm(Live)` or an array of `Jvm(Live)` (node list).
+    let ids: Vec<u64> = match val {
+        APLValue::Jvm(h) => match &*h.borrow() {
+            kap_core::jvm::JvmValue::Live { id, .. } => vec![*id],
+            other => {
+                eprintln!("xml_jvm_verify: not Live for single: {:?}", other);
+                return false;
+            }
+        },
+        APLValue::Array(a) => {
+            let mut v = Vec::new();
+            for e in a.elements() {
+                if let APLValue::Jvm(h) = e.as_ref() {
+                    if let kap_core::jvm::JvmValue::Live { id, .. } = &*h.borrow() {
+                        v.push(*id);
+                    } else {
+                        eprintln!("xml_jvm_verify: array elem not Live");
+                        return false;
+                    }
+                } else {
+                    eprintln!("xml_jvm_verify: array elem not Jvm: {:?}", e);
+                    return false;
+                }
+            }
+            v
+        }
+        other => {
+            eprintln!("xml_jvm_verify: val not Jvm/Array: {:?}", other);
+            return false;
+        }
+    };
+    if ids.is_empty() {
+        eprintln!("xml_jvm_verify: ids empty");
+        return false;
+    }
+    // Helper: call `org.w3c.dom.Node.getNodeName(): String` on a Live id.
+    fn node_name(id: u64) -> Option<String> {
+        let r = kap_core::jvmbridge::call_method(
+            "org.w3c.dom.Node",
+            "getNodeName",
+            &[],
+            "java.lang.String",
+            false,
+            Some(id),
+            &[],
+        )?;
+        match r {
+            Ok(kap_core::jvmbridge::JVal::Str(s)) => Some(s),
+            Ok(kap_core::jvmbridge::JVal::Obj { id: sid, .. }) => {
+                // Fallback: if the bridge returned an object (String object), try toString
+                kap_core::jvmbridge::object_to_string(sid).and_then(|res| res.ok())
+            }
+            other => {
+                eprintln!("node_name: unexpected JVal {:?}", other);
+                None
+            }
+        }
+    }
+    // Helper: Document → first element's nodeName ("foo").
+    fn doc_first_child_name(doc_id: u64) -> Option<String> {
+        // Node.getChildNodes(): NodeList
+        let nl = kap_core::jvmbridge::call_method(
+            "org.w3c.dom.Node",
+            "getChildNodes",
+            &[],
+            "org.w3c.dom.NodeList",
+            false,
+            Some(doc_id),
+            &[],
+        )?;
+        let nl_ok = match nl {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("doc_first_child_name: getChildNodes err {:?}", e);
+                return None;
+            }
+        };
+        let nl_id = match nl_ok {
+            kap_core::jvmbridge::JVal::Obj { id, .. } => id,
+            other => {
+                eprintln!("doc_first_child_name: getChildNodes not Obj {:?}", other);
+                return None;
+            }
+        };
+        // NodeList.item(int): Node
+        let node = kap_core::jvmbridge::call_method(
+            "org.w3c.dom.NodeList",
+            "item",
+            &["int".to_string()],
+            "org.w3c.dom.Node",
+            false,
+            Some(nl_id),
+            &[kap_core::jvmbridge::JArg::Int(0)],
+        )?;
+        let node_ok = match node {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("doc_first_child_name: item err {:?}", e);
+                return None;
+            }
+        };
+        let node_id = match node_ok {
+            kap_core::jvmbridge::JVal::Obj { id, .. } => id,
+            other => {
+                eprintln!("doc_first_child_name: item not Obj {:?}", other);
+                return None;
+            }
+        };
+        node_name(node_id)
+    }
+    // Helper: Node → attribute "a" value via NamedNodeMap.
+    fn attr_a_value(node_id: u64) -> Option<String> {
+        // Node.getAttributes(): NamedNodeMap
+        let map = kap_core::jvmbridge::call_method(
+            "org.w3c.dom.Node",
+            "getAttributes",
+            &[],
+            "org.w3c.dom.NamedNodeMap",
+            false,
+            Some(node_id),
+            &[],
+        )?;
+        let map_ok = match map {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("attr_a_value: getAttributes err {:?}", e);
+                return None;
+            }
+        };
+        let map_id = match map_ok {
+            kap_core::jvmbridge::JVal::Obj { id, .. } => id,
+            kap_core::jvmbridge::JVal::Null => {
+                eprintln!("attr_a_value: getAttributes null");
+                return None;
+            }
+            other => {
+                eprintln!("attr_a_value: getAttributes not Obj {:?}", other);
+                return None;
+            }
+        };
+        // NamedNodeMap.getNamedItem(String): Node
+        let item = kap_core::jvmbridge::call_method(
+            "org.w3c.dom.NamedNodeMap",
+            "getNamedItem",
+            &["java.lang.String".to_string()],
+            "org.w3c.dom.Node",
+            false,
+            Some(map_id),
+            &[kap_core::jvmbridge::JArg::Str("a".to_string())],
+        )?;
+        let item_ok = match item {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("attr_a_value: getNamedItem err {:?}", e);
+                return None;
+            }
+        };
+        let item_id = match item_ok {
+            kap_core::jvmbridge::JVal::Obj { id, .. } => id,
+            other => {
+                eprintln!("attr_a_value: getNamedItem not Obj {:?}", other);
+                return None;
+            }
+        };
+        // Node.getNodeValue(): String
+        let v = kap_core::jvmbridge::call_method(
+            "org.w3c.dom.Node",
+            "getNodeValue",
+            &[],
+            "java.lang.String",
+            false,
+            Some(item_id),
+            &[],
+        )?;
+        let v_ok = match v {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("attr_a_value: getNodeValue err {:?}", e);
+                return None;
+            }
+        };
+        match v_ok {
+            kap_core::jvmbridge::JVal::Str(s) => Some(s),
+            kap_core::jvmbridge::JVal::Obj { id: sid, .. } => {
+                kap_core::jvmbridge::object_to_string(sid).and_then(|res| res.ok())
+            }
+            other => {
+                eprintln!("attr_a_value: getNodeValue not Str {:?}", other);
+                None
+            }
+        }
+    }
+
+    let got = match test {
+        "simpleParseString" | "simpleParseFile" => match doc_first_child_name(ids[0]) {
+            Some(s) => s,
+            None => {
+                eprintln!("xml_jvm_verify: doc_first_child_name failed for {}", test);
+                return false;
+            }
+        },
+        "testXpathSimpleNodeResult" => {
+            // Single Node: "ghi test0"
+            let nm = match node_name(ids[0]) {
+                Some(s) => s,
+                None => {
+                    eprintln!("xml_jvm_verify: node_name failed");
+                    return false;
+                }
+            };
+            let av = match attr_a_value(ids[0]) {
+                Some(s) => s,
+                None => {
+                    eprintln!("xml_jvm_verify: attr_a_value failed");
+                    return false;
+                }
+            };
+            format!("{} {}", nm, av)
+        }
+        "testXpathSimpleNodeListResult" => {
+            // Two Nodes: "ghi test0 ghi test1"
+            if ids.len() != 2 {
+                eprintln!("xml_jvm_verify: list len !=2 {}", ids.len());
+                return false;
+            }
+            let nm0 = match node_name(ids[0]) {
+                Some(s) => s,
+                None => {
+                    eprintln!("xml_jvm_verify: node_name 0 failed");
+                    return false;
+                }
+            };
+            let av0 = match attr_a_value(ids[0]) {
+                Some(s) => s,
+                None => {
+                    eprintln!("xml_jvm_verify: attr 0 failed");
+                    return false;
+                }
+            };
+            let nm1 = match node_name(ids[1]) {
+                Some(s) => s,
+                None => {
+                    eprintln!("xml_jvm_verify: node_name 1 failed");
+                    return false;
+                }
+            };
+            let av1 = match attr_a_value(ids[1]) {
+                Some(s) => s,
+                None => {
+                    eprintln!("xml_jvm_verify: attr 1 failed");
+                    return false;
+                }
+            };
+            format!("{} {} {} {}", nm0, av0, nm1, av1)
+        }
+        _ => return false,
+    };
+    let ok = got == expected;
+    if !ok {
+        eprintln!("xml_jvm_verify: mismatch test={} got={:?} expected={:?}", test, got, expected);
+    }
+    ok
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Outcome {
     /// Parsed + evaluated, and (if `expected` was known) matched it.
@@ -95,6 +381,37 @@ fn value_has_suspended(v: &APLValue) -> bool {
 }
 
 fn classify_str(engine: &Engine, src: &str, c: &Case) -> Outcome {
+    // XmlParserTest JNI rows: the Kap result is a live `Jvm` object whose
+    // `format_value` is "instance …" — the Kotlin assertion is on the *property*
+    // (nodeName/attribute), not the object's display. The extractor now captures
+    // that property as `expected` ("foo", "ghi test0" …), so the harness must
+    // verify the property via JNI, not via `format_value` equality. Handle those
+    // 4 rows upfront, before the generic `format_value` path, so we only evaluate
+    // once and keep the live `APLValue` for JNI.
+    if c.file.contains("XmlParserTest") && c.expected.is_some() {
+        let t = c.test.as_str();
+        if matches!(
+            t,
+            "simpleParseString" | "simpleParseFile" | "testXpathSimpleNodeResult" | "testXpathSimpleNodeListResult"
+        ) {
+            let val_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                engine.eval_string(src).and_then(|v| v.force(engine))
+            }));
+            match val_res {
+                Ok(Ok(val)) => {
+                    let exp = c.expected.as_ref().unwrap();
+                    if xml_jvm_verify(t, &val, exp) {
+                        return Outcome::Ok;
+                    } else {
+                        return Outcome::Mismatch;
+                    }
+                }
+                Ok(Err(_)) | Err(_) => {
+                    return Outcome::Unsupported;
+                }
+            }
+        }
+    }
     // Guard against engine panics (e.g. unchecked indexing in builtins): a crash is
     // treated as "unsupported", never an abort of the whole suite.
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

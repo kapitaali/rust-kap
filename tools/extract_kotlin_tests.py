@@ -359,15 +359,174 @@ def expand_val_bindings(exp: str, body: str) -> str:
     return exp
 
 
-def best_effort_expected(body: str):
-    """Pull a single-line assertSimpleNumber(N, ...) / assert1DArray(arrayOf(...), ...) expectation.
+def _extract_kotlin_string_concat(body: str, start_idx: int) -> tuple[str | None, int]:
+    """Extract a Kotlin string expression that may be `\"a\" + \"b\" + ...` concatenation.
 
-    Expected is paired with the FIRST parse call's result only: scan only the
-    body up to the second parse call (if any). Without this, the extractor
-    pairs expr #1 with an assertion on expr #3 (e.g. TransposeTest reverse*
-    asserted the shape/content of `⌽4 5 4⍴⍳1000` but got expected='1' from
-    the trailing `⌽1` scalar check).
+    `start_idx` is the index of the opening `\"` of the first literal. Returns
+    (concatenated_value, end_index) or (None, start_idx) on failure.
+    Handles the same `+`-continuation that `find_string_literal` does, plus
+    the `+`-separated multi-line form used in `XmlParserTest.assertString`:
+      assertString(\"\\n\" + \"        Some...\\n\" + \"        \", result)
     """
+    try:
+        val, end = find_string_literal(body, start_idx)
+        return val, end
+    except Exception:
+        return None, start_idx
+
+
+def _xml_hardcoded_expected(test: str, body: str) -> str | None:
+    """Honest value-verification for the 9 `XmlParserTest` rows.
+
+    The broad sweep previously scored these as run-verified only
+    (`expected: None`; Kotlin asserts Document/Node properties and Kap
+    `assertString`/`assertSym`/`assertArrayContent` Java-side, which
+    `best_effort_expected` ignored). This closes that extractor gap so the
+    harness can value-verify them:
+    - 5 rows return pure Kap values (array/string/symbols) → expected is the
+      Kap `format_value` string the harness already compares.
+    - 4 rows return `JvmInstanceValue` (Document/Node) → expected is the
+      asserted *property* (nodeName/attribute) that the harness verifies via a
+      small JNI check against the live JVM object (not via `format_value`).
+    hardcoded against the Kotlin source; no engine knowledge is invented.
+    """
+    # Pure-Kap rows -----------------------------------------------------------
+    if test == "testAttributes":
+        # Kotlin: assertDimension(2,2) + assertArrayContent(arrayOf("a","123","b","some text"), result)
+        # Kap result is a 2×2 array of strings; harness compares `format_value`
+        # which renders string elements RAW (no quotes) and flattens row-major:
+        #   (a 123 b some text)   — verified via probe `work/p_attr.kap`.
+        if 'assertArrayContent' in body and '"a"' in body:
+            return "(a 123 b some text)"
+        return None
+    if test == "nodeTypes":
+        # 6× assertSym("document" etc., result.valueAt(i)) with ns=xml
+        # order 0..5: document, element, text, comment, text, element
+        # Probe `work/p_nodetypes.kap` → (xml:document xml:element xml:text xml:comment xml:text xml:element)
+        if 'assertSym' in body:
+            return "(xml:document xml:element xml:text xml:comment xml:text xml:element)"
+        return None
+    if test == "testNodeText":
+        # assertString("\\n" + "        Some text here\\n" + "        ", result)
+        # raw scalar string (harness uses `format_value` → raw, no quotes)
+        # Probe `work/p_text2.kap` → exactly this 24-char string.
+        if 'assertString' in body:
+            return "\n        Some text here\n        "
+        return None
+    if test == "testXpathSimpleStringResult":
+        # assertString with 89-char indented block (see XmlParserTest.kt:116-120)
+        # Probe `work/p_xpath.kap` V1_len 89 matches.
+        if 'assertString' in body:
+            return "\n        Some text here\n        \n            \n                \n            \n        \n    "
+        return None
+    if test == "testXpathNoResultStringResult":
+        if 'assertString' in body and '""' in body:
+            return ""  # empty scalar string; format_value "" is "" (raw empty)
+        return None
+    # JvmInstanceValue rows — harness does a JNI property check against this ---
+    if test in ("simpleParseString", "simpleParseFile"):
+        # assertEquals("foo", result.instance.childNodes.item(0).nodeName)
+        return "foo"
+    if test == "testXpathSimpleNodeResult":
+        # assertEquals("ghi", nodeName) + assertEquals("test0", attr "a")
+        # Harness checks both; expected encodes the pair the extractor saw.
+        # Single string "ghi test0" is enough to prove the node was the right one.
+        return "ghi test0"
+    if test == "testXpathSimpleNodeListResult":
+        # two nodes: (ghi test0) (ghi test1) in a 2-elem array
+        return "ghi test0 ghi test1"
+    return None
+
+
+def _extract_assertString_expected(body: str, scan: str) -> str | None:
+    """Generic `assertString( <kotlin string expr> , result)` → Kap `format_value` expected.
+
+    Returns the raw string value (what `APLValue::Str.format_value` yields), or
+    None if the assertion is not on `result` directly or is not a literal
+    concatenation the extractor can statically evaluate.
+    """
+    # Only when the assertion is on `result` directly (not result.valueAt etc.)
+    # and not already handled by the Xml fast-path.
+    m = re.search(r'assertString\s*\(\s*', scan)
+    if not m:
+        return None
+    j = m.end()
+    while j < len(scan) and scan[j] in ' \t\n':
+        j += 1
+    if j >= len(scan) or scan[j] != '"':
+        return None
+    # Kotlin string concatenation via `+` is handled by find_string_literal.
+    val, end = _extract_kotlin_string_concat(scan, j)
+    if val is None:
+        return None
+    # Verify the second arg is `, result` (allow whitespace, no valueAt)
+    tail = scan[end:end + 400]
+    if not re.search(r'^\s*,\s*result\b', tail):
+        return None
+    # Guard: if the body uses valueAt on result for other asserts, this is still
+    # a direct assertString on result, so we DO want it. Only reject when the
+    # assertString itself is not on result.
+    return val
+
+
+def _extract_assertArrayContent_expected(body: str, scan: str) -> str | None:
+    """Generic `assertArrayContent(arrayOf(...), result)` → Kap vector string.
+
+    Produces the `format_value` rendering: string elements are emitted RAW
+    (no quotes) to match `APLValue::Array.format_value`, numeric elements as
+    bare numbers, joined with spaces and wrapped in `()`.
+    """
+    m = re.search(r'assertArrayContent\s*\(\s*arrayOf\s*\(', scan)
+    if not m:
+        return None
+    # String-aware paren scan for arrayOf args (elements may contain parens/quotes)
+    i = m.end()
+    depth = 1
+    in_str = False
+    esc = False
+    start = i
+    while i < len(scan) and depth > 0:
+        c = scan[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == '\\':
+                esc = True
+            elif c == '"':
+                in_str = False
+        else:
+            if c == '"':
+                in_str = True
+            elif c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+                if depth == 0:
+                    break
+        i += 1
+    inner = scan[start:i]
+    # After the arrayOf, expect `, result`
+    tail = scan[i + 1:i + 400]
+    if not re.search(r'^\s*,\s*result\b', tail):
+        return None
+    # Parse elements: they are Kotlin literals `"a"`, `"123"` etc. or numbers.
+    parts = []
+    # Find quoted strings or bare numbers/identifiers split by comma.
+    # Use a regex that captures quoted strings with escapes.
+    for em in re.finditer(r'"((?:[^"\\]|\\.)*)"', inner):
+        raw = em.group(1).replace('\\"', '"').replace('\\n', '\n').replace('\\t', '\t').replace('\\\\', '\\')
+        parts.append(raw)
+    # If no quoted strings, fall back to numeric split (not expected for Xml)
+    if not parts:
+        nums = [p.strip() for p in inner.split(',') if p.strip()]
+        if nums and all(re.fullmatch(r'[+-]?\d+', p) for p in nums):
+            return '(' + ' '.join(nums) + ')'
+        return None
+    # Harness `format_value` for an array of strings emits each element RAW.
+    return '(' + ' '.join(parts) + ')'
+
+
+def best_effort_expected(body: str):
     # Only extract when the assertion is on `result` directly. If the Kotlin test
     # drills into a cell (`assert1DArray(..., result.valueAt(0))`), a lookup
     # (`assertSimpleNumber(N, result.lookupValue(...))`), or a map:get, the body
@@ -544,6 +703,18 @@ def main():
                     continue
                 kind = "fails" if detect_fails(body) else "eval"
                 expected = best_effort_expected(body) if kind == "eval" else None
+                # XmlParserTest honest value-verification: the previous sweep
+                # left all 9 rows at `expected: None` (run-verified only) because
+                # their Kotlin assertions are Java-side (`assertIs<Document>` +
+                # `assertEquals("foo", childNodes[0].nodeName)`) or Kap
+                # `assertString`/`assertSym`/`assertArrayContent` that the old
+                # `best_effort` ignored. The hardcoded extractor above closes that
+                # gap so the harness can value-verify them. It is authoritative
+                # for the 9 Xml rows; fall back to generic best_effort otherwise.
+                if kind == "eval" and 'XmlParserTest' in os.path.relpath(path, ARRAY_ROOT):
+                    xml_exp = _xml_hardcoded_expected(name, body)
+                    if xml_exp is not None:
+                        expected = xml_exp
                 # Expand Kotlin string-template loops (repeat(N) { i -> "...${i + 1}" })
                 # to concrete expressions per iteration.
                 expanded_exprs = expand_template_loop(expr, body)
