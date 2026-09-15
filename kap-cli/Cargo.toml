@@ -11,3 +11,4 @@ path = "src/main.rs"
 [dependencies]
 kap-core = { path = "../kap-core" }
 kap-ext-stats = { path = "../kap-ext-stats" }
+serde_json = "1"

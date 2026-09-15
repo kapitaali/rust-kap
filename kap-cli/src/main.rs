@@ -12,6 +12,8 @@ use std::io::{self, BufRead, Write};
 use kap_core::session::Session;
 use kap_core::AplError;
 
+mod ride;
+
 // Ensure `kap-ext-stats` (and any other `kap-ext-*` crate) is linked so its
 // `inventory::submit!` statics are collected by `kap_core::native::NativeReg`.
 // Without a direct reference Cargo may dead-code-eliminate the whole crate.
@@ -20,6 +22,15 @@ use kap_ext_stats as _;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+
+    // --- early RIDE flags (must be detected before normal arg loop) ---
+    let ride = args.iter().any(|a| a == "--ride");
+    let serve_port: Option<u16> = args
+        .iter()
+        .position(|a| a == "--serve")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|p| p.parse::<u16>().ok());
+
     let session = Session::new();
 
     // Parse `--lib-path=PATH` / `-p PATH` (the port analog of kap-jvm-text's
@@ -84,6 +95,23 @@ fn main() {
     // user code so `⎕A`, `when`, `split`, … are pre-defined. A failed load is
     // non-fatal for the REPL but reported on stderr.
     let no_stdlib = args.iter().any(|a| a == "--no-standard-lib");
+    let conform = session.is_conform_display();
+
+    // RIDE gateway modes — take precedence over file/REPL.
+    if ride {
+        // In --ride mode the standard library is loaded inside ride::ride_mode
+        // per-connection, so we don't need to load it here. But we keep the
+        // lib_paths/conform/no_stdlib for that path.
+        ride::ride_mode(lib_paths.clone(), no_stdlib, conform);
+        return;
+    }
+    if args.iter().any(|a| a == "--serve") {
+        // --serve [port] — default 4502 (RIDE default) if no port given.
+        let port = serve_port.unwrap_or(4502);
+        ride::serve_mode(port, lib_paths.clone(), no_stdlib, conform);
+        return;
+    }
+
     if !no_stdlib {
         if let Err(e) = session.load_standard_lib() {
             eprintln!("warning: standard library failed to load: {}", e);
