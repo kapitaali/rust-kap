@@ -11,5 +11,8 @@
 .DS_Store
 *.swp
 
+# Internal progress docs — not part of the conformant release
+/META-INF/
+
 # Local planning doc (untracked for now)
 /20260910_RENEWED_ARCHITECTURE.md
