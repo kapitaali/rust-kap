@@ -3766,6 +3766,29 @@ impl Engine {
         if self.secure_mode.get() && Self::is_secure_gated(&name) {
             return Err(AplError::runtime(format!("Variable not assigned: {}", name)));
         }
+        // Native registry — `kap-ext-*` crates + in-tree `native/` modules.
+        // Checked before the legacy giant match; this is the new dispatch path.
+        // The registry is the single source of truth (inventory at Engine::new()).
+        if let Some(native_name) = {
+            let map = self.natives.borrow();
+            map.get(name.as_str()).map(|n| (n.name().to_string(), n.secure_ok()))
+        } {
+            let (reg_name, secure_ok) = native_name;
+            if self.secure_mode.get() && !secure_ok {
+                return Err(AplError::runtime(format!("Variable not assigned: {}", name)));
+            }
+            // Re-borrow to get the trait object for the call (avoid holding borrow across call).
+            let args = match left_val {
+                Some(lv) => crate::native::Args::Dyad(lv, right_val),
+                None => crate::native::Args::Monad(right_val),
+            };
+            let ctx = crate::native::NativeContext { engine: self, env };
+            // Clone the handler's name for error paths inside the native (args helpers need it).
+            // The native's own `call` will produce oracle-exact valence errors via `args.mono_named(&reg_name)`.
+            let native_ref = self.natives.borrow();
+            let native = native_ref.get(reg_name.as_str()).expect("native disappeared");
+            return native.call(&ctx, args);
+        }
         match name.as_str() {
             "+" => {
                 // Ambivalent: monadic `+ x` = identity (return x); dyadic = add.
@@ -7674,6 +7697,14 @@ impl Engine {
     /// primitive symbol (`foo ⇐ -`) is stored as a directly-callable body rather than
     /// a `⍺ - ⍵` delegation (which breaks monadic calls).
     fn is_primitive_name(name: &str) -> bool {
+        // Check native registry first — `kap-ext-*` crates register via `inventory`
+        // and are the single source of truth for `stats:mean` etc. This keeps
+        // `is_primitive_name` / `is_known_fn` derived, not hand-maintained.
+        for reg in inventory::iter::<crate::native::NativeReg> {
+            if reg.name == name {
+                return true;
+            }
+        }
         matches!(
             name,
             "⍳" | "iota" | "⍴" | "rho" | "≢" | "tally" | "⊃" | "first" | "⌽" | "⊖" | "⍉"

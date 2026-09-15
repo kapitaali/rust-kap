@@ -1,0 +1,12 @@
+[package]
+name = "kap-ext-stats"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Example Kap extension crate — stats:mean / median / stdev (kap-core NativeFn SDK demo)"
+keywords = ["kap", "apl", "array"]
+
+[dependencies]
+kap-core = { path = "../kap-core" }
+kap-derive = { path = "../kap-derive" }
+inventory = "0.3"

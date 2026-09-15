@@ -12,6 +12,12 @@ use std::io::{self, BufRead, Write};
 use kap_core::session::Session;
 use kap_core::AplError;
 
+// Ensure `kap-ext-stats` (and any other `kap-ext-*` crate) is linked so its
+// `inventory::submit!` statics are collected by `kap_core::native::NativeReg`.
+// Without a direct reference Cargo may dead-code-eliminate the whole crate.
+#[allow(unused_imports)]
+use kap_ext_stats as _;
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let session = Session::new();

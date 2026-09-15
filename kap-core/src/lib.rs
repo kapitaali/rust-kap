@@ -32,6 +32,7 @@ pub mod jvmbridge;
 pub mod csv;
 pub mod html;
 pub mod sql;
+pub mod native;
 
 /// A persistent, REPL-like Kap evaluation context. State (variables, user
 /// functions) survives across `eval` calls. See [`session::Session`].
@@ -1358,6 +1359,11 @@ pub struct Engine {
     /// single-threaded here so no `MPLock`). Keyed by the feeder symbol's
     /// display (`ns:name` or bare `name`).
     pub feeders: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, FeederEntry>>>,
+    /// Native function registry — `kap-ext-*` crates + in-tree `native/` modules.
+    /// Populated at `Engine::new()` via `inventory::iter::<native::NativeReg>`.
+    /// `eval_apply` checks this map *before* the legacy giant match, and
+    /// `is_primitive_name` / `is_known_fn` derive from it. Single source of truth.
+    pub natives: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, Box<dyn crate::native::NativeFn>>>>,
 }
 
 /// One registered feeder (Kotlin `TransformerFeeder`, feeder-objs.kt): the
@@ -1375,7 +1381,36 @@ pub struct FeederEntry {
 
 impl Engine {
     pub fn new() -> Self {
-        Self::default()
+        let engine = Self::default();
+        // Populate native registry from compile-time `inventory` — every
+        // `inventory::submit! { NativeReg { name, factory } }` in kap-core
+        // and in any linked `kap-ext-*` crate is visible after linking.
+        // This is the single source of truth for `is_primitive_name` and
+        // `is_known_fn`; the legacy hand-maintained lists in evaluator/parser
+        // now fall through to this map.
+        {
+            let mut map = engine.natives.borrow_mut();
+            for reg in inventory::iter::<crate::native::NativeReg> {
+                map.insert(reg.name.to_string(), (reg.factory)());
+            }
+            // Debug: list natives when env var set
+            if std::env::var("KAP_DEBUG_NATIVES").is_ok() {
+                let keys: Vec<_> = map.keys().cloned().collect();
+                eprintln!("KAP natives: {:?}", keys);
+            }
+        }
+        engine
+    }
+
+    /// Is `name` a registered native (including `kap-ext-*`)? Used to derive
+    /// `is_primitive_name` / `is_known_fn` instead of hand-maintained lists.
+    pub fn is_native(&self, name: &str) -> bool {
+        self.natives.borrow().contains_key(name)
+    }
+
+    /// All registered native names (for `parser.known_names()` / diagnostics).
+    pub fn native_names(&self) -> Vec<String> {
+        self.natives.borrow().keys().cloned().collect()
     }
 
     /// Prepend one or more standard-library directories (in priority order) to the

@@ -186,6 +186,13 @@ impl<'a> Parser<'a> {
             Some(ns) => format!("{}:{}", ns, name),
             None => name.to_string(),
         };
+        // Extension registry — `kap-ext-*` crates via `inventory` (compile-time
+        // collection). Single source of truth alongside `is_primitive_name`.
+        for reg in inventory::iter::<crate::native::NativeReg> {
+            if reg.name == name || reg.name == qual {
+                return true;
+            }
+        }
         self.known_functions.iter().any(|n| n == name || n == &qual)
             // P2: bare-namespace natives registered in the DEFAULT namespace
             // (engine.kt registers `sysparam` without a module qualifier).

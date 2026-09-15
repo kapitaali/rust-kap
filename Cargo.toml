@@ -4,6 +4,8 @@ members = [
     "kap-core",
     "kap-stdlib",
     "kap-cli",
+    "kap-derive",
+    "kap-ext-stats",
 ]
 
 [workspace.package]
