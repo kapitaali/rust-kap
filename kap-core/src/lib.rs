@@ -729,109 +729,201 @@ impl APLValue {
     /// Handles up to 4 dimensions with the same outer/inner mapping and double box
     /// `╔═╗║╚╝` (rank>2). Labels are not rendered. Each element is formatted via
     /// `format_conform()` (single-line for numbers, which is true for `⍳` cases).
-    /// For rank>4, falls back to debug.
+    /// For rank>4, falls back to generic N-dim stacked boxes.
     fn format_conform_nd(a: &KapArray, _is_list: bool) -> String {
         let dims = &a.dimensions;
         let rank = dims.len();
-        if rank < 3 || rank > 4 {
+        if rank < 3 {
             return format!("<{:?} array>", dims);
         }
-        let (s0, s1, s2, s3, use_indexes): (usize, usize, usize, usize, Vec<Option<usize>>) = match rank {
-            3 => (dims[0], 1, dims[1], dims[2], vec![Some(0), None, Some(1), Some(2)]),
-            4 => (dims[1], dims[0], dims[2], dims[3], vec![Some(1), Some(0), Some(2), Some(3)]),
-            _ => unreachable!(),
-        };
+        if rank == 3 || rank == 4 {
+            let (s0, s1, s2, s3, use_indexes): (usize, usize, usize, usize, Vec<Option<usize>>) = match rank {
+                3 => (dims[0], 1, dims[1], dims[2], vec![Some(0), None, Some(1), Some(2)]),
+                4 => (dims[1], dims[0], dims[2], dims[3], vec![Some(1), Some(0), Some(2), Some(3)]),
+                _ => unreachable!(),
+            };
+            let mut multipliers = vec![1; rank];
+            for i in (0..rank - 1).rev() {
+                multipliers[i] = multipliers[i + 1] * dims[i + 1];
+            }
+            let elems: Vec<String> = a.elements().iter().map(|e| e.format_conform()).collect();
+            let lookup = |a0: usize, b0: usize, c0: usize, d0: usize| -> usize {
+                let mut idx = 0usize;
+                if let Some(p) = use_indexes[0] {
+                    idx += multipliers[p] * a0;
+                }
+                if let Some(p) = use_indexes[1] {
+                    idx += multipliers[p] * b0;
+                }
+                if let Some(p) = use_indexes[2] {
+                    idx += multipliers[p] * c0;
+                }
+                if let Some(p) = use_indexes[3] {
+                    idx += multipliers[p] * d0;
+                }
+                idx
+            };
+            let ncols = s1 * s3;
+            let mut col_widths = vec![0usize; ncols];
+            for outer_y in 0..s0 {
+                for inner_y in 0..s2 {
+                    for outer_x in 0..s1 {
+                        for inner_x in 0..s3 {
+                            let idx = lookup(outer_y, outer_x, inner_y, inner_x);
+                            let w = elems[idx].chars().count();
+                            let col = outer_x * s3 + inner_x;
+                            if w > col_widths[col] {
+                                col_widths[col] = w;
+                            }
+                        }
+                    }
+                }
+            }
+            let all_cols_width: usize = col_widths.iter().sum::<usize>() + ncols.saturating_sub(1);
+            let double_boxed = rank > 2;
+            let mut content: Vec<String> = Vec::new();
+            {
+                let mut row = String::new();
+                row.push(if double_boxed { '╔' } else { '┏' });
+                for _ in 0..all_cols_width {
+                    row.push(if double_boxed { '═' } else { '━' });
+                }
+                row.push(if double_boxed { '╗' } else { '┓' });
+                content.push(row);
+            }
+            for outer_y in 0..s0 {
+                if outer_y > 0 {
+                    let mut row = String::new();
+                    row.push(if double_boxed { '║' } else { '┃' });
+                    for _ in 0..all_cols_width {
+                        row.push(' ');
+                    }
+                    row.push(if double_boxed { '║' } else { '┃' });
+                    content.push(row);
+                }
+                for inner_y in 0..s2 {
+                    let mut row = String::new();
+                    row.push(if double_boxed { '║' } else { '┃' });
+                    for outer_x in 0..s1 {
+                        if outer_x > 0 {
+                            row.push('│');
+                        }
+                        for inner_x in 0..s3 {
+                            if inner_x > 0 {
+                                row.push(' ');
+                            }
+                            let idx = lookup(outer_y, outer_x, inner_y, inner_x);
+                            let cell = &elems[idx];
+                            let col = outer_x * s3 + inner_x;
+                            let pad = col_widths[col].saturating_sub(cell.chars().count());
+                            for _ in 0..pad {
+                                row.push(' ');
+                            }
+                            row.push_str(cell);
+                        }
+                    }
+                    row.push(if double_boxed { '║' } else { '┃' });
+                    content.push(row);
+                }
+            }
+            {
+                let mut row = String::new();
+                row.push(if double_boxed { '╚' } else { '┗' });
+                for _ in 0..all_cols_width {
+                    row.push(if double_boxed { '═' } else { '━' });
+                }
+                row.push(if double_boxed { '╝' } else { '┛' });
+                content.push(row);
+            }
+            return content.join("\n");
+        }
+        // Generic rank>4: stacked 2-D slices (last 2 dims) inside a double box,
+        // blank row between outer blocks. This makes `3 3 3 3 3⍴⍳243` render
+        // instead of `<[3, 3, 3, 3, 3] array>` or throwing NotImplemented.
+        let inner_rows = dims[rank - 2];
+        let inner_cols = dims[rank - 1];
+        let outer_count: usize = dims[..rank - 2].iter().product();
         let mut multipliers = vec![1; rank];
         for i in (0..rank - 1).rev() {
             multipliers[i] = multipliers[i + 1] * dims[i + 1];
         }
         let elems: Vec<String> = a.elements().iter().map(|e| e.format_conform()).collect();
-        let lookup = |a0: usize, b0: usize, c0: usize, d0: usize| -> usize {
-            let mut idx = 0usize;
-            if let Some(p) = use_indexes[0] {
-                idx += multipliers[p] * a0;
-            }
-            if let Some(p) = use_indexes[1] {
-                idx += multipliers[p] * b0;
-            }
-            if let Some(p) = use_indexes[2] {
-                idx += multipliers[p] * c0;
-            }
-            if let Some(p) = use_indexes[3] {
-                idx += multipliers[p] * d0;
-            }
-            idx
-        };
-        let ncols = s1 * s3;
-        let mut col_widths = vec![0usize; ncols];
-        for outer_y in 0..s0 {
-            for inner_y in 0..s2 {
-                for outer_x in 0..s1 {
-                    for inner_x in 0..s3 {
-                        let idx = lookup(outer_y, outer_x, inner_y, inner_x);
-                        let w = elems[idx].chars().count();
-                        let col = outer_x * s3 + inner_x;
-                        if w > col_widths[col] {
-                            col_widths[col] = w;
-                        }
+        // col widths for inner_cols
+        let mut col_widths = vec![0usize; inner_cols];
+        for block in 0..outer_count {
+            for r in 0..inner_rows {
+                for c in 0..inner_cols {
+                    // compute flat index for this block's cell
+                    // block encodes outer dims in row-major
+                    let mut outer_rem = block;
+                    let mut idx = 0usize;
+                    for d in (0..rank - 2).rev() {
+                        let coord = outer_rem % dims[d];
+                        outer_rem /= dims[d];
+                        idx += coord * multipliers[d];
+                    }
+                    idx += r * multipliers[rank - 2] + c * multipliers[rank - 1];
+                    let w = elems[idx].chars().count();
+                    if w > col_widths[c] {
+                        col_widths[c] = w;
                     }
                 }
             }
         }
-        let all_cols_width: usize = col_widths.iter().sum::<usize>() + ncols.saturating_sub(1);
-        let double_boxed = rank > 2;
+        let all_cols_width: usize = col_widths.iter().sum::<usize>() + inner_cols.saturating_sub(1);
         let mut content: Vec<String> = Vec::new();
         {
             let mut row = String::new();
-            row.push(if double_boxed { '╔' } else { '┏' });
+            row.push('╔');
             for _ in 0..all_cols_width {
-                row.push(if double_boxed { '═' } else { '━' });
+                row.push('═');
             }
-            row.push(if double_boxed { '╗' } else { '┓' });
+            row.push('╗');
             content.push(row);
         }
-        for outer_y in 0..s0 {
-            if outer_y > 0 {
+        for block in 0..outer_count {
+            if block > 0 {
                 let mut row = String::new();
-                row.push(if double_boxed { '║' } else { '┃' });
+                row.push('║');
                 for _ in 0..all_cols_width {
                     row.push(' ');
                 }
-                row.push(if double_boxed { '║' } else { '┃' });
+                row.push('║');
                 content.push(row);
             }
-            for inner_y in 0..s2 {
+            for r in 0..inner_rows {
                 let mut row = String::new();
-                row.push(if double_boxed { '║' } else { '┃' });
-                for outer_x in 0..s1 {
-                    if outer_x > 0 {
-                        row.push('│');
+                row.push('║');
+                for c in 0..inner_cols {
+                    if c > 0 {
+                        row.push(' ');
                     }
-                    for inner_x in 0..s3 {
-                        if inner_x > 0 {
-                            row.push(' ');
-                        }
-                        let idx = lookup(outer_y, outer_x, inner_y, inner_x);
-                        let cell = &elems[idx];
-                        let col = outer_x * s3 + inner_x;
-                        let pad = col_widths[col].saturating_sub(cell.chars().count());
-                        for _ in 0..pad {
-                            row.push(' ');
-                        }
-                        row.push_str(cell);
+                    let mut outer_rem = block;
+                    let mut idx = 0usize;
+                    for d in (0..rank - 2).rev() {
+                        let coord = outer_rem % dims[d];
+                        outer_rem /= dims[d];
+                        idx += coord * multipliers[d];
                     }
+                    idx += r * multipliers[rank - 2] + c * multipliers[rank - 1];
+                    let cell = &elems[idx];
+                    let pad = col_widths[c].saturating_sub(cell.chars().count());
+                    for _ in 0..pad {
+                        row.push(' ');
+                    }
+                    row.push_str(cell);
                 }
-                row.push(if double_boxed { '║' } else { '┃' });
+                row.push('║');
                 content.push(row);
             }
         }
         {
             let mut row = String::new();
-            row.push(if double_boxed { '╚' } else { '┗' });
+            row.push('╚');
             for _ in 0..all_cols_width {
-                row.push(if double_boxed { '═' } else { '━' });
+                row.push('═');
             }
-            row.push(if double_boxed { '╝' } else { '┛' });
+            row.push('╝');
             content.push(row);
         }
         content.join("\n")
