@@ -717,8 +717,124 @@ impl APLValue {
             return result;
         }
 
-        // Rank 3+: compact fallback (conformance tests rarely check these)
-        format!("<{:?} array>", dims)
+        // Rank 3+: N-dimensional box (was compact fallback). Up to 4D like Kotlin
+        // `encloseNDim` (rendertext.kt) — double box `╔═╗║╚╝` for rank>2, blank
+        // separator row between outer blocks. Each cell is `format_conform()` of the
+        // element (single-line for numbers). This makes `3 3 3⍴⍳27` match the
+        // oracle's `╔════════╗` … `╚════════╝` instead of `<[3, 3, 3] array>`.
+        return Self::format_conform_nd(a, is_list);
+    }
+
+    /// N-dimensional box for rank >=3 — port of Kotlin `encloseNDim` (rendertext.kt).
+    /// Handles up to 4 dimensions with the same outer/inner mapping and double box
+    /// `╔═╗║╚╝` (rank>2). Labels are not rendered. Each element is formatted via
+    /// `format_conform()` (single-line for numbers, which is true for `⍳` cases).
+    /// For rank>4, falls back to debug.
+    fn format_conform_nd(a: &KapArray, _is_list: bool) -> String {
+        let dims = &a.dimensions;
+        let rank = dims.len();
+        if rank < 3 || rank > 4 {
+            return format!("<{:?} array>", dims);
+        }
+        let (s0, s1, s2, s3, use_indexes): (usize, usize, usize, usize, Vec<Option<usize>>) = match rank {
+            3 => (dims[0], 1, dims[1], dims[2], vec![Some(0), None, Some(1), Some(2)]),
+            4 => (dims[1], dims[0], dims[2], dims[3], vec![Some(1), Some(0), Some(2), Some(3)]),
+            _ => unreachable!(),
+        };
+        let mut multipliers = vec![1; rank];
+        for i in (0..rank - 1).rev() {
+            multipliers[i] = multipliers[i + 1] * dims[i + 1];
+        }
+        let elems: Vec<String> = a.elements().iter().map(|e| e.format_conform()).collect();
+        let lookup = |a0: usize, b0: usize, c0: usize, d0: usize| -> usize {
+            let mut idx = 0usize;
+            if let Some(p) = use_indexes[0] {
+                idx += multipliers[p] * a0;
+            }
+            if let Some(p) = use_indexes[1] {
+                idx += multipliers[p] * b0;
+            }
+            if let Some(p) = use_indexes[2] {
+                idx += multipliers[p] * c0;
+            }
+            if let Some(p) = use_indexes[3] {
+                idx += multipliers[p] * d0;
+            }
+            idx
+        };
+        let ncols = s1 * s3;
+        let mut col_widths = vec![0usize; ncols];
+        for outer_y in 0..s0 {
+            for inner_y in 0..s2 {
+                for outer_x in 0..s1 {
+                    for inner_x in 0..s3 {
+                        let idx = lookup(outer_y, outer_x, inner_y, inner_x);
+                        let w = elems[idx].chars().count();
+                        let col = outer_x * s3 + inner_x;
+                        if w > col_widths[col] {
+                            col_widths[col] = w;
+                        }
+                    }
+                }
+            }
+        }
+        let all_cols_width: usize = col_widths.iter().sum::<usize>() + ncols.saturating_sub(1);
+        let double_boxed = rank > 2;
+        let mut content: Vec<String> = Vec::new();
+        {
+            let mut row = String::new();
+            row.push(if double_boxed { '╔' } else { '┏' });
+            for _ in 0..all_cols_width {
+                row.push(if double_boxed { '═' } else { '━' });
+            }
+            row.push(if double_boxed { '╗' } else { '┓' });
+            content.push(row);
+        }
+        for outer_y in 0..s0 {
+            if outer_y > 0 {
+                let mut row = String::new();
+                row.push(if double_boxed { '║' } else { '┃' });
+                for _ in 0..all_cols_width {
+                    row.push(' ');
+                }
+                row.push(if double_boxed { '║' } else { '┃' });
+                content.push(row);
+            }
+            for inner_y in 0..s2 {
+                let mut row = String::new();
+                row.push(if double_boxed { '║' } else { '┃' });
+                for outer_x in 0..s1 {
+                    if outer_x > 0 {
+                        row.push('│');
+                    }
+                    for inner_x in 0..s3 {
+                        if inner_x > 0 {
+                            row.push(' ');
+                        }
+                        let idx = lookup(outer_y, outer_x, inner_y, inner_x);
+                        let cell = &elems[idx];
+                        let col = outer_x * s3 + inner_x;
+                        let pad = col_widths[col].saturating_sub(cell.chars().count());
+                        for _ in 0..pad {
+                            row.push(' ');
+                        }
+                        row.push_str(cell);
+                    }
+                }
+                row.push(if double_boxed { '║' } else { '┃' });
+                content.push(row);
+            }
+        }
+        {
+            let mut row = String::new();
+            row.push(if double_boxed { '╚' } else { '┗' });
+            for _ in 0..all_cols_width {
+                row.push(if double_boxed { '═' } else { '━' });
+            }
+            row.push(if double_boxed { '╝' } else { '┛' });
+            content.push(row);
+        }
+        content.join("\n")
     }
 
     // --- Array-shape accessors ---
