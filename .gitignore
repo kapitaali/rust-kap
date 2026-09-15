@@ -16,3 +16,6 @@
 
 # Local planning doc (untracked for now)
 /20260910_RENEWED_ARCHITECTURE.md
+
+# Convenience symlink to target/debug/kap (created for RIDE manual mode)
+/kap
