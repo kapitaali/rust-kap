@@ -439,6 +439,9 @@ impl APLValue {
             APLValue::Nil => "null".to_string(),
             APLValue::Array(a) => {
                 let elems = a.elements();
+                if a.dimensions.len() >= 2 {
+                    return Self::format_conform_array(a, false);
+                }
                 // An empty array displays as `⍬` (Real Kap: `↓⍬`, `⍬ ∩ ⍳10`,
                 // `⊃⍬` all print `⍬`, and `⍬` itself is now a real empty
                 // rank-1 array rather than Null).
